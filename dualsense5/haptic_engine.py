@@ -17,42 +17,51 @@ import winsound
 
 
 def ensure_shutter_sound_file(target_path: Path):
-    """如果资产目录下不存在快门音效，则程序化合成高保真机械快门 WAV 音效"""
+    """如果资产目录下不存在快门音效，则程序化合成高保真机械快门 WAV 音效（纯标准库实现，零第三方依赖）"""
     if target_path.is_file() and target_path.stat().st_size > 500:
         return
     try:
         import wave
-        import numpy as np
+        import struct
+        import math
+        import random
 
         sr = 44100
         dur = 0.085  # 85ms
-        t = np.linspace(0, dur, int(sr * dur), endpoint=False)
+        total_samples = int(sr * dur)
+        frames = bytearray()
 
-        # 1. 前帘释放咔哒高频冲击 (t=0..0.015)
-        c1_env = np.exp(-t / 0.003)
-        click1 = np.sin(2 * np.pi * 3400 * t) * c1_env * 0.75 + np.sin(2 * np.pi * 1800 * t) * c1_env * 0.35
+        for i in range(total_samples):
+            t = i / sr
+            # 1. 前帘释放咔哒高频冲击 (t=0..0.015)
+            c1_env = math.exp(-t / 0.003)
+            click1 = (math.sin(2 * math.pi * 3400 * t) * 0.75 + math.sin(2 * math.pi * 1800 * t) * 0.35) * c1_env
 
-        # 2. 机械滑轨摩擦杂音 (t=0.008..0.035)
-        noise = np.random.uniform(-1, 1, len(t))
-        rasp_env = np.exp(-((t - 0.018) / 0.008)**2) * 0.28
-        rasp = noise * rasp_env
+            # 2. 机械滑轨摩擦杂音 (t=0.008..0.035)
+            rasp_env = math.exp(-((t - 0.018) / 0.008) ** 2) * 0.28
+            rasp = (random.random() * 2 - 1) * rasp_env
 
-        # 3. 后帘锁止撞击与机身阻尼回弹 (t=0.030..0.080)
-        t2 = np.maximum(0, t - 0.030)
-        c2_env = np.exp(-t2 / 0.006) * (t >= 0.030)
-        click2 = np.sin(2 * np.pi * 2200 * t2) * c2_env * 0.95 + np.sin(2 * np.pi * 850 * t2) * c2_env * 0.4
-        thud = np.sin(2 * np.pi * 320 * t2) * np.exp(-t2 / 0.016) * (t >= 0.030) * 0.55
+            # 3. 后帘锁止撞击与机身阻尼回弹 (t=0.030..0.080)
+            t2 = max(0.0, t - 0.030)
+            if t >= 0.030:
+                c2_env = math.exp(-t2 / 0.006)
+                click2 = (math.sin(2 * math.pi * 2200 * t2) * 0.95 + math.sin(2 * math.pi * 850 * t2) * 0.4) * c2_env
+                thud = math.sin(2 * math.pi * 320 * t2) * math.exp(-t2 / 0.016) * 0.55
+            else:
+                click2 = 0.0
+                thud = 0.0
 
-        audio = click1 + rasp + click2 + thud
-        audio = audio / np.max(np.abs(audio)) * 0.92
-        int_audio = (audio * 32767).astype(np.int16)
+            val = (click1 + rasp + click2 + thud) * 0.45
+            val = max(-1.0, min(1.0, val))
+            sample = int(val * 32767)
+            frames.extend(struct.pack('<h', sample))
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
         with wave.open(str(target_path), 'wb') as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(sr)
-            wf.writeframes(int_audio.tobytes())
+            wf.writeframes(frames)
     except Exception:
         pass
 
