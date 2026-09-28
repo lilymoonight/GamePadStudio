@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gamepadstudio"
+version = "2.0.0"
+description = "Next-generation Game Controller Suite with 300Hz Virtual KBM, Physical Dynamics, Shutter Haptics, and HidHide Hardware Cloaking."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GPL-3.0-or-later"}
+authors = [
+    {name = "lilymoonight"}
+]
+keywords = [
+    "gamepad", "controller", "dualsense", "xbox", "switch",
+    "virtual-kbm", "remapping", "haptics", "hidhide", "replay-recorder"
+]
+dependencies = [
+    "pygame>=2.6.0",
+    "mss>=10.0.0",
+    "PySide6>=6.6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]
+
+[project.scripts]
+gamepadstudio = "dualsense5.entry:run"
+dualsense5 = "dualsense5.entry:run"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dualsense5*"]
+
+[tool.setuptools.package-data]
+dualsense5 = ["assets/*", "assets/controllers/*"]
