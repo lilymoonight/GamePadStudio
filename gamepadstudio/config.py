@@ -17,7 +17,7 @@ def _get_pictures_dir() -> str:
 
 
 def default_save_dir() -> str:
-    return os.path.join(_get_pictures_dir(), "DualSense5")
+    return os.path.join(_get_pictures_dir(), "GamePadStudio")
 
 
 @dataclass

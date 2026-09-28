@@ -5,12 +5,12 @@ from PySide6.QtWidgets import QApplication, QDialog
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtTest import QTest
-from dualsense5.studio import Studio, STYLE, MappingDialog
+from gamepadstudio.studio import Studio, STYLE, MappingDialog
 
 
 def test_remote_gui_signal_connection_and_close(tmp_path,monkeypatch):
     app=QApplication.instance() or QApplication([])
-    monkeypatch.setattr('dualsense5.studio.request',lambda *a,**kw:{'ok':True})
+    monkeypatch.setattr('gamepadstudio.studio.request',lambda *a,**kw:{'ok':True})
     window=Studio(tmp_path);window.show();app.processEvents()
     assert window.remote and window.client is not None
     window.close();app.processEvents();assert window.closed
@@ -22,7 +22,7 @@ def test_gui_pages_capture_and_persistent_mapping(tmp_path,monkeypatch):
         def scan(self):pass
         def read(self):return None
         def close(self):pass
-    monkeypatch.setattr('dualsense5.studio.Device',Disconnected)
+    monkeypatch.setattr('gamepadstudio.studio.Device',Disconnected)
     app=QApplication.instance() or QApplication([])
     if Path('C:/Windows/Fonts/msyh.ttc').is_file():
         QFontDatabase.addApplicationFont('C:/Windows/Fonts/msyh.ttc')
@@ -52,7 +52,7 @@ def test_gallery_filters_favorites_and_device_specific_capabilities(tmp_path,mon
         def scan(self):pass
         def read(self):return self.state
         def close(self):pass
-    monkeypatch.setattr('dualsense5.studio.Device',XboxStub)
+    monkeypatch.setattr('gamepadstudio.studio.Device',XboxStub)
     app=QApplication.instance() or QApplication([]);window=Studio(tmp_path,standalone=True)
     try:
         window.enabled=False;window.show();window.poll();app.processEvents()
@@ -70,7 +70,7 @@ def test_gallery_filters_favorites_and_device_specific_capabilities(tmp_path,mon
         gallery.search.setText('Xbox');assert gallery.grid.count()==1
         gallery.search.clear();gallery.filter.setCurrentIndex(1);assert gallery.grid.count()==1
         gallery.toggle_favorite('switch');gallery.filter.setCurrentIndex(2);assert gallery.grid.count()==1
-        from dualsense5.studio_core import ConfigStore
+        from gamepadstudio.studio_core import ConfigStore
         assert ConfigStore(tmp_path).data['controller_favorites']==['switch']
         window.navigate(5);window.resize(960,640);QTest.qWait(80);assert gallery.columns==2
         assert gallery.grid.itemAt(0).widget().isVisible()
@@ -78,7 +78,7 @@ def test_gallery_filters_favorites_and_device_specific_capabilities(tmp_path,mon
 
 
 def test_xbox_photo_clicks_match_official_face_and_stick_positions():
-    from dualsense5.controller_photo import ControllerInput
+    from gamepadstudio.controller_photo import ControllerInput
     from PySide6.QtCore import QPoint
     app=QApplication.instance() or QApplication([]);photo=ControllerInput();photo.set_family('xbox');photo.available=set(range(16));clicked=[]
     photo.button_clicked.connect(clicked.append)
@@ -99,7 +99,7 @@ def test_xbox_photo_clicks_match_official_face_and_stick_positions():
 
 
 def test_icon_navigation_pause_and_child_window_close(tmp_path):
-    from dualsense5.glass import IconButton
+    from gamepadstudio.glass import IconButton
     app=QApplication.instance() or QApplication([]);window=Studio(tmp_path,standalone=True)
     try:
         window.timer.stop();window.show();QTest.qWait(30)
@@ -128,8 +128,8 @@ def test_icon_navigation_pause_and_child_window_close(tmp_path):
 
 
 def test_controller_card_favorite_does_not_open_and_keyboard_opens():
-    from dualsense5.controller_gallery import ControllerGallery
-    from dualsense5.glass import IconButton
+    from gamepadstudio.controller_gallery import ControllerGallery
+    from gamepadstudio.glass import IconButton
     app=QApplication.instance() or QApplication([]);opened=[];saved=[]
     gallery=ControllerGallery(lambda i:None,saved.append,lambda:None,lambda:opened.append('manage'))
     gallery.set_devices([dict(instance_id=7,name='Fixture DualSense',family='dualsense',supported=True)],7)
@@ -146,13 +146,13 @@ def test_controller_card_favorite_does_not_open_and_keyboard_opens():
 
 def test_delete_buttons_interactive_and_responsive(tmp_path, monkeypatch):
     from PySide6.QtWidgets import QMessageBox
-    from dualsense5.screenshot_service import take_screenshot
+    from gamepadstudio.screenshot_service import take_screenshot
     class Disconnected:
         available = []
         def scan(self): pass
         def read(self): return None
         def close(self): pass
-    monkeypatch.setattr('dualsense5.studio.Device', Disconnected)
+    monkeypatch.setattr('gamepadstudio.studio.Device', Disconnected)
     app = QApplication.instance() or QApplication([])
     window = Studio(tmp_path, standalone=True)
     window.enabled = False

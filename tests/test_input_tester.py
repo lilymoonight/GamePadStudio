@@ -7,11 +7,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
 
-from dualsense5.input_tester import InputTester, StickHistory
-from dualsense5.controller_schematic import ControllerSchematic
-from dualsense5.studio import Studio, STYLE
-from dualsense5.agent import Agent
-from dualsense5.studio_core import ConfigStore
+from gamepadstudio.input_tester import InputTester, StickHistory
+from gamepadstudio.controller_schematic import ControllerSchematic
+from gamepadstudio.studio import Studio, STYLE
+from gamepadstudio.agent import Agent
+from gamepadstudio.studio_core import ConfigStore
 
 
 def sample(family='switch', instance=1):
@@ -127,7 +127,7 @@ def test_small_window_instruments_paint_and_fit_with_sweep(tmp_path,monkeypatch)
         def scan(self): pass
         def read(self): return {**sample('dualsense'), 'available_buttons':list(range(21)), 'touch':[.25,.75]}
         def close(self): pass
-    monkeypatch.setattr('dualsense5.studio.Device',DeviceFixture)
+    monkeypatch.setattr('gamepadstudio.studio.Device',DeviceFixture)
     app = QApplication.instance() or QApplication([]); app.setStyleSheet(STYLE)
     window = Studio(tmp_path,standalone=True)
     try:
@@ -158,7 +158,7 @@ def test_test_protection_leases_agent_and_preserves_manual_pause(tmp_path,monkey
     app = QApplication.instance() or QApplication([])
     device=DeviceFixture();agent=Agent(tmp_path/'agent',device,Actions())
     captures=[];agent.capture=lambda:captures.append(True)
-    monkeypatch.setattr('dualsense5.studio.request',lambda *args,**kwargs:{'ok':True})
+    monkeypatch.setattr('gamepadstudio.studio.request',lambda *args,**kwargs:{'ok':True})
     window=Studio(tmp_path/'ui')
     try:
         window.client.timer.stop();window.client.socket.abort()
@@ -192,7 +192,7 @@ def test_disconnected_pages_follow_saved_controller_family(tmp_path,monkeypatch)
         def scan(self): pass
         def read(self): return None
         def close(self): pass
-    monkeypatch.setattr('dualsense5.studio.Device',OfflineDevice)
+    monkeypatch.setattr('gamepadstudio.studio.Device',OfflineDevice)
     store=ConfigStore(tmp_path)
     store.data['profiles']['Switch Pro · 默认']={'15':{'short':{'action':'capture'},'long':{'action':'gallery'}}}
     store.data['profile_families']['Switch Pro · 默认']='switch'

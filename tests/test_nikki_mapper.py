@@ -1,6 +1,6 @@
 from pathlib import Path
-from dualsense5.studio_core import ConfigStore
-from dualsense5.kbm_mapper import (
+from gamepadstudio.studio_core import ConfigStore
+from gamepadstudio.kbm_mapper import (
     NIKKI_PROFILE_NAME,
     NikkiKbmEngine,
     CHORD_MAPPINGS,

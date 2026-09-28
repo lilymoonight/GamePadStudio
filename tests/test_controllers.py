@@ -1,9 +1,9 @@
 import ctypes as C
 import pytest
-from dualsense5.controller_catalog import family_for,button_labels,controller_defaults,desktop_defaults,axis_labels
-from dualsense5.studio_core import ConfigStore
-from dualsense5.kbm_mapper import NIKKI_PROFILE_NAME
-from dualsense5.device import Device
+from gamepadstudio.controller_catalog import family_for,button_labels,controller_defaults,desktop_defaults,axis_labels
+from gamepadstudio.studio_core import ConfigStore
+from gamepadstudio.kbm_mapper import NIKKI_PROFILE_NAME
+from gamepadstudio.device import Device
 
 
 @pytest.mark.parametrize('kind,family',[(1,'xbox'),(2,'xbox'),(4,'dualshock4'),(5,'switch'),(7,'dualsense'),(0,'generic')])

@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from dualsense5.hidhide import (
+from gamepadstudio.hidhide import (
     HidHideClient,
     encode_multi_sz,
     decode_multi_sz,
@@ -93,7 +93,7 @@ def test_hidhide_client_mock_interactions():
         assert sys.executable in client.get_whitelist()
 
         # Test cloak controller
-        with patch('dualsense5.hidhide.find_hid_instances', return_value=["HID\\VID_054C&PID_0CE6\\INST_1"]):
+        with patch('gamepadstudio.hidhide.find_hid_instances', return_value=["HID\\VID_054C&PID_0CE6\\INST_1"]):
             ok, msg = client.cloak_controller(0x054C, 0x0CE6)
             assert ok is True
             assert "HID\\VID_054C&PID_0CE6\\INST_1" in client.get_blacklist()
@@ -111,9 +111,9 @@ def test_hidhide_client_mock_interactions():
 
 def test_virtual_kbm_ui_cloaking_integration(tmp_path):
     from PySide6.QtWidgets import QApplication
-    from dualsense5.virtual_kbm_ui import VirtualKbmPage
-    from dualsense5.virtual_kbm import VirtualKbmEngine
-    from dualsense5.studio_core import ConfigStore
+    from gamepadstudio.virtual_kbm_ui import VirtualKbmPage
+    from gamepadstudio.virtual_kbm import VirtualKbmEngine
+    from gamepadstudio.studio_core import ConfigStore
     from tests.test_virtual_kbm import MockActions
 
     app = QApplication.instance() or QApplication([])

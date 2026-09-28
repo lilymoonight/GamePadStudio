@@ -1,7 +1,7 @@
 import os
 os.environ['QT_QPA_PLATFORM']='offscreen'
 from PySide6.QtWidgets import QApplication
-from dualsense5.agent import Agent
+from gamepadstudio.agent import Agent
 
 
 class DeviceStub:
@@ -70,7 +70,7 @@ def test_controller_switch_releases_old_keys_and_ignores_new_held_buttons(tmp_pa
 def test_xbox_without_share_does_not_run_ps_create_or_home_actions(tmp_path,monkeypatch):
     app=QApplication.instance() or QApplication([]);device=DeviceStub();captures=[];launches=[]
     device.state.update(instance_id=1,family='xbox',profile_key='xbox:one',available_buttons=list(range(15)))
-    monkeypatch.setattr('dualsense5.agent.spawn',lambda *args:launches.append(args))
+    monkeypatch.setattr('gamepadstudio.agent.spawn',lambda *args:launches.append(args))
     agent=Agent(tmp_path,device,ActionsStub());agent.capture=lambda:captures.append(True)
     try:
         agent.poll()

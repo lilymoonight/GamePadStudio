@@ -28,12 +28,11 @@ dev = [
 ]
 
 [project.scripts]
-gamepadstudio = "dualsense5.entry:run"
-dualsense5 = "dualsense5.entry:run"
+gamepadstudio = "gamepadstudio.entry:run"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["dualsense5*"]
+include = ["gamepadstudio*"]
 
 [tool.setuptools.package-data]
-dualsense5 = ["assets/*", "assets/controllers/*"]
+gamepadstudio = ["assets/*", "assets/controllers/*"]

@@ -1,5 +1,5 @@
 from pathlib import Path
-from dualsense5 import screenshot_service as service
+from gamepadstudio import screenshot_service as service
 
 
 class FakeMSS:

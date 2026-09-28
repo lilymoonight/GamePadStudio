@@ -1,7 +1,7 @@
 from pathlib import Path
 import pytest
-from dualsense5.haptic_engine import HapticEngine, ensure_shutter_sound_file
-from dualsense5.studio_core import ConfigStore
+from gamepadstudio.haptic_engine import HapticEngine, ensure_shutter_sound_file
+from gamepadstudio.studio_core import ConfigStore
 
 
 class DummyDevice:

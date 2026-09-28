@@ -1,9 +1,9 @@
 import json
 from pathlib import Path
 import pytest
-from dualsense5.studio_core import GestureEngine, ConfigStore, radial_deadzone
-from dualsense5.actions import parse_keys, launch_command, WindowsActions
-from dualsense5.screenshot_service import list_captures, set_favorite
+from gamepadstudio.studio_core import GestureEngine, ConfigStore, radial_deadzone
+from gamepadstudio.actions import parse_keys, launch_command, WindowsActions
+from gamepadstudio.screenshot_service import list_captures, set_favorite
 
 
 def test_short_release_and_long_are_mutually_exclusive():
@@ -104,6 +104,6 @@ def test_hold_key_shared_by_two_buttons_uses_reference_counts():
 
 
 def test_launch_is_argument_vector_without_shell(monkeypatch):
-    received=[]; monkeypatch.setattr('dualsense5.actions.subprocess.Popen',lambda *a,**k:received.append((a,k)))
+    received=[]; monkeypatch.setattr('gamepadstudio.actions.subprocess.Popen',lambda *a,**k:received.append((a,k)))
     launch_command('C:/Apps/app.exe','"hello world" --flag')
     assert received==[((['C:/Apps/app.exe','hello world','--flag'],),{'shell':False})]

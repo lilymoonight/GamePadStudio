@@ -10,7 +10,7 @@ from .screenshot_service import take_screenshot
 
 
 def run() -> None:
-    parser = argparse.ArgumentParser(description="DualSense 手柄截图")
+    parser = argparse.ArgumentParser(description="GamePad Studio 手柄工作台")
     parser.add_argument("--config", type=str, default=None, help="配置文件路径(.ini)")
     # 将 CLI 默认设为 None，以便与配置文件/环境变量合并
     parser.add_argument("--button", type=int, default=None, help="截图按钮编号")
@@ -25,7 +25,7 @@ def run() -> None:
 
     def _write_default_ini(path: Path) -> None:
         cfg = configparser.ConfigParser()
-        cfg["dualsense5"] = {
+        cfg["gamepadstudio"] = {
             "button": "4",
             "cooldown": "0.1",
             "save_dir": "",
@@ -36,7 +36,7 @@ def run() -> None:
             cfg.write(f)
 
     if args.config is None:
-        default_cfg = exe_dir / "DualSense5.ini"
+        default_cfg = exe_dir / "GamePadStudio.ini"
         if not default_cfg.exists():
             try:
                 _write_default_ini(default_cfg)
@@ -48,15 +48,15 @@ def run() -> None:
         if args.config:
             yield Path(args.config)
         # 可执行文件所在目录（打包后）
-        for name in ("DualSense5.ini", "dualsense5.ini", "config.ini"):
+        for name in ("GamePadStudio.ini", "gamepadstudio.ini", "config.ini"):
             yield exe_dir / name
         # 用户配置目录（Windows 优先 APPDATA）
         if os.name == "nt":
             appdata = os.environ.get("APPDATA")
             if appdata:
-                yield Path(appdata) / "DualSense5" / "config.ini"
+                yield Path(appdata) / "GamePadStudio" / "config.ini"
         # 跨平台常见位置
-        yield Path.home() / ".config" / "dualsense5" / "config.ini"
+        yield Path.home() / ".config" / "gamepadstudio" / "config.ini"
 
     cfg = configparser.ConfigParser()
     cfg_path = None

@@ -1,12 +1,12 @@
 from pathlib import Path
 import pytest
-from dualsense5.replay_service import (
+from gamepadstudio.replay_service import (
     calculate_estimated_ram_gb,
     detect_hardware_encoder,
     ReplayBufferEngine,
     get_ffmpeg_path
 )
-from dualsense5.studio_core import ConfigStore
+from gamepadstudio.studio_core import ConfigStore
 
 
 def test_calculate_estimated_ram_gb():

@@ -1,5 +1,5 @@
 import time
-from dualsense5.virtual_kbm import (
+from gamepadstudio.virtual_kbm import (
     VirtualKbmEngine,
     NIKKI_PRESET_CONFIG,
     GENERAL_PRESET_CONFIG,
@@ -248,7 +248,7 @@ def test_general_preset_desktop_clicking():
 
 
 def test_trigger_label_and_inverted_mapping():
-    from dualsense5.virtual_kbm import get_trigger_label, get_inverted_mapping
+    from gamepadstudio.virtual_kbm import get_trigger_label, get_inverted_mapping
     # PS family
     assert get_trigger_label("0", "dualsense") == "×"
     assert get_trigger_label("RT", "dualsense") == "R2"
@@ -272,8 +272,8 @@ def test_trigger_label_and_inverted_mapping():
 
 def test_virtual_kbm_ui_layout_and_interactive_capture(tmp_path):
     from PySide6.QtWidgets import QApplication
-    from dualsense5.virtual_kbm_ui import VirtualKbmPage
-    from dualsense5.studio_core import ConfigStore
+    from gamepadstudio.virtual_kbm_ui import VirtualKbmPage
+    from gamepadstudio.studio_core import ConfigStore
 
     app = QApplication.instance() or QApplication([])
     mock = MockActions()
