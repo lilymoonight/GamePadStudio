@@ -57,13 +57,18 @@ def test_fixed_108_key_panel_and_valid_numpad_keys(view):
 
 def test_clicking_keyboard_or_mouse_uses_same_binding_editor(view):
     owner,page=view
+    # An empty user-created preset exercises adding outputs as well as editing
+    # existing bindings without relying on shipped preset contents.
+    owner.config['profiles']['Editor keyboard fixture'] = {}
+    owner.config['profile_modes']['Editor keyboard fixture'] = 'kbm'
+    owner.change_profile('Editor keyboard fixture')
     page.keycaps['Space'].left_clicked.emit('Space','Space')
-    assert owner.edits[-1]==(('0',),{'new':True,'output':'Space'})
+    assert owner.edits[-1]==(('0',),{'new':True,'output':'Space','profile':'Editor keyboard fixture','mode':'kbm'})
     page.keycaps['mouse:left'].left_clicked.emit('mouse:left','left')
-    assert owner.edits[-1]==(('0',),{'new':True,'output':'mouse:left'})
+    assert owner.edits[-1]==(('0',),{'new':True,'output':'mouse:left','profile':'Editor keyboard fixture','mode':'kbm'})
     owner.mapping_change({'op':'binding','trigger':'0+9','mapping':{'short':{'action':'hold','value':'Ctrl+Space'}}})
     page.edit_output('Space','Space')
-    assert owner.edits[-1]==(('0+9',),{})
+    assert owner.edits[-1]==(('0+9',),{'profile':'Editor keyboard fixture','mode':'kbm'})
     assert page.keycaps['Ctrl'].badges and page.keycaps['Space'].badges
 
 
@@ -125,9 +130,11 @@ def test_long_hold_can_be_edited_and_all_selectors_share_profile(view):
     try:
         assert dialog.value()['long']=={'action':'hold','value':'Shift+W'}
         assert dialog.value()['short']=={'action':'hold','value':'Ctrl+S'}
-        page.scheme_combo.setCurrentText('桌面导航')
-        assert owner.config['active_profile']=='桌面导航'
-        assert owner.store.mappings['0']['short']['value']=='Enter'
+        from gamepadstudio.kbm_mapper import NIKKI_PROFILE_NAME
+        page.scheme_combo.setCurrentText(NIKKI_PROFILE_NAME)
+        page.activate_current_scheme()
+        assert owner.config['active_profile']==NIKKI_PROFILE_NAME
+        assert owner.store.mappings['0']['short']['value']=='Space'
     finally:dialog.close()
 
 

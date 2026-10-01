@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 import time
 
-from PySide6.QtCore import Qt, QSize, QTimer, QThread, Signal, QUrl, QLockFile, QPointF, QRectF
+from PySide6.QtCore import Qt, QSize, QTimer, QThread, Signal, QUrl, QLockFile, QPointF, QRectF, QEvent
 from PySide6.QtGui import QColor, QFont, QIcon, QPixmap, QPainter, QKeySequence, QDesktopServices, QAction, QPen, QPainterPath
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QFrame, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QGridLayout, QStackedWidget, QComboBox, QScrollArea, QLineEdit,
@@ -21,7 +21,8 @@ from .studio_core import ConfigStore, GestureEngine, BUTTONS, ACTION_NAMES
 from .device import Device
 from .actions import WindowsActions, parse_keys, launch_command
 from .mapping_engine import MappingRuntime, effective_mappings, binding_label
-from .mapping_ui import BindingDialog, BindingList
+from .mapping_ui import BindingDialog
+from .mapping_deck import MappingDeck
 from .virtual_kbm_ui import VirtualKbmPage
 from .controller_photo import ControllerPhoto, ControllerInput, PHOTOS, photo_health
 from .input_tester import InputTester
@@ -96,7 +97,7 @@ class Studio(GlassWindow):
         self.store=ConfigStore(root); self.config=self.store.data
         self.lang_pref = lang
         init_language(lang or self.config.get('language', 'auto'))
-        self.setWindowTitle('GamePad Studio'); self.setWindowIcon(app_icon()); self.resize(1200,780); self.setMinimumSize(960,640)
+        self.setWindowTitle('GamePad Studio'); self.setWindowIcon(app_icon()); self.resize(1440,900); self.setMinimumSize(960,640)
         self.client=AgentClient(root,self) if self.remote else None
         self.device=RemoteDevice(self.client) if self.remote else Device()
         if not self.remote:self.device.preferred_key=self.config.get('preferred_controller','')
@@ -114,51 +115,84 @@ class Studio(GlassWindow):
         main = GlassCanvas()
         self.setCentralWidget(main)
         outer = QHBoxLayout(main)
-        outer.setContentsMargins(16, 16, 22, 14)
+        outer.setContentsMargins(16, 16, 24, 14)
         outer.setSpacing(20)
 
         rail = QWidget()
-        rail.setFixedWidth(58)
+        rail.setObjectName('navRail')
+        self.rail = rail
+        rail.setFixedWidth(212)
         side = QVBoxLayout(rail)
-        side.setContentsMargins(0, 0, 0, 4)
-        side.setSpacing(10)
+        side.setContentsMargins(10, 12, 10, 12)
+        side.setSpacing(6)
 
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(10)
         brand = QPushButton()
         brand.setObjectName('brand')
         brand.setFixedSize(44, 44)
         brand.setIcon(app_icon())
-        brand.setIconSize(QSize(42, 42))
+        brand.setIconSize(QSize(40, 40))
         brand.setCursor(Qt.PointingHandCursor)
         brand.setToolTip(tr('GamePad Studio · 手柄控制中心 (返回概览)'))
+        brand.setAccessibleName('GamePad Studio')
         brand.clicked.connect(lambda: self.navigate(0))
-        side.addWidget(brand, 0, Qt.AlignHCenter)
+        brand_row.addWidget(brand)
+        self.brand_copy = QWidget()
+        brand_copy = QVBoxLayout(self.brand_copy)
+        brand_copy.setContentsMargins(0, 0, 0, 0)
+        brand_copy.setSpacing(2)
+        brand_copy.addWidget(label('GamePad', 'brandTitle'))
+        brand_copy.addWidget(label('STUDIO', 'brandCaption'))
+        brand_row.addWidget(self.brand_copy, 1)
+        side.addLayout(brand_row)
+        side.addSpacing(24)
+        self.nav_sections = []
+        self.nav_titles = {}
+        for group, items in [('工作空间', [(0, '设备概览'), (1, '按键配置'), (6, '虚拟键鼠')]),
+                             ('设备与内容', [(5, '控制器库'), (2, '截图图库'), (3, '硬件遥测')])]:
+            heading = label(tr(group), 'navSection')
+            self.nav_sections.append(heading)
+            side.addWidget(heading)
+            for i, title in items:
+                b = QPushButton(tr(title))
+                b.setObjectName('sidebarNav')
+                b.setIcon(glyph({5: 'grid', 0: 'controller', 1: 'mapping', 6: 'keyboard', 2: 'photos', 3: 'wave'}[i]))
+                b.setIconSize(QSize(20, 20))
+                b.setCursor(Qt.PointingHandCursor)
+                b.setFixedHeight(44)
+                b.setCheckable(True)
+                b.setAccessibleName(tr(title))
+                b.setToolTip(tr(title))
+                b.clicked.connect(lambda checked=False, j=i: self.navigate(j))
+                side.addWidget(b)
+                self.nav[i] = b
+                self.nav_titles[i] = title
+            side.addSpacing(18)
 
-        dock = QWidget()
-        dock_layout = QVBoxLayout(dock)
-        dock_layout.setContentsMargins(0, 0, 0, 0)
-        dock_layout.setSpacing(8)
-
-        for i, title in [(5, tr('控制器库')), (0, tr('设备概览')), (1, tr('按键配置')), (6, tr('虚拟键鼠')), (2, tr('截图图库')), (3, tr('硬件遥测'))]:
-            b = IconButton({5: 'grid', 0: 'controller', 1: 'mapping', 6: 'keyboard', 2: 'photos', 3: 'wave'}[i],
-                           title, lambda checked=False, j=i: self.navigate(j), 44)
-            b.setObjectName('nav')
-            b.setIconSize(QSize(22, 22))
-            b.setCheckable(True)
-            dock_layout.addWidget(b, 0, Qt.AlignHCenter)
-            self.nav[i] = b
-
-        side.addWidget(dock)
         side.addStretch()
 
-        settings = IconButton('settings', tr('系统设置'), lambda: self.navigate(4), 44)
-        settings.setObjectName('nav')
-        settings.setCheckable(True)
-        side.addWidget(settings, 0, Qt.AlignHCenter)
-        self.nav[4] = settings
+        rail_sep = QFrame()
+        rail_sep.setFixedHeight(1)
+        rail_sep.setStyleSheet(f"background: {TOKENS['border']};")
+        side.addWidget(rail_sep)
+        side.addSpacing(10)
 
-        help_button = IconButton('help', tr('使用指南'), self.show_help, 44)
-        help_button.setObjectName('nav')
-        side.addWidget(help_button, 0, Qt.AlignHCenter)
+        for i, symbol, title, callback in [(4, 'settings', '系统设置', lambda: self.navigate(4)),
+                                            (-1, 'help', '使用指南', self.show_help)]:
+            b = QPushButton(tr(title))
+            b.setObjectName('sidebarNav')
+            b.setIcon(glyph(symbol))
+            b.setIconSize(QSize(22, 22))
+            b.setFixedHeight(44)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setAccessibleName(tr(title))
+            b.setToolTip(tr(title))
+            b.setCheckable(i == 4)
+            b.clicked.connect(callback)
+            side.addWidget(b)
+            self.nav[i] = b
+            self.nav_titles[i] = title
 
         self.side_status = QLabel()
         self.side_status.hide()
@@ -166,29 +200,38 @@ class Studio(GlassWindow):
 
         body = QWidget()
         content = QVBoxLayout(body)
+        self.content_layout = content
         content.setContentsMargins(0, 0, 0, 0)
-        content.setSpacing(14)
+        content.setSpacing(18)
 
         chrome = TitleBar()
         header = QHBoxLayout(chrome)
         header.setContentsMargins(2, 0, 0, 2)
         header.setSpacing(10)
 
-        self.page_heading = label(tr('设备概览'), 'heading')
-        self.page_heading.setAttribute(Qt.WA_TransparentForMouseEvents)
-        header.addWidget(self.page_heading)
+        window_label = label('GamePad Studio', 'caption')
+        window_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        header.addWidget(window_label)
         header.addStretch()
 
         capsule = QWidget()
         capsule.setFixedHeight(38)
-        capsule.setObjectName('pill')
+        capsule.setObjectName('statusCapsule')
+        self.status_capsule = capsule
         capsule_layout = QHBoxLayout(capsule)
-        capsule_layout.setContentsMargins(10, 2, 8, 2)
+        capsule_layout.setContentsMargins(10, 2, 10, 2)
         capsule_layout.setSpacing(8)
 
         self.status_badge = Indicator()
         self.status_badge.setText(tr('未连接'))
         capsule_layout.addWidget(self.status_badge)
+
+        self.status_label = label(tr('未连接'), 'section')
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.status_label.setMinimumWidth(100)
+        self.status_label.setMaximumWidth(200)
+        self.status_label.setStyleSheet(f"font-size: 11.5px; font-weight: 700; color: {TOKENS['ink_2']}; padding-right: 4px;")
+        capsule_layout.addWidget(self.status_label)
 
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.VLine)
@@ -219,7 +262,13 @@ class Studio(GlassWindow):
             control.setIconSize(QSize(14, 14))
             header.addWidget(control)
         content.addWidget(chrome)
-        self.page_description=label('');self.page_description.hide()
+        intro = QVBoxLayout()
+        intro.setSpacing(5)
+        self.page_heading = label(tr('设备概览'), 'pageTitle')
+        self.page_description = label('', 'pageSubtitle', True)
+        intro.addWidget(self.page_heading)
+        intro.addWidget(self.page_description)
+        content.addLayout(intro)
         self.stack=QStackedWidget();content.addWidget(self.stack,1)
         self.build_home();self.build_mapping();self.build_gallery();self.build_test();self.build_settings()
         from .controller_gallery import ControllerGallery
@@ -227,8 +276,13 @@ class Studio(GlassWindow):
         self.stack.addWidget(self.controllers)
         self.virtual_kbm_page = VirtualKbmPage(self, store=self.store)
         self.stack.addWidget(self.virtual_kbm_page)
-        foot=QHBoxLayout();self.notice=label('','muted');foot.addWidget(self.notice,1);foot.addWidget(QSizeGrip(self));content.addLayout(foot)
-        self.notice_timer=QTimer(self);self.notice_timer.setSingleShot(True);self.notice_timer.timeout.connect(lambda:self.notice.setText(''))
+        foot=QHBoxLayout();self.notice=label(tr('映射运行中') if self.enabled else tr('映射已暂停'),'footerStatus');foot.addWidget(self.notice,1)
+        self.fullscreen_hint=label(tr('F11 切换全屏 · Esc 返回窗口'), 'footerStatus')
+        foot.addWidget(self.fullscreen_hint)
+        self.size_grip = QSizeGrip(self);foot.addWidget(self.size_grip);content.addLayout(foot)
+        for key, callback in [('F11', self.toggle_fullscreen), ('Escape', self.escape_workspace)]:
+            action = QAction(self); action.setShortcut(QKeySequence(key));action.triggered.connect(callback);self.addAction(action)
+        self.notice_timer=QTimer(self);self.notice_timer.setSingleShot(True);self.notice_timer.timeout.connect(lambda:self.notice.setText(tr('映射运行中') if self.enabled else tr('映射已暂停')))
         outer.addWidget(body,1)
         self.tray=QSystemTrayIcon(app_icon(),self); self.tray.setToolTip('GamePad Studio')
         self.navigate(5); self.refresh_gallery(); self.refresh_mappings()
@@ -236,6 +290,7 @@ class Studio(GlassWindow):
         self.scan_timer=QTimer(self); self.scan_timer.timeout.connect(self.scan); self.scan_timer.start(1000)
         self.gallery_timer=QTimer(self); self.gallery_timer.timeout.connect(self.refresh_gallery); self.gallery_timer.start(5000)
         self.scan()
+        self.reflow_workspace()
         if self.store.warning: self.notify(self.store.warning)
 
     def build_home(self):
@@ -264,8 +319,6 @@ class Studio(GlassWindow):
         top_deck.addLayout(title_box)
         top_deck.addStretch()
 
-        top_deck.addWidget(SpeakerGrille(7, 5, 2.0, 6.5))
-
         # Inline status readout (no nested pill box)
         pwr_layout = QHBoxLayout()
         pwr_layout.setContentsMargins(6, 4, 6, 4)
@@ -278,22 +331,16 @@ class Studio(GlassWindow):
         top_deck.addLayout(pwr_layout)
         h.addLayout(top_deck)
 
-        # Mid rack: CAD Blueprint & Telemetry Matrix
-        mid_rack = QHBoxLayout()
-        mid_rack.setSpacing(16)
-
         self.art = ControllerPhoto()
-        self.art.setMinimumSize(340, 220)
-        mid_rack.addWidget(self.art, 3)
+        self.art.setMinimumSize(280, 220)
+        h.addWidget(self.art, 1)
 
         self.matrix = DotMatrixDisplay("FIELD TELEMETRY // HW-01", [
-            ("LINK", "OFFLINE"), ("POWER", "STANDBY"), ("POLL", "1000 HZ"), ("STATUS", "WAITING")
+            ("LINK", "OFFLINE"), ("POWER", "--"), ("INPUTS", "--"), ("STATUS", "WAITING")
         ], color=TOKENS['green'])
-        self.matrix.setFixedWidth(200)
-        mid_rack.addWidget(self.matrix, 1)
-
-        h.addLayout(mid_rack, 1)
-        self.home_input_feedback = label('等待输入', 'muted', True)
+        self.home_connection_hint = label(tr('连接手柄后，即可查看状态并配置按键。'), 'caption', True)
+        h.addWidget(self.home_connection_hint)
+        self.home_input_feedback = label(tr('等待输入'), 'muted', True)
         h.addWidget(self.home_input_feedback)
 
         self.photo_caption = label(PHOTOS['dualsense']['caption'], 'muted')
@@ -302,14 +349,14 @@ class Studio(GlassWindow):
 
         # 2. Right: Single Unified Operations Rack
         right_panel = AppleGroup()
-        right_panel.setMinimumWidth(320)
-        right_panel.setMaximumWidth(390)
+        right_panel.setMinimumWidth(300)
+        right_panel.setMaximumWidth(400)
 
         # Unified monochrome badge icon color (Dieter Rams & Teenage Engineering hardware tone)
         BADGE_COLOR = (TOKENS['ink_2'], TOKENS['ink_2'])
 
         # Section 1: Tuning & Profiles
-        hdr1 = QLabel('  01 // CONTROL & PROFILES')
+        hdr1 = QLabel(tr('配置与反馈'))
         hdr1.setObjectName('eyebrow')
         hdr1.setStyleSheet(f"color: {TOKENS['ink_3']}; font-size: 10px; font-weight: 700; letter-spacing: 0.8px; padding: 10px 16px 4px 16px;")
         right_panel.vbox.addWidget(hdr1)
@@ -318,48 +365,67 @@ class Studio(GlassWindow):
         self.profile_combo.addItems(self.config['profiles'])
         self.profile_combo.setCurrentText(self.config['active_profile'])
         self.profile_combo.currentTextChanged.connect(self.change_profile)
-        self.profile_combo.setFixedSize(112, 28)
+        self.profile_combo.setFixedWidth(148)
+        self.profile_combo.setMinimumHeight(36)
         self.profile_combo.setMaxVisibleItems(10)
         row_profile = AppleRow('controller', BADGE_COLOR, tr('配置预设'), '', self.profile_combo)
         row_profile.setToolTip(tr('按键映射方案与预设配置切换'))
         right_panel.add_row(row_profile)
 
+        mode_box = QWidget()
+        mb_l = QHBoxLayout(mode_box)
+        mb_l.setContentsMargins(14, 2, 14, 4)
+        self.mode_badge = QLabel(tr('🎮  手柄原生宏模式'))
+        self.mode_badge.setStyleSheet(f"background: rgba(255, 87, 34, 0.12); color: {TOKENS['accent']}; border: 1px solid rgba(255, 87, 34, 0.3); border-radius: 6px; padding: 4px 8px; font-weight: 700; font-size: 10.5px;")
+        mb_l.addWidget(self.mode_badge, 1)
+        right_panel.vbox.addWidget(mode_box)
+
         self.rumble_button = button(tr('脉冲测试'), self.rumble, icon='wave', pill=True)
-        self.rumble_button.setFixedSize(112, 28)
+        self.rumble_button.setFixedWidth(112)
+        self.rumble_button.setMinimumHeight(36)
         row_rumble = AppleRow('wave', BADGE_COLOR, tr('触觉反馈'), '', self.rumble_button)
         row_rumble.setToolTip(tr('双马达触觉脉冲与响应测试'))
         right_panel.add_row(row_rumble)
 
-        nav_mapping_btn = button(tr('编辑按键 ›'), lambda: self.navigate(1), pill=True)
-        nav_mapping_btn.setFixedSize(112, 28)
-        row_map = AppleRow('mapping', BADGE_COLOR, tr('按键映射'), '', nav_mapping_btn)
+        self.nav_mapping_btn = button(tr('编辑按键 ›'), self._on_nav_mapping_clicked, pill=True)
+        self.nav_mapping_btn.setFixedWidth(112)
+        self.nav_mapping_btn.setMinimumHeight(36)
+        row_map = AppleRow('mapping', BADGE_COLOR, tr('按键映射'), '', self.nav_mapping_btn)
         row_map.setToolTip(tr('自定义按键键位与长按/短按宏映射'))
         right_panel.add_row(row_map)
 
         # Section 2: Shortcuts & Dispatch
-        hdr2 = QLabel('  02 // SHORTCUT DISPATCH')
+        hdr2 = QLabel(tr('快捷操作'))
         hdr2.setObjectName('eyebrow')
         hdr2.setStyleSheet(f"color: {TOKENS['ink_3']}; font-size: 10px; font-weight: 700; letter-spacing: 0.8px; padding: 14px 16px 4px 16px;")
         right_panel.vbox.addWidget(hdr2)
 
         self.capture_action_btn = button(tr('查看图库 ›'), lambda: self.navigate(2), pill=True)
-        self.capture_action_btn.setFixedSize(112, 28)
+        self.capture_action_btn.setFixedWidth(112)
+        self.capture_action_btn.setMinimumHeight(36)
         self.row_capture = AppleRow('camera', BADGE_COLOR, tr('截图'), '', self.capture_action_btn)
         self.capture_heading = self.row_capture.title_label
         self.create_hint = QLabel()
         right_panel.add_row(self.row_capture)
 
         self.guide_action_btn = button(tr('系统菜单 ›'), lambda: self.navigate(1), pill=True)
-        self.guide_action_btn.setFixedSize(112, 28)
+        self.guide_action_btn.setFixedWidth(112)
+        self.guide_action_btn.setMinimumHeight(36)
         self.row_guide = AppleRow('controller', BADGE_COLOR, tr('Xbox 导航'), '', self.guide_action_btn)
         self.guide_heading = self.row_guide.title_label
         self.guide_hint = QLabel()
         right_panel.add_row(self.row_guide)
 
         self.touch_action_btn = button(tr('手势映射 ›'), lambda: self.navigate(1), pill=True)
-        self.touch_action_btn.setFixedSize(112, 28)
+        self.touch_action_btn.setFixedWidth(112)
+        self.touch_action_btn.setMinimumHeight(36)
         self.row_touchpad = AppleRow('touchpad', BADGE_COLOR, tr('触摸板'), '', self.touch_action_btn)
         right_panel.add_row(self.row_touchpad)
+        right_panel.vbox.addStretch()
+        telemetry = QVBoxLayout()
+        telemetry.setContentsMargins(14, 12, 14, 12)
+        telemetry.addWidget(self.matrix)
+        right_panel.vbox.addLayout(telemetry)
 
         row.addWidget(right_panel, 3)
         layout.addLayout(row, 1)
@@ -372,8 +438,8 @@ class Studio(GlassWindow):
         heading = QHBoxLayout()
         head_v = QVBoxLayout()
         head_v.setSpacing(2)
-        head_v.addWidget(label('CAPTURES BUFFER // ' + tr('缓冲与最近保存'), 'eyebrow'))
         head_v.addWidget(label(tr('近期截图'), 'section'))
+        head_v.addWidget(label(tr('快速回看最近保存的画面与精彩瞬间。'), 'caption'))
         heading.addLayout(head_v)
         heading.addStretch()
         all_btn = button(tr('查看完整图库 ›'), lambda: self.navigate(2))
@@ -397,20 +463,35 @@ class Studio(GlassWindow):
         tools.setSpacing(10)
         self.mapping_profile = label('主机体验', 'section')
         self.mapping_profile.hide()
-        tools.addWidget(label(tr('当前核心配置：'), 'muted'))
+        tools.addWidget(label(tr('手柄按键预设：'), 'muted'))
         self.mapping_combo = QComboBox()
-        self.mapping_combo.setMinimumWidth(170)
-        self.mapping_combo.currentTextChanged.connect(self.change_profile)
+        self.mapping_combo.setMinimumWidth(180)
+        self.mapping_combo.currentTextChanged.connect(self.on_mapping_combo_changed)
         tools.addWidget(self.mapping_combo)
+
+        self.mapping_active_badge = QLabel(tr('已生效'))
+        self.mapping_active_badge.setStyleSheet(f"background: rgba(16, 185, 129, 0.15); color: {TOKENS['green']}; border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 6px; padding: 3px 8px; font-weight: 700; font-size: 11px;")
+        tools.addWidget(self.mapping_active_badge)
+
+        self.mapping_activate_btn = button(tr('设为当前生效'), self.activate_current_gamepad_profile, primary=True, icon='play')
+        tools.addWidget(self.mapping_activate_btn)
+
         tools.addStretch()
         self.learn_button = button(tr('识别按键'), self.start_learning, icon='controller')
         self.learn_button.setCheckable(True)
         tools.addWidget(self.learn_button)
-        tools.addWidget(button(tr('恢复默认'), self.reset_profile, icon='refresh'))
-        tools.addWidget(button(tr('新建'), self.duplicate_profile, icon='plus'))
-        self.delete_profile_btn = button(tr('删除'), self.delete_profile, icon='trash')
-        tools.addWidget(self.delete_profile_btn)
         layout.addLayout(tools)
+        profile_actions = QHBoxLayout()
+        profile_actions.setSpacing(8)
+        instruction = label(tr('选择按键，直接在动作卡中编辑映射。'), 'caption', True)
+        instruction.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        profile_actions.addWidget(instruction, 1)
+        profile_actions.addWidget(button(tr('新建手柄配置'), lambda: self.duplicate_profile(target_mode='gamepad'), icon='plus'))
+        profile_actions.addWidget(button(tr('恢复默认'), self.reset_profile, icon='refresh'))
+        self.delete_profile_btn = button(tr('删除'), self.delete_profile, icon='trash')
+        self.delete_profile_btn.setObjectName('danger')
+        profile_actions.addWidget(self.delete_profile_btn)
+        layout.addLayout(profile_actions)
 
         workspace = QWidget()
         workspace.setMinimumHeight(350)
@@ -418,54 +499,37 @@ class Studio(GlassWindow):
         columns.setContentsMargins(0, 0, 0, 0)
         columns.setSpacing(16)
 
-        # Left Stage: Blueprint + Direct Telemetry Deck (No nested inspector card)
+        # The controller is the input surface; action editing lives beside it.
         stage, body = card('hero')
+        self.mapping_stage = stage
+        stage.setFixedHeight(max(350, min(760, self.height() - 290)))
         body.setContentsMargins(22, 18, 22, 18)
         body.setSpacing(12)
         self.mapping_model = label('DualSense', 'productTitle')
         body.addWidget(self.mapping_model)
+        body.addWidget(label(tr('点击手柄上的按键'), 'caption'))
         self.mapping_art = ControllerInput()
-        self.mapping_art.setMinimumSize(280, 100)
+        self.mapping_art.setMinimumSize(240, 140)
         self.mapping_art.button_clicked.connect(self.select_mapping)
         body.addWidget(self.mapping_art, 1)
 
-        # Hairline divider within stage (replaces nested GlassPanel box)
-        div = QFrame()
-        div.setFixedHeight(1)
-        div.setStyleSheet(f"background: {TOKENS['border']}; margin: 2px 0;")
-        body.addWidget(div)
-
-        detail = QHBoxLayout()
         self.selected_key = 0
+        columns.addWidget(stage, 5, Qt.AlignTop)
 
-        head_sel = QVBoxLayout()
-        head_sel.setSpacing(2)
-        head_sel.addWidget(label('SELECTED INPUT // ' + tr('当前按键'), 'eyebrow'))
-        self.selected_label = label(self.button_names.get(0, '× 交叉'), 'section')
-        self.selected_label.setObjectName('productTitle')
-        head_sel.addWidget(self.selected_label)
-        detail.addLayout(head_sel, 1)
-
-        self.mapping_edit = button(tr('配置动作...'), lambda: self.edit_mapping(self.selected_key), primary=True, icon='edit', pill=True)
-        detail.addWidget(self.mapping_edit)
-        body.addLayout(detail)
-
-        # Direct telemetry rows (replaces nested g_card boxes)
-        gestures = QHBoxLayout()
-        gestures.setSpacing(18)
-        self.mapping_short = label('', 'muted', True)
-        self.mapping_long = label('', 'muted', True)
-        for title, summary in [('SHORT PRESS // ' + tr('短按'), self.mapping_short), ('LONG PRESS // ' + tr('长按'), self.mapping_long)]:
-            g_col = QVBoxLayout()
-            g_col.setSpacing(3)
-            g_col.setContentsMargins(0, 2, 0, 2)
-            g_col.addWidget(label(title, 'eyebrow'))
-            g_col.addWidget(summary)
-            gestures.addLayout(g_col, 1)
-        body.addLayout(gestures)
-        columns.addWidget(stage, 6)
-
-        # Right Grid: Precision CNC Mechanical Keypad Tiles (No nested badge boxes)
+        editor = QWidget()
+        editor_layout = QVBoxLayout(editor)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(14)
+        self.mapping_deck = MappingDeck(self)
+        self.mapping_deck.trigger_selected.connect(self.select_mapping_trigger)
+        editor_layout.addWidget(self.mapping_deck)
+        input_card, input_layout = card()
+        input_layout.setContentsMargins(14, 14, 14, 14)
+        input_header = QHBoxLayout()
+        input_header.addWidget(label(tr('选择输入'), 'section'))
+        input_header.addStretch()
+        input_header.addWidget(label(tr('圆点表示已配置'), 'caption'))
+        input_layout.addLayout(input_header)
         rows = QWidget()
         grid = QGridLayout(rows)
         self.mapping_grid = grid
@@ -475,45 +539,73 @@ class Studio(GlassWindow):
             box = QPushButton()
             box.setObjectName('mappingTile')
             box.setCheckable(True)
-            box.setMinimumHeight(48)
+            box.setFixedHeight(48)
             box.setCursor(Qt.PointingHandCursor)
             box.clicked.connect(lambda checked=False, k=key: self.select_mapping(k))
             b = QHBoxLayout(box)
             b.setContentsMargins(14, 8, 14, 8)
             b.setSpacing(10)
 
-            t_col = QVBoxLayout()
-            t_col.setContentsMargins(0, 0, 0, 0)
-            t_col.setSpacing(2)
             name = label(self.button_names[key], 'section')
+            name.setMinimumWidth(0)
+            name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             name.setAttribute(Qt.WA_TransparentForMouseEvents)
-            t_col.addWidget(name)
-
+            b.addWidget(name, 1)
             info = label('', 'muted')
             info.setObjectName('caption')
+            info.setFixedWidth(12)
+            info.setAlignment(Qt.AlignCenter)
+            info.setStyleSheet(f"color: {TOKENS['cyan']}; font-size: 10px;")
             info.setAttribute(Qt.WA_TransparentForMouseEvents)
-            t_col.addWidget(info)
-            b.addLayout(t_col, 1)
-
-            arrow = label('›', 'muted')
-            arrow.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {TOKENS['ink_dim']};")
-            arrow.setAttribute(Qt.WA_TransparentForMouseEvents)
-            b.addWidget(arrow)
+            b.addWidget(info)
 
             self.mapping_boxes[key] = (box, name)
             self.mapping_labels[key] = info
             grid.addWidget(box, i // 2, i % 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
-        inputs = scroll(rows)
-        inputs.setMinimumWidth(300)
-        columns.addWidget(inputs, 5)
+        self.mapping_input_order = button_order('dualsense')
+        self.mapping_available = set(self.mapping_input_order)
+        self.mapping_inputs = scroll(rows)
+        self.mapping_inputs.setMinimumWidth(0)
+        self.mapping_inputs.setMinimumHeight(190)
+        self.mapping_inputs.setMaximumHeight(328)
+        self.mapping_inputs.setFrameShape(QFrame.NoFrame)
+        self.mapping_inputs.viewport().installEventFilter(self)
+        input_layout.addWidget(self.mapping_inputs)
+        editor_layout.addWidget(input_card)
+        editor_layout.addStretch()
+        columns.addWidget(editor, 6)
         layout.addWidget(workspace, 3)
-        self.mapping_feedback = label('等待输入', 'muted')
-        layout.addWidget(self.mapping_feedback)
-        self.binding_list = BindingList(self)
-        layout.addWidget(self.binding_list, 1)
+        self.mapping_feedback = label(tr('等待输入'), 'muted', True)
+        feedback = QHBoxLayout()
+        feedback.addWidget(self.mapping_feedback, 1)
+        layout.addLayout(feedback)
         self.stack.addWidget(scroll(page))
+
+    def eventFilter(self, watched, event):
+        if hasattr(self, 'mapping_inputs') and watched is self.mapping_inputs.viewport() and event.type() == QEvent.Resize:
+            self.reflow_mapping_inputs(event.size().width())
+        return super().eventFilter(watched, event)
+
+    def reflow_mapping_inputs(self, width=None):
+        if not hasattr(self, 'mapping_inputs'):
+            return
+        width = self.mapping_inputs.viewport().width() if width is None else width
+        columns = 3 if width >= 600 else 2
+        for row in range(self.mapping_grid.rowCount()):
+            self.mapping_grid.setRowStretch(row, 0)
+        for column in range(3):
+            self.mapping_grid.setColumnStretch(column, 1 if column < columns else 0)
+        position = 0
+        for key in self.mapping_input_order:
+            box = self.mapping_boxes[key][0]
+            self.mapping_grid.removeWidget(box)
+            box.setVisible(key in self.mapping_available)
+            if key in self.mapping_available:
+                self.mapping_grid.addWidget(box, position // columns, position % columns)
+                position += 1
+        self.mapping_grid.setRowStretch((position + columns - 1) // columns, 1)
 
     def build_gallery(self):
         page = QWidget()
@@ -544,6 +636,7 @@ class Studio(GlassWindow):
 
         self.search = QLineEdit()
         self.search.setPlaceholderText(tr('搜索截图文件...'))
+        self.search.setClearButtonEnabled(True)
         self.search.setFixedWidth(240)
         self.search.setFixedHeight(32)
         self.search.setStyleSheet(
@@ -558,7 +651,8 @@ class Studio(GlassWindow):
         self.gallery_grid = QGridLayout(self.gallery_content)
         self.gallery_grid.setContentsMargins(0, 10, 0, 10)
         self.gallery_grid.setSpacing(16)
-        layout.addWidget(scroll(self.gallery_content), 1)
+        self.gallery_view = scroll(self.gallery_content)
+        layout.addWidget(self.gallery_view, 1)
         self.stack.addWidget(page)
 
     def build_test(self):
@@ -573,6 +667,8 @@ class Studio(GlassWindow):
     def build_settings(self):
         page = QWidget()
         grid = QGridLayout(page)
+        self.settings_grid = grid
+        self.settings_page = page
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(16)
 
@@ -598,7 +694,10 @@ class Studio(GlassWindow):
         idx = self.mode_combo.findData(cur_mode)
         self.mode_combo.setCurrentIndex(max(0, idx))
         self.mode_combo.currentIndexChanged.connect(lambda: self.setting('capture_mode', self.mode_combo.currentData()))
-        self.mode_combo.setMinimumWidth(210)
+        self.mode_combo.setMinimumWidth(190)
+        self.mode_combo.setMaximumWidth(270)
+        self.mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.mode_combo.setMinimumContentsLength(14)
         cap.add_row(AppleRow('camera', (TOKENS['accent'], TOKENS['accent_lo']), tr('捕获目标屏幕与范围'), tr('智能锁定游戏屏幕或双屏跨屏全景录制'), self.mode_combo))
 
         folder_row = QWidget()
@@ -613,6 +712,9 @@ class Studio(GlassWindow):
         f_v.addWidget(f_title)
         self.folder_label = label(self.config['save_dir'], 'muted')
         self.folder_label.setObjectName('metric')
+        self.folder_label.setWordWrap(True)
+        self.folder_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.folder_label.setToolTip(self.config['save_dir'])
         f_v.addWidget(self.folder_label)
         f_layout.addLayout(f_v, 1)
         self.folder_button = button(tr('更改目录...'), self.choose_folder, pill=True)
@@ -626,29 +728,28 @@ class Studio(GlassWindow):
         c_layout.addWidget(SquircleBadge('timer', (TOKENS['amber'], TOKENS['amber'])))
         c_tv = QVBoxLayout()
         c_tv.setContentsMargins(0, 0, 0, 0)
-        c_tv.setSpacing(2)
-        c_title = label(tr('防抖冷却间隔'), 'section')
-        c_tv.addWidget(c_title)
-        c_desc = label(tr('连击防误触时间阈值'), 'muted')
-        c_desc.setObjectName('caption')
+        c_tv.setSpacing(3)
+        c_top = QHBoxLayout()
+        c_top.addWidget(label(tr('防抖冷却间隔'), 'section'))
+        c_top.addStretch()
+        cool_val = label(f"{self.config['cooldown']:.2f} " + tr('秒'), 'metric')
+        cool_val.setStyleSheet(f"font: 12px 'Cascadia Code', monospace; font-weight: 700; color: {TOKENS['amber']};")
+        c_top.addWidget(cool_val)
+        c_tv.addLayout(c_top)
+        c_desc = label(tr('连击防误触时间阈值'), 'caption')
         c_tv.addWidget(c_desc)
-        cool_val = label(f"{self.config['cooldown']:.2f} " + tr('秒'))
-        cool_val.setStyleSheet(f"background: transparent; font: 12px 'Cascadia Code', monospace; font-weight: 700; color: {TOKENS['amber']}; padding: 0 2px;")
+
         cool_slider = QSlider(Qt.Horizontal)
         cool_slider.setRange(10, 200)
         cool_slider.setValue(round(self.config['cooldown'] * 100))
         c_tv.addWidget(cool_slider)
         c_layout.addLayout(c_tv, 1)
 
-        cool_knob = RotaryKnob("COOLDOWN", 0.10, 2.00, self.config['cooldown'], "s", TOKENS['amber'], 46)
         def on_cool_change(v):
             sec = v / 100
             cool_val.setText(f"{sec:.2f} " + tr('秒'))
-            cool_knob.setValue(sec)
             self.setting('cooldown', sec)
         cool_slider.valueChanged.connect(on_cool_change)
-        cool_knob.valueChanged.connect(lambda v: (cool_slider.blockSignals(True), cool_slider.setValue(round(v * 100)), cool_slider.blockSignals(False), self.setting('cooldown', v)))
-        c_layout.addWidget(cool_knob)
         cap.add_row(cool_row)
 
         # 机械快门声音反馈开关
@@ -690,13 +791,12 @@ class Studio(GlassWindow):
         l_v.setSpacing(2)
         l_title = label(tr('LED 状态光条'), 'section')
         l_v.addWidget(l_title)
-        l_desc = label(tr('手柄呼吸光条发光色调'), 'muted')
-        l_desc.setObjectName('caption')
+        l_desc = label(tr('手柄呼吸光条发光色调'), 'caption')
         l_v.addWidget(l_desc)
         l_layout.addLayout(l_v, 1)
 
         colors = QHBoxLayout()
-        colors.setSpacing(10)
+        colors.setSpacing(8)
         self.led_buttons = []
         cur_led = self.config.get('led', TOKENS['accent'])
         for color in [TOKENS['accent'], TOKENS['purple'], TOKENS['green'], TOKENS['red'], TOKENS['amber']]:
@@ -714,32 +814,34 @@ class Studio(GlassWindow):
         r_layout.addWidget(SquircleBadge('wave', (TOKENS['purple'], TOKENS['purple'])))
         r_tv = QVBoxLayout()
         r_tv.setContentsMargins(0, 0, 0, 0)
-        r_tv.setSpacing(2)
-        r_title = label(tr('双马达振动强度'), 'section')
-        r_tv.addWidget(r_title)
-        r_desc = label(tr('触觉反馈马达输出力度'), 'muted')
-        r_desc.setObjectName('caption')
+        r_tv.setSpacing(4)
+        r_top = QHBoxLayout()
+        r_top.addWidget(label(tr('双马达振动强度'), 'section'))
+        r_top.addStretch()
+        rumble_val = label(f"{round(self.config['rumble'] * 100)}%", 'metric')
+        rumble_val.setStyleSheet(f"font: 12px 'Cascadia Code', monospace; font-weight: 700; color: {TOKENS['accent']};")
+        r_top.addWidget(rumble_val)
+        r_tv.addLayout(r_top)
+        r_desc = label(tr('触觉反馈马达输出力度'), 'caption')
         r_tv.addWidget(r_desc)
-        rumble_val = label(f"{round(self.config['rumble'] * 100)}%")
-        rumble_val.setStyleSheet(f"background: transparent; font: 12px 'Cascadia Code', monospace; font-weight: 700; color: {TOKENS['accent']}; padding: 0 2px;")
+
+        r_bottom = QHBoxLayout()
+        r_bottom.setSpacing(10)
         rumble_slider = QSlider(Qt.Horizontal)
         rumble_slider.setRange(0, 100)
         rumble_slider.setValue(round(self.config['rumble'] * 100))
-        r_tv.addWidget(rumble_slider)
-        r_layout.addLayout(r_tv, 1)
+        r_bottom.addWidget(rumble_slider, 1)
 
         self.feedback_rumble = button(tr('脉冲测试'), self.rumble, primary=True, icon='wave', pill=True)
-        r_layout.addWidget(self.feedback_rumble)
+        r_bottom.addWidget(self.feedback_rumble)
+        r_tv.addLayout(r_bottom)
+        r_layout.addLayout(r_tv, 1)
 
-        rumble_knob = RotaryKnob("RUMBLE", 0.0, 1.0, self.config['rumble'], "%", TOKENS['accent'], 46)
         def on_rumble_change(v):
             pct = v / 100
             rumble_val.setText(f"{v}%")
-            rumble_knob.setValue(pct)
             self.setting('rumble', pct)
         rumble_slider.valueChanged.connect(on_rumble_change)
-        rumble_knob.valueChanged.connect(lambda v: (rumble_slider.blockSignals(True), rumble_slider.setValue(round(v * 100)), rumble_slider.blockSignals(False), self.setting('rumble', v)))
-        r_layout.addWidget(rumble_knob)
         hardware.add_row(rumble_row)
 
         self.touch_mouse_box = Toggle(tr('启用'))
@@ -755,20 +857,23 @@ class Studio(GlassWindow):
         h_layout.addWidget(SquircleBadge('wave', (TOKENS['accent'], TOKENS['accent_lo'])))
         h_tv = QVBoxLayout()
         h_tv.setContentsMargins(0, 0, 0, 0)
-        h_tv.setSpacing(2)
+        h_tv.setSpacing(6)
         h_title = label(tr('触觉拟真引擎 (Haptic Engine)'), 'section')
         h_tv.addWidget(h_title)
-        h_desc = label(tr('微秒级双音圈多段触觉波形合成 (快门/棘轮/冲击/心跳)'), 'muted')
-        h_desc.setObjectName('caption')
+        h_desc = label(tr('微秒级双音圈多段触觉波形合成 (快门/棘轮/冲击/心跳)'), 'caption')
         h_tv.addWidget(h_desc)
-        h_layout.addLayout(h_tv, 1)
 
+        h_btns = QHBoxLayout()
+        h_btns.setSpacing(8)
         self.test_haptic_shutter = button(tr('快门触觉'), lambda: self.test_haptic_pattern('shutter'), pill=True)
         self.test_haptic_impact = button(tr('冲击阻尼'), lambda: self.test_haptic_pattern('impact'), pill=True)
         self.test_haptic_heart = button(tr('心跳律动'), lambda: self.test_haptic_pattern('heartbeat'), pill=True)
-        h_layout.addWidget(self.test_haptic_shutter)
-        h_layout.addWidget(self.test_haptic_impact)
-        h_layout.addWidget(self.test_haptic_heart)
+        h_btns.addWidget(self.test_haptic_shutter)
+        h_btns.addWidget(self.test_haptic_impact)
+        h_btns.addWidget(self.test_haptic_heart)
+        h_btns.addStretch()
+        h_tv.addLayout(h_btns)
+        h_layout.addLayout(h_tv, 1)
         hardware.add_row(haptic_row)
 
         grid.addWidget(hardware, 0, 1)
@@ -787,29 +892,28 @@ class Studio(GlassWindow):
         lp_layout.addWidget(SquircleBadge('timer', (TOKENS['amber'], TOKENS['amber'])))
         lp_tv = QVBoxLayout()
         lp_tv.setContentsMargins(0, 0, 0, 0)
-        lp_tv.setSpacing(2)
-        lp_title = label(tr('长按手势识别阈值'), 'section')
-        lp_tv.addWidget(lp_title)
-        lp_desc = label(tr('按住按键达到设定时长触发二次宏动作'), 'muted')
-        lp_desc.setObjectName('caption')
+        lp_tv.setSpacing(4)
+        lp_top = QHBoxLayout()
+        lp_top.addWidget(label(tr('长按手势识别阈值'), 'section'))
+        lp_top.addStretch()
+        lp_val = label(f"{self.config['long_press']:.2f} " + tr('秒'), 'metric')
+        lp_val.setStyleSheet(f"font: 12px 'Cascadia Code', monospace; font-weight: 700; color: {TOKENS['chalk']};")
+        lp_top.addWidget(lp_val)
+        lp_tv.addLayout(lp_top)
+        lp_desc = label(tr('按住按键达到设定时长触发二次宏动作'), 'caption')
         lp_tv.addWidget(lp_desc)
-        lp_val = label(f"{self.config['long_press']:.2f} " + tr('秒'))
-        lp_val.setStyleSheet(f"background: transparent; font: 12px 'Cascadia Code', monospace; font-weight: 700; color: {TOKENS['chalk']}; padding: 0 2px;")
+
         lp_slider = QSlider(Qt.Horizontal)
         lp_slider.setRange(30, 150)
         lp_slider.setValue(round(self.config['long_press'] * 100))
         lp_tv.addWidget(lp_slider)
         lp_layout.addLayout(lp_tv, 1)
 
-        lp_knob = RotaryKnob("LONG PRESS", 0.30, 1.50, self.config['long_press'], "s", TOKENS['chalk'], 46)
         def on_lp_change(v):
             sec = v / 100
             lp_val.setText(f"{sec:.2f} " + tr('秒'))
-            lp_knob.setValue(sec)
             self.setting('long_press', sec)
         lp_slider.valueChanged.connect(on_lp_change)
-        lp_knob.valueChanged.connect(lambda v: (lp_slider.blockSignals(True), lp_slider.setValue(round(v * 100)), lp_slider.blockSignals(False), self.setting('long_press', v)))
-        lp_layout.addWidget(lp_knob)
         general.add_row(lp_row)
 
         self.lang_combo = QComboBox()
@@ -827,6 +931,9 @@ class Studio(GlassWindow):
             self.notify(tr('界面语言已更新，部分设置重启后生效'))
         self.lang_combo.currentIndexChanged.connect(on_lang_change)
         self.lang_combo.setMinimumWidth(180)
+        self.lang_combo.setMaximumWidth(240)
+        self.lang_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.lang_combo.setMinimumContentsLength(14)
         general.add_row(AppleRow('globe', (TOKENS['purple'], TOKENS['accent_lo']), tr('界面语言 / Language'), tr('界面语言与国际化设置'), self.lang_combo))
 
         help_btn = button(tr('查阅指南 ›'), self.show_help, pill=True)
@@ -850,8 +957,7 @@ class Studio(GlassWindow):
         ag_tv.setSpacing(2)
         ag_title = label(tr('常驻映射监听进程 (Agent)'), 'section')
         ag_tv.addWidget(ag_title)
-        ag_desc = label(tr('后台超低延迟按键拦截与手势守护服务'), 'muted')
-        ag_desc.setObjectName('caption')
+        ag_desc = label(tr('后台超低延迟按键拦截与手势守护服务'), 'caption')
         ag_tv.addWidget(ag_desc)
         ag_layout.addLayout(ag_tv, 1)
 
@@ -859,6 +965,7 @@ class Studio(GlassWindow):
         self.agent_status.setText(tr('正在连接'))
         ag_layout.addWidget(self.agent_status)
         self.agent_toggle = button(tr('停止服务'), self.toggle_agent, pill=True)
+        self.agent_toggle.setMinimumWidth(88)
         ag_layout.addWidget(self.agent_toggle)
         background.add_row(ag_row)
 
@@ -905,6 +1012,7 @@ class Studio(GlassWindow):
         self.replay_slider.setRange(1, 10)
         self.replay_slider.setValue(cur_min)
         rm_tv.addWidget(self.replay_slider)
+        rm_tv.addWidget(self.replay_min_label)
         rm_layout.addLayout(rm_tv, 1)
 
         def on_min_change(v):
@@ -930,6 +1038,10 @@ class Studio(GlassWindow):
         cd_layout.addLayout(cd_tv, 1)
 
         self.replay_codec_combo = QComboBox()
+        self.replay_codec_combo.setMinimumWidth(180)
+        self.replay_codec_combo.setMaximumWidth(300)
+        self.replay_codec_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.replay_codec_combo.setMinimumContentsLength(18)
         self.replay_codec_combo.addItem(tr('HEVC 标杆极清 (推荐 · 50Mbps)'), 'hevc')
         self.replay_codec_combo.addItem(tr('AV1 次世代极清 (AMF/NVENC · 45Mbps)'), 'av1')
         self.replay_codec_combo.addItem(tr('H.264 兼容模式 (60Mbps)'), 'h264')
@@ -959,11 +1071,21 @@ class Studio(GlassWindow):
 
         grid.addWidget(replay_group, 2, 0, 1, 2)
 
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        grid.setRowStretch(0, 1)
-        grid.setRowStretch(1, 1)
-        grid.setRowStretch(2, 1)
+        self.settings_groups = [cap, hardware, general, background, replay_group]
+        for group in self.settings_groups:
+            group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+            group.vbox.setAlignment(Qt.AlignTop)
+            for text in group.findChildren(QLabel):
+                if text.objectName() in ('caption', 'muted', 'section', 'eyebrow'):
+                    text.setWordWrap(True)
+                    text.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+                    text.setMinimumWidth(0)
+        for header, title in [(hdr_cap, '截图服务与存储'), (hdr_hw, '硬件交互与反馈'),
+                               (hdr_gen, '手势与高级设置'), (hdr_bg, '系统服务与开机启动'),
+                               (hdr_replay, '精彩回放')]:
+            header.setText(tr(title))
+            header.setStyleSheet(f"color: {TOKENS['ink']}; font-size: 14px; font-weight: 700; padding: 14px 16px 10px;")
+        self.settings_columns = 0
         self._update_replay_hud()
         self.stack.addWidget(scroll(page))
 
@@ -1103,18 +1225,25 @@ class Studio(GlassWindow):
             elif family in ('dualsense','dualshock4'):available.update((15,20))
             elif family!='xbox':available.add(15)
         self.mapping_art.available=available
-        position=0
-        for i in range(self.mapping_grid.rowCount()):self.mapping_grid.setRowStretch(i,0)
+        self.mapping_input_order = button_order(family)
+        self.mapping_available = available
         for key in button_order(family):
             box,title=self.mapping_boxes[key]
-            self.mapping_grid.removeWidget(box);box.setVisible(key in available);title.setText(self.button_names[key])
+            title.setText(self.button_names[key])
             box.setAccessibleName(self.button_names[key]);box.setToolTip(self.button_names[key])
-            if key in available:self.mapping_grid.addWidget(box,position//2,position%2);position+=1
-        self.mapping_grid.setRowStretch((position+1)//2,1)
-        self.mapping_edit.setEnabled(True);self.learn_button.setEnabled(True)
-        self.select_mapping(self.selected_key if self.selected_key in available else next(iter(sorted(available)),0))
+        self.reflow_mapping_inputs()
+        self.learn_button.setEnabled(True)
+        previous_trigger = self.mapping_deck.selected_trigger
+        numeric_members = {int(part) for part in previous_trigger.split('+') if part.isdigit()}
+        if '+' in previous_trigger and numeric_members.issubset(available):
+            self.select_mapping_trigger(previous_trigger)
+        else:
+            self.select_mapping(self.selected_key if self.selected_key in available else next(iter(sorted(available)),0))
         for button in self.led_buttons:button.setEnabled(bool(state and state['led']));button.setToolTip(tr('灯条颜色') if state and state['led'] else tr('设备未提供灯条控制'))
         self.feedback_rumble.setEnabled(bool(state and state['rumble']))
+        for control in (self.test_haptic_shutter, self.test_haptic_impact, self.test_haptic_heart):
+            control.setEnabled(bool(state and state.get('rumble')))
+            control.setToolTip(tr('双马达触觉脉冲与响应测试') if state and state.get('rumble') else tr('未连接手柄'))
         self.touch_mouse_box.setEnabled(bool(state and state.get('touchpad',False)))
         self.touch_mouse_box.setToolTip(tr('触摸板鼠标') if state and state.get('touchpad') else tr('设备未提供触摸板'))
 
@@ -1139,11 +1268,11 @@ class Studio(GlassWindow):
 
         # Update Eyebrow dynamically (concise serial header, zero marketing text)
         specs = {
-            'dualsense': 'SONY PLAYSTATION® 5 // FIELD WORKSTATION',
-            'dualshock4': 'SONY PLAYSTATION® 4 // FIELD WORKSTATION',
-            'xbox': 'MICROSOFT XBOX® // FIELD WORKSTATION',
-            'switch': 'NINTENDO SWITCH® // FIELD WORKSTATION',
-            'generic': 'UNIVERSAL GAMEPAD // FIELD WORKSTATION'
+            'dualsense': 'SONY · PLAYSTATION 5',
+            'dualshock4': 'SONY · PLAYSTATION 4',
+            'xbox': 'MICROSOFT · XBOX',
+            'switch': 'NINTENDO · SWITCH',
+            'generic': tr('通用手柄')
         }
         if hasattr(self, 'controller_eyebrow'):
             self.controller_eyebrow.setText(specs.get(family, specs['generic']))
@@ -1210,7 +1339,16 @@ class Studio(GlassWindow):
 
     def navigate(self,index):
         headings = ['设备概览','按键配置','截图图库','硬件遥测','系统设置','控制器库','虚拟键鼠']
-        self.stack.setCurrentIndex(index); self.page_heading.setText(tr(headings[index]) if index < len(headings) else 'GamePad Studio')
+        descriptions = ['查看设备状态，调整配置并快速进入常用操作。',
+                        '选择手柄按键，配置短按、长按与组合动作。',
+                        '回看游戏截图与精彩回放，收藏值得保留的瞬间。',
+                        '检查按键、摇杆和扳机的实时响应。',
+                        '管理捕获、触觉反馈与后台服务，修改后自动保存。',
+                        '连接设备，选择你的手柄并进入工作空间。',
+                        '点击目标按键，再按下手柄按钮完成绑定。']
+        self.stack.setCurrentIndex(index)
+        self.page_heading.setText(tr(headings[index]))
+        self.page_description.setText(tr(descriptions[index]))
         for i,b in self.nav.items(): b.setChecked(i==index)
         if index==2: self.refresh_gallery()
         if hasattr(self, 'virtual_kbm_page'):
@@ -1218,6 +1356,45 @@ class Studio(GlassWindow):
                 self.virtual_kbm_page.refresh_display()
             elif self.virtual_kbm_page.is_capturing:
                 self.virtual_kbm_page.cancel_capture()
+
+    def escape_workspace(self):
+        if self.virtual_kbm_page.is_capturing:
+            self.virtual_kbm_page.cancel_capture()
+        else:
+            self.leave_fullscreen()
+
+    def reflow_workspace(self):
+        compact = self.width() <= 1200
+        self.content_layout.setSpacing(12 if compact else 18)
+        self.rail.setFixedWidth(64 if compact else 212)
+        self.brand_copy.setVisible(not compact)
+        for heading in self.nav_sections:
+            heading.setVisible(not compact)
+        for index, control in self.nav.items():
+            control.setText('' if compact else tr(self.nav_titles[index]))
+            if control.property('compact') != compact:
+                control.setProperty('compact', compact)
+                control.style().unpolish(control); control.style().polish(control)
+        self.size_grip.setVisible(not (self.isFullScreen() or self.isMaximized()))
+        if hasattr(self, 'mapping_stage'):
+            self.mapping_stage.setFixedHeight(max(350, min(760, self.height() - 290)))
+        if not hasattr(self, 'settings_groups'):
+            return
+        columns = 2 if self.stack.width() >= 1160 else 1
+        if columns == self.settings_columns:
+            return
+        self.settings_columns = columns
+        grid = self.settings_grid
+        while grid.count():
+            grid.takeAt(0)
+        for row in range(grid.rowCount()): grid.setRowStretch(row, 0)
+        grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1 if columns == 2 else 0)
+        for index, group in enumerate(self.settings_groups):
+            if columns == 2:
+                grid.addWidget(group, index // 2, index % 2, 1, 2 if index == 4 else 1, Qt.AlignTop)
+            else:
+                grid.addWidget(group, index, 0, Qt.AlignTop)
+        grid.setRowStretch(3 if columns == 2 else 5, 1)
 
     def show_home(self):
         self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
@@ -1280,7 +1457,27 @@ class Studio(GlassWindow):
                 self.previous_connected=connected
                 self.notify(tr('已连接 ') + state['name'] if connected else tr('手柄已断开，等待重新连接'))
                 if connected and state['led'] and not self.remote: self.device.led(self.config['led'])
-            self.status_badge.setText(tr('●  已连接') if connected else tr('○  等待连接'))
+            self.home_connection_hint.setText(tr('按下手柄按键查看实时反馈，或进入按键配置调整动作。') if connected else tr('连接手柄后，即可查看状态并配置按键。'))
+            if connected:
+                dev_name = state.get('name', tr('手柄'))
+                self.status_badge.setText(tr('●  已连接'))
+                if hasattr(self, 'status_label'):
+                    full_status = f"{dev_name} · {tr('已连接')}"
+                    self.status_label.setFixedWidth(200)
+                    self.status_label.setText(self.status_label.fontMetrics().elidedText(full_status, Qt.ElideRight, 200))
+                    self.status_label.setToolTip(full_status)
+                    self.status_label.setStyleSheet(f"font-size: 11.5px; font-weight: 700; color: {TOKENS['ink']}; padding-right: 4px;")
+                if hasattr(self, 'status_capsule'):
+                    self.status_capsule.setStyleSheet(f"QWidget#statusCapsule {{ border: 1px solid rgba(16, 185, 129, 0.45); background: {TOKENS['surface']}; border-radius: 18px; }}")
+            else:
+                self.status_badge.setText(tr('○  等待连接'))
+                if hasattr(self, 'status_label'):
+                    self.status_label.setFixedWidth(100)
+                    self.status_label.setText(tr('未连接'))
+                    self.status_label.setToolTip(tr('未连接手柄'))
+                    self.status_label.setStyleSheet(f"font-size: 11.5px; font-weight: 700; color: {TOKENS['ink_2']}; padding-right: 4px;")
+                if hasattr(self, 'status_capsule'):
+                    self.status_capsule.setStyleSheet(f"QWidget#statusCapsule {{ border: 1px solid {TOKENS['border']}; background: {TOKENS['surface']}; border-radius: 18px; }}")
             self.side_status.setText(tr('●  已连接') if connected else tr('○  未连接'))
             self.rumble_button.setEnabled(bool(state and state['rumble']))
             self.tester.update_state(state,collect=self.stack.currentIndex()==3 and self.isVisible() and not self.isMinimized())
@@ -1297,8 +1494,8 @@ class Studio(GlassWindow):
                 else:
                     self.matrix.set_lines([
                         ('LINK', 'OFFLINE'),
-                        ('POWER', 'STANDBY'),
-                        ('POLL', '1000 HZ'),
+                        ('POWER', '--'),
+                        ('INPUTS', '--'),
                         ('STATUS', 'WAITING')
                     ])
             if self.remote:
@@ -1307,7 +1504,9 @@ class Studio(GlassWindow):
                 feedback = self.engine.feedback() if state else {}
             self.virtual_kbm_page.set_device_state(state)
             self.virtual_kbm_page.update_feedback(feedback, bool(state), self.client.status.get('suspended',False) if self.remote else QApplication.activeModalWidget() is not None)
-            self.binding_list.feedback(feedback)
+            self.mapping_deck.feedback(feedback)
+            if not self.notice_timer.isActive():
+                self.notice.setText(tr('映射运行中') if self.enabled else tr('映射已暂停'))
             events = feedback.get('events',[])
             if events:
                 from .mapping_engine import trigger_label
@@ -1316,7 +1515,7 @@ class Studio(GlassWindow):
                 message=('安全试按 · ' if feedback.get('preview') else '')+message
                 self.mapping_feedback.setText(message); self.home_input_feedback.setText(message)
             elif not state:
-                self.mapping_feedback.setText('等待输入'); self.home_input_feedback.setText('等待输入')
+                self.mapping_feedback.setText(tr('等待输入')); self.home_input_feedback.setText(tr('等待输入'))
             if not state:
                 self.engine.update(None, self.config, enabled=False)
                 self.device_details.setText(tr('未连接')); self.power_label.setText(tr('未连接')); self.engine.reset(); self.last_buttons=set()
@@ -1349,6 +1548,15 @@ class Studio(GlassWindow):
 
     def dispatch(self,binding,down=True):
         action=binding.get('action','none')
+        if action=='gamepad_button':
+            self.actions.gamepad_button(binding.get('value', '0'), down)
+            return
+        elif action=='gamepad_chord':
+            self.actions.gamepad_chord(binding.get('value', '0'), down)
+            return
+        elif action=='gamepad_turbo':
+            self.actions.gamepad_turbo(binding.get('value', '0'), down, binding.get('rate_hz', 15))
+            return
         if action=='hold': self.actions.hold(binding.get('value',''),down); return
         if not down or action=='none': return
         if action=='capture': self.capture()
@@ -1369,29 +1577,75 @@ class Studio(GlassWindow):
         self.config['mapping_enabled']=enable;self.store.save();self.enabled=enable
         self.pause_button.setText(tr('暂停映射') if self.enabled else tr('恢复映射'));self.pause_button.set_symbol('pause' if self.enabled else 'play'); self.notify(tr('映射已恢复') if self.enabled else tr('映射已暂停 · 设备监测继续运行'))
 
+    def current_gamepad_profile(self):
+        from .studio_core import profile_mode
+        active = self.config.get('active_profile', '')
+        if profile_mode(self.config, active) == 'gamepad':
+            return active
+        combo_text = self.mapping_combo.currentText()
+        if combo_text and profile_mode(self.config, combo_text) == 'gamepad':
+            return combo_text
+        gamepad_profiles = self.store.profiles_for(self.snapshot, mode='gamepad')
+        return gamepad_profiles[0] if gamepad_profiles else active
+
+    def on_mapping_combo_changed(self, name):
+        if not name:
+            return
+        self._last_gamepad_profile = name
+        self.change_profile(name)
+
+    def activate_current_gamepad_profile(self):
+        profile = self.current_gamepad_profile()
+        if profile:
+            self.change_profile(profile)
+
     def change_profile(self,name):
         if not name or name not in self.config['profiles'] or name == self.config['active_profile']: return
         if self.mapping_change({'op': 'select', 'profile': name}):
             if not self.snapshot: self.update_controller_ui(None)
 
-    def duplicate_profile(self):
-        name,ok=QInputDialog.getText(self,tr('另存为预设'),tr('配置名称'))
+    def duplicate_profile(self, target_mode=None):
+        if not target_mode:
+            from .studio_core import profile_mode
+            if self.stack.currentIndex() == 1:
+                target_mode = 'gamepad'
+            elif self.stack.currentIndex() == 6:
+                target_mode = 'kbm'
+            else:
+                target_mode = profile_mode(self.config, self.config.get('active_profile', ''))
+        title = tr('新建手柄配置') if target_mode == 'gamepad' else tr('新建键鼠预设')
+        name, ok = QInputDialog.getText(self, title, tr('配置名称'))
         if ok and name.strip():
-            name=name.strip()
-            if name in self.config['profiles']: QMessageBox.warning(self,tr('名称重复'),tr('请使用不同的配置名称。')); return
-            self.mapping_change({'op':'create', 'profile':name})
+            name = name.strip()
+            if name in self.config['profiles']:
+                QMessageBox.warning(self, tr('名称重复'), tr('请使用不同的配置名称。'))
+                return
+            source = (self.virtual_kbm_page.current_scheme() if target_mode == 'kbm'
+                      else self.current_gamepad_profile())
+            self.mapping_change({'op': 'create', 'profile': name, 'mode': target_mode,
+                                 'source': source})
 
     def reset_profile(self):
-        if not self.snapshot:return
-        name=self.config['active_profile']
+        from .studio_core import profile_mode
+        if self.stack.currentIndex() == 6:
+            name = self.virtual_kbm_page.current_scheme()
+        elif self.stack.currentIndex() == 1:
+            name = self.current_gamepad_profile()
+        else:
+            name = self.config['active_profile']
+        if not name or name not in self.config['profiles']:
+            return
+        if profile_mode(self.config, name) == 'gamepad' and not self.snapshot:
+            QMessageBox.information(self, tr('恢复默认'), tr('请先连接手柄'))
+            return
         msg = f"恢复“{name}”的默认映射？" if get_language() == 'zh' else f"Reset default mappings for '{tr_profile(name)}'?"
         if QMessageBox.question(self,tr('恢复默认'),msg)!=QMessageBox.Yes:return
         self.engine.reset();self.actions.release_all()
         self.mapping_change({'op':'reset', 'profile':name})
 
     def delete_profile(self, *args):
-        name = self.config['active_profile']
-        family_profiles = self.store.profiles_for(self.snapshot)
+        name = self.current_gamepad_profile() if self.stack.currentIndex() == 1 else self.config['active_profile']
+        family_profiles = self.store.profiles_for(self.snapshot, mode='gamepad' if self.stack.currentIndex() == 1 else None)
         if len(family_profiles) <= 1:
             QMessageBox.information(
                 self, tr('无法删除配置'),
@@ -1408,70 +1662,147 @@ class Studio(GlassWindow):
         self.mapping_change({'op':'delete', 'profile':name})
 
     @staticmethod
-    def compact_binding(action):
+    def compact_binding(action, family='generic'):
         kind=action.get('action','none')
+        if kind in ('gamepad_button','gamepad_chord','gamepad_turbo','gamepad_macro'):
+            return binding_label(action, family)
         if kind in ('mouse_hold','mouse_click','wheel'):return binding_label(action)
         if kind in ('shortcut','hold'):return action.get('value','')
         base = {'none':'原始输入','capture':'截图','gallery':'图库','home':'控制中心',
-                'replay_record':'回放录制','record_toggle':'录屏'}.get(kind,ACTION_NAMES.get(kind,'原始输入'))
+                'replay_record':'回放录制','record_toggle':'录屏','suppress':'屏蔽按键'}.get(kind,ACTION_NAMES.get(kind,'原始输入'))
         return tr(base)
 
     def select_mapping(self,key):
         self.selected_key=key
-        for number,(box,_) in self.mapping_boxes.items():box.setChecked(number==key)
-        self.mapping_art.select_button(key)
-        self.selected_label.setText(self.button_names.get(key,str(key)))
-        self.mapping_edit.setText(tr('编辑 ') + self.button_names.get(key,str(key)))
-        entry=effective_mappings(self.config, self.snapshot).get(str(key),{})
-        self.mapping_short.setText(self.compact_binding(entry.get('short',{})))
-        self.mapping_long.setText(self.compact_binding(entry.get('long',{})))
+        self.mapping_deck.set_trigger(str(key))
+        self.select_mapping_trigger(str(key))
+
+    def select_mapping_trigger(self, trigger):
+        keys = {int(part) for part in trigger.split('+') if part.isdigit()}
+        for number, (box, _) in self.mapping_boxes.items():
+            box.setChecked(number in keys)
+        self.mapping_art.select_buttons(keys)
+        if len(keys) == 1:
+            self.selected_key = next(iter(keys))
+
+    def _on_nav_mapping_clicked(self):
+        from .studio_core import profile_mode
+        mode = profile_mode(self.config, self.config.get('active_profile', ''))
+        if mode == 'kbm':
+            self.navigate(6)
+        else:
+            self.navigate(1)
 
     def refresh_mappings(self):
-        self.mapping_profile.setText(tr_profile(self.config['active_profile']))
-        for combo in (self.profile_combo,self.mapping_combo):
-            combo.blockSignals(True);combo.clear();combo.addItems(self.store.profiles_for(self.snapshot));combo.setCurrentText(self.config['active_profile']);combo.blockSignals(False)
+        from .studio_core import profile_mode
+        active_prof = self.config.get('active_profile', '')
+        current_mode = profile_mode(self.config, active_prof)
+        self.mapping_profile.setText(tr_profile(active_prof))
+
+        all_items = self.store.profiles_for(self.snapshot)
+        gamepad_items = self.store.profiles_for(self.snapshot, mode='gamepad')
+
+        # 1. Page 0 Master profile selector: holds ALL profiles
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+        for p_name in all_items:
+            m = profile_mode(self.config, p_name)
+            icon = glyph('controller' if m == 'gamepad' else 'keyboard', TOKENS['accent'] if m == 'gamepad' else TOKENS['cyan'])
+            self.profile_combo.addItem(icon, p_name)
+        self.profile_combo.setCurrentText(active_prof)
+        self.profile_combo.blockSignals(False)
+
+        # 2. Page 1 Mapping selector: holds ONLY gamepad profiles!
+        self.mapping_combo.blockSignals(True)
+        self.mapping_combo.clear()
+        for p_name in gamepad_items:
+            icon = glyph('controller', TOKENS['accent'])
+            self.mapping_combo.addItem(icon, p_name)
+
+        if current_mode == 'gamepad' and active_prof in gamepad_items:
+            selected_gamepad = active_prof
+        else:
+            last = getattr(self, '_last_gamepad_profile', None)
+            selected_gamepad = last if last in gamepad_items else (gamepad_items[0] if gamepad_items else '')
+        self._last_gamepad_profile = selected_gamepad
+        self.mapping_combo.setCurrentText(selected_gamepad)
+        self.mapping_combo.blockSignals(False)
+
+        if hasattr(self, 'mapping_active_badge'):
+            is_active = (selected_gamepad == active_prof)
+            if is_active:
+                self.mapping_active_badge.setText(tr('已生效'))
+                self.mapping_active_badge.setStyleSheet(f"background: rgba(16, 185, 129, 0.15); color: {TOKENS['green']}; border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 6px; padding: 3px 8px; font-weight: 700; font-size: 11px;")
+                self.mapping_activate_btn.hide()
+            else:
+                self.mapping_active_badge.setText(tr('未激活'))
+                self.mapping_active_badge.setStyleSheet(f"background: {TOKENS['surface']}; color: {TOKENS['ink_dim']}; border: 1px solid {TOKENS['border']}; border-radius: 6px; padding: 3px 8px; font-weight: 600; font-size: 11px;")
+                self.mapping_activate_btn.show()
+
+        if hasattr(self, 'mode_badge'):
+            if current_mode == 'gamepad':
+                self.mode_badge.setText(tr('手柄原生宏模式'))
+                self.mode_badge.setStyleSheet(f"background: rgba(255, 87, 34, 0.12); color: {TOKENS['accent']}; border: 1px solid rgba(255, 87, 34, 0.3); border-radius: 6px; padding: 4px 8px; font-weight: 700; font-size: 10.5px;")
+                if hasattr(self, 'nav_mapping_btn'):
+                    self.nav_mapping_btn.setText(tr('编辑手柄宏 ›'))
+            else:
+                self.mode_badge.setText(tr('虚拟键鼠模拟模式'))
+                self.mode_badge.setStyleSheet(f"background: rgba(119, 208, 212, 0.12); color: {TOKENS['cyan']}; border: 1px solid rgba(119, 208, 212, 0.3); border-radius: 6px; padding: 4px 8px; font-weight: 700; font-size: 10.5px;")
+                if hasattr(self, 'nav_mapping_btn'):
+                    self.nav_mapping_btn.setText(tr('配置虚拟键鼠 ›'))
+
         if hasattr(self, 'delete_profile_btn'):
-            can_del = len(self.store.profiles_for(self.snapshot)) > 1
+            can_del = len(gamepad_items) > 1
             self.delete_profile_btn.setEnabled(True)
-            del_tip = (tr('删除当前配置预设：') + tr_profile(self.config.get("active_profile", ""))) if can_del else (tr('当前控制器仅剩此一个预设，点击查看说明') if get_language() == 'zh' else 'Only one profile remaining for this controller; click for details')
+            del_tip = (tr('删除当前配置预设：') + tr_profile(selected_gamepad)) if can_del else (tr('当前模式仅剩此一个预设，点击查看说明') if get_language() == 'zh' else 'Only one profile remaining; click for details')
             self.delete_profile_btn.setToolTip(del_tip)
-        if hasattr(self, 'virtual_kbm_page'): self.virtual_kbm_page.refresh_display()
-        self.binding_list.refresh()
-        compact=self.compact_binding
-        for key,info in self.mapping_labels.items():
-            entry=effective_mappings(self.config, self.snapshot).get(str(key),{})
-            short=compact(entry.get('short',{}));long=compact(entry.get('long',{}))
-            original=short==long==tr('原始输入');info.setVisible(not original)
-            info.setText('' if original else f'{short} / {long}')
+
+        if hasattr(self, 'virtual_kbm_page'):
+            self.virtual_kbm_page.refresh_display()
+        self.mapping_deck.refresh()
+
+        target_gamepad = self.current_gamepad_profile()
+        compact = self.compact_binding
+        family = (self.snapshot.get('family', 'dualsense') if self.snapshot else
+                  self.config.get('profile_families', {}).get(target_gamepad, 'dualsense'))
+        gamepad_entries = effective_mappings(self.config, self.snapshot, target_gamepad)
+        for key, info in self.mapping_labels.items():
+            entry = gamepad_entries.get(str(key), {})
+            short = compact(entry.get('short', {}), family)
+            long = compact(entry.get('long', {}), family)
+            original = short == long == tr('原始输入')
+            info.setVisible(not original)
+            info.setText('' if original else '●')
             info.setToolTip(f"{tr('短按')}：{short}\n{tr('长按')}：{long}")
-            self.mapping_boxes[key][0].setToolTip(self.button_names.get(key,str(key))+'\n'+info.toolTip())
-        self.select_mapping(self.selected_key)
+            self.mapping_boxes[key][0].setToolTip(self.button_names.get(key, str(key)) + '\n' + info.toolTip())
+        self.select_mapping_trigger(self.mapping_deck.selected_trigger)
         if hasattr(self, 'row_guide'):
-            guide=effective_mappings(self.config,self.snapshot).get('5',{})
-            self.row_guide.setToolTip('短按：'+compact(guide.get('short',{}))+' / 长按：'+compact(guide.get('long',{})))
-        family=(self.snapshot.get('family','dualsense') if self.snapshot else
-                self.config.get('profile_families',{}).get(self.config['active_profile'],'dualsense'))
-        available=(self.snapshot.get('available_buttons') if self.snapshot else
-                   [key for key,(box,_) in self.mapping_boxes.items() if not box.isHidden()])
-        key=capture_button(family,available)
+            guide = gamepad_entries.get('5', {})
+            self.row_guide.setToolTip('短按：' + compact(guide.get('short', {}), family) + ' / 长按：' + compact(guide.get('long', {}), family))
+        key = capture_button(family, self.snapshot.get('available_buttons') if self.snapshot else [k for k, (box, _) in self.mapping_boxes.items() if not box.isHidden()])
         self.capture_heading.setText(self.button_names[key] if key is not None else tr('截图'))
-        entry=effective_mappings(self.config, self.snapshot).get(str(key),{}) if key is not None else {}
+        active_entries = effective_mappings(self.config, self.snapshot)
+        entry = active_entries.get(str(key), {}) if key is not None else {}
         tip = f"{self.button_names.get(key, tr('截图'))}：{tr('短按')} {compact(entry.get('short',{}))} / {tr('长按')} {compact(entry.get('long',{}))}" if key is not None else (tr('驱动未提供 Share，可在映射中自定义截图按键') if get_language() == 'zh' else 'Share button unavailable in driver; custom shortcut configurable in mapping')
         if hasattr(self, 'row_capture'):
             self.row_capture.setToolTip(tip)
         if hasattr(self, 'create_hint'):
-            self.create_hint.setText(compact(entry.get('short',{}))+'  /  '+compact(entry.get('long',{})) if key is not None else (tr('未设置') if get_language() == 'zh' else 'Not Configured'))
+            self.create_hint.setText(compact(entry.get('short', {})) + '  /  ' + compact(entry.get('long', {})) if key is not None else (tr('未设置') if get_language() == 'zh' else 'Not Configured'))
             self.create_hint.setToolTip(tip)
         if hasattr(self, 'capture_action_btn'):
             if key is not None:
                 self.capture_action_btn.setText(tr('查看图库 ›'))
-                try: self.capture_action_btn.clicked.disconnect()
-                except Exception: pass
+                try:
+                    self.capture_action_btn.clicked.disconnect()
+                except Exception:
+                    pass
                 self.capture_action_btn.clicked.connect(lambda: self.navigate(2))
             else:
                 self.capture_action_btn.setText(tr('配置按键 ›'))
-                try: self.capture_action_btn.clicked.disconnect()
-                except Exception: pass
+                try:
+                    self.capture_action_btn.clicked.disconnect()
+                except Exception:
+                    pass
                 self.capture_action_btn.clicked.connect(lambda: self.navigate(1))
 
     def start_learning(self):
@@ -1498,16 +1829,28 @@ class Studio(GlassWindow):
         except (ValueError, OSError) as exc:
             self.notify(str(exc)); return False
 
-    def edit_mapping(self, key, new=False, output=None, capture=False):
-        if self.remote:self.client.send('suspend',seconds=2)
-        self.engine.reset(); self.actions.release_all()
-        mapping = {} if new else effective_mappings(self.config, self.snapshot).get(str(key), {})
-        dialog = BindingDialog(self, key, mapping, output=output, new=new)
-        if capture: dialog.start_capture()
+    def edit_mapping(self, key, new=False, output=None, capture=False, profile=None, mode=None):
+        if self.remote:
+            self.client.send('suspend', seconds=2)
+        self.engine.reset()
+        self.actions.release_all()
+        target_profile = profile or (self.virtual_kbm_page.current_scheme() if self.stack.currentIndex() == 6 else self.current_gamepad_profile())
+        from .studio_core import profile_mode
+        target_mode = mode or profile_mode(self.config, target_profile)
+        mapping = {} if new else effective_mappings(self.config, self.snapshot, target_profile).get(str(key), {})
+        dialog = BindingDialog(self, key, mapping, output=output, new=new, profile=target_profile, mode=target_mode)
+        if capture:
+            dialog.start_capture()
         if dialog.exec() == QDialog.Accepted:
-            self.mapping_change({'op':'binding', 'profile':dialog.profile,
-                                 'trigger':dialog.trigger(), 'previous_trigger':None if new else str(key), 'mapping':dialog.value()})
-        if self.remote:self.client.send('suspend',seconds=0)
+            self.mapping_change({
+                'op': 'binding',
+                'profile': dialog.profile,
+                'trigger': dialog.trigger(),
+                'previous_trigger': None if new else str(key),
+                'mapping': dialog.value()
+            })
+        if self.remote:
+            self.client.send('suspend', seconds=0)
 
     def capture(self):
         if self.remote:
@@ -1549,7 +1892,7 @@ class Studio(GlassWindow):
             image=QPushButton(); image.setFixedSize(112,64); image.setObjectName('icon')
             image.setIcon(QIcon(pix)); image.setIconSize(QSize(112,64)); image.clicked.connect(lambda:self.preview(row)); layout.addWidget(image)
             text=QVBoxLayout(); text.setSpacing(4); title=row['title']
-            t_lbl = label(title, 'section'); text.addWidget(t_lbl)
+            t_lbl = label(title, 'section'); t_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred);t_lbl.setToolTip(title);text.addWidget(t_lbl)
             time_lbl = label(tr('拍摄于 ') + f"{row.get('created','')[11:19]}", 'muted'); time_lbl.setObjectName('caption'); text.addWidget(time_lbl)
             layout.addLayout(text,1)
             return box
@@ -1564,7 +1907,10 @@ class Studio(GlassWindow):
         image.clicked.connect(lambda: self.preview(row))
         b.addWidget(image)
         caption = QHBoxLayout()
-        caption.addWidget(label(row['title'], 'section'), 1)
+        title = label(row['title'], 'section')
+        title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        title.setToolTip(row['title'])
+        caption.addWidget(title, 1)
         tip = f"{row.get('created','')[:19].replace('T',' ')}"
         if row.get('is_video'):
             tip += f" · {row.get('size_mb', 0)} MB · 点击播放"
@@ -1587,7 +1933,7 @@ class Studio(GlassWindow):
     def refresh_gallery(self,*args):
         try: rows=list_captures(self.config['save_dir'])
         except OSError as exc: self.notify(tr('无法读取截图目录：')+str(exc)); return
-        columns=2 if self.width()<1150 else 3
+        columns=max(2,min(5,self.gallery_view.viewport().width()//320))
         signature=(tuple((r['path'],r['favorite']) for r in rows),self.search.text(),self.only_favorites.isChecked(),columns)
         if getattr(self,'gallery_signature',None)==signature: return
         self.gallery_signature=signature
@@ -1595,12 +1941,22 @@ class Studio(GlassWindow):
         for i in range(self.gallery_grid.columnCount()):self.gallery_grid.setColumnStretch(i,0)
         self.clear_layout(self.gallery_grid); self.clear_layout(self.recent_row)
         filtered=[r for r in rows if (not self.only_favorites.isChecked() or r['favorite']) and self.search.text().lower() in (r['title']+r['path']).lower()]
-        self.gallery_info.setText(f"{len(rows)} " + tr('张'))
+        self.gallery_info.setText(f"{len(filtered)} / {len(rows)} " + tr('项内容'))
         for i,row in enumerate(filtered[:180]): self.gallery_grid.addWidget(self.thumbnail(row),i//columns,i%columns)
         if not filtered:
-            empty = label(tr('暂无截图'), 'muted')
-            empty.setAlignment(Qt.AlignCenter)
-            empty.setStyleSheet(f"color: {TOKENS['ink_3']}; font-size: 15px; font-weight: 500;")
+            empty = QWidget()
+            empty_layout = QVBoxLayout(empty)
+            empty_layout.setSpacing(12)
+            icon = label('')
+            icon.setPixmap(glyph('photos', TOKENS['ink_3']).pixmap(48, 48))
+            empty_layout.addWidget(icon, 0, Qt.AlignHCenter)
+            empty_layout.addWidget(label(tr('暂无截图') if not rows else tr('没有匹配的内容'), 'section'), 0, Qt.AlignHCenter)
+            hint = label(tr('保存第一张游戏截图，精彩瞬间会出现在这里。') if not rows else tr('试试其他关键词，或关闭收藏筛选。'), 'caption', True)
+            empty_layout.addWidget(hint, 0, Qt.AlignHCenter)
+            if not rows:
+                empty_layout.addWidget(button(tr('拍摄截图'), self.capture, primary=True, icon='camera'), 0, Qt.AlignHCenter)
+            else:
+                empty_layout.addWidget(button(tr('清除筛选'), self.clear_capture_filters, icon='refresh'), 0, Qt.AlignHCenter)
             self.gallery_grid.addWidget(empty, 0, 0, 1, columns, Qt.AlignCenter)
             for i in range(columns):
                 self.gallery_grid.setColumnStretch(i, 1)
@@ -1611,12 +1967,21 @@ class Studio(GlassWindow):
             self.gallery_grid.setRowStretch((min(len(filtered), 180) + columns - 1) // columns, 1)
         for row in rows[:2]: self.recent_row.addWidget(self.thumbnail(row,True),1)
         if not rows:
-            r_empty = label(tr('暂无截图'), 'muted')
-            r_empty.setAlignment(Qt.AlignCenter)
+            r_empty = GlassPanel()
+            r_layout = QHBoxLayout(r_empty)
+            r_layout.setContentsMargins(18, 18, 18, 18)
+            r_layout.addWidget(label(tr('保存第一张游戏截图，精彩瞬间会出现在这里。'), 'caption', True), 1)
+            r_layout.addWidget(button(tr('拍摄截图'), self.capture, primary=True, icon='camera'))
             self.recent_row.addWidget(r_empty, 1)
+
+    def clear_capture_filters(self):
+        self.search.clear()
+        self.only_favorites.setChecked(False)
 
     def resizeEvent(self,event):
         super().resizeEvent(event)
+        if hasattr(self,'size_grip'):
+            self.reflow_workspace()
         if hasattr(self,'recent_row'):QTimer.singleShot(0,self.refresh_gallery)
 
     def favorite(self,row):
@@ -1824,6 +2189,6 @@ def run():
             window.grab().save(str(root/'smoke-window.png'))
             window.quit_app()
         QTimer.singleShot(1200,smoke_finish)
-    window.show(); code=app.exec(); ui_server.close(); lock.unlock(); return code
+    window.showFullScreen(); code=app.exec(); ui_server.close(); lock.unlock(); return code
 
 

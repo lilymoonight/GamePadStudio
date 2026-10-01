@@ -283,6 +283,15 @@ class Agent(QObject):
 
     def dispatch(self,binding,down=True):
         action=binding.get('action','none')
+        if action=='gamepad_button':
+            self.actions.gamepad_button(binding.get('value', '0'), down)
+            return
+        elif action=='gamepad_chord':
+            self.actions.gamepad_chord(binding.get('value', '0'), down)
+            return
+        elif action=='gamepad_turbo':
+            self.actions.gamepad_turbo(binding.get('value', '0'), down, binding.get('rate_hz', 15))
+            return
         if action=='hold':self.actions.hold(binding.get('value',''),down);return
         if not down or action=='none':return
         if action=='capture':self.capture()

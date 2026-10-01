@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal, QByteArray
 from PySide6.QtGui import (QColor, QPainter, QPainterPath, QPixmap, QPen,
-                           QRadialGradient)
+                           QRadialGradient, QImage)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget, QSizePolicy
 
@@ -143,6 +143,45 @@ TE_ASSET_NAMES = {
     'generic': 'te_generic.png',
 }
 
+# Button centers in the source PNG pixels, independent of crop and stage size.
+RASTER_BUTTON_CENTERS = {
+    'dualsense': {
+        0: (859, 400), 1: (920, 341), 2: (799, 341), 3: (859, 282),
+        4: (406, 253), 5: (600, 453), 6: (794, 253),
+        7: (463, 454), 8: (736, 454), 9: (344, 209), 10: (855, 209),
+        11: (340, 296), 12: (340, 386), 13: (294, 341), 14: (383, 341),
+        15: (600, 505), 20: (600, 290),
+    },
+    'dualshock4': {
+        0: (843, 440), 1: (900, 383), 2: (786, 382), 3: (844, 327),
+        4: (441, 308), 5: (600, 495), 6: (758, 308),
+        7: (475, 485), 8: (725, 485), 9: (351, 269), 10: (846, 269),
+        11: (355, 344), 12: (355, 420), 13: (316, 383), 14: (395, 383),
+        15: (600, 549), 20: (600, 350),
+    },
+    'xbox': {
+        0: (836, 399), 1: (900, 341), 2: (774, 338), 3: (836, 278),
+        4: (533, 336), 5: (600, 244), 6: (667, 336),
+        7: (361, 334), 8: (719, 479), 9: (374, 183), 10: (826, 183),
+        11: (480, 435), 12: (480, 525), 13: (432, 479), 14: (528, 479),
+        15: (600, 370),
+    },
+    'switch': {
+        0: (864, 412), 1: (935, 344), 2: (790, 344), 3: (864, 280),
+        4: (484, 276), 5: (675, 347), 6: (727, 276),
+        7: (335, 347), 8: (729, 477), 9: (353, 174), 10: (842, 174),
+        11: (458, 438), 12: (458, 527), 13: (411, 482), 14: (504, 482),
+        15: (537, 347),
+    },
+    'generic': {
+        0: (844, 424), 1: (903, 367), 2: (788, 368), 3: (845, 311),
+        4: (534, 368), 5: (600, 368), 6: (669, 368),
+        7: (359, 370), 8: (715, 501), 9: (357, 188), 10: (849, 188),
+        11: (486, 455), 12: (486, 541), 13: (442, 499), 14: (528, 499),
+        15: (844, 503),
+    },
+}
+
 _te_pixmap_cache = {}
 
 
@@ -160,49 +199,72 @@ def get_te_controller_pixmap(family):
     return _te_pixmap_cache[family]
 
 
+@lru_cache(maxsize=5)
+def controller_source_rect(family):
+    """Cache visible hardware bounds, excluding the raster's transparent canvas."""
+    pixmap = get_te_controller_pixmap(family)
+    if pixmap is None or pixmap.isNull():
+        return QRectF()
+    image = pixmap.toImage().convertToFormat(QImage.Format_Alpha8)
+    # Ignore near-transparent export noise while retaining antialiased edges.
+    threshold = bytes(0 if value <= 3 else 255 for value in range(256))
+    alpha = bytes(image.constBits()).translate(threshold)
+    width, height, stride = image.width(), image.height(), image.bytesPerLine()
+    left, top, right, bottom = width, height, -1, -1
+    for y in range(height):
+        row = alpha[y * stride:y * stride + width]
+        first = row.find(b'\xff')
+        if first >= 0:
+            left, right = min(left, first), max(right, row.rfind(b'\xff'))
+            top, bottom = min(top, y), y
+    if right < left:
+        return QRectF()
+    bounds = QRectF(left, top, right - left + 1, bottom - top + 1)
+    return bounds.adjusted(-2, -2, 2, 2).intersected(QRectF(pixmap.rect()))
+
+
+def controller_art_rect(rect, family):
+    """Use the same proportional stage fit for the image and interactive anchors."""
+    source = controller_source_rect(family)
+    if source.isEmpty():
+        _, _, width, height = VIEWBOX[_svg_family(family)]
+    else:
+        width, height = source.width(), source.height()
+    margin = max(8., min(24., min(rect.width(), rect.height()) * .035))
+    area = rect.adjusted(margin, margin, -margin, -margin)
+    if area.width() <= 0 or area.height() <= 0:
+        return QRectF()
+    scale = min(area.width() / width, area.height() / height)
+    target = QRectF(0, 0, width * scale, height * scale)
+    target.moveCenter(rect.center())
+    return target
+
+
 def draw_controller_svg(painter: QPainter, rect: QRectF, family: str, led_color: str = None):
     """Render the Teenage Engineering hardware asset or fallback to vector graphic."""
     if led_color is None:
         led_color = TOKENS['accent']
 
+    target = controller_art_rect(rect, family)
+    if target.isEmpty():
+        return
     te_pixmap = get_te_controller_pixmap(family)
-    if te_pixmap and not te_pixmap.isNull():
-        # Render high-resolution transparent controller hardware
-        margin = 4
-        available_w = rect.width() - 2 * margin
-        available_h = rect.height() - 2 * margin
-        if available_w <= 0 or available_h <= 0:
-            return
-        scale = min(available_w / te_pixmap.width(), available_h / te_pixmap.height())
-        target_w = te_pixmap.width() * scale
-        target_h = te_pixmap.height() * scale
-        target = QRectF(0, 0, target_w, target_h)
-        target.moveCenter(rect.center())
+    source = controller_source_rect(family)
+    if te_pixmap is not None and not te_pixmap.isNull() and not source.isEmpty():
 
         # Smooth render of isolated transparent controller hardware (pure matte, no halo)
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        painter.drawPixmap(target.toRect(), te_pixmap)
+        painter.drawPixmap(target, te_pixmap, source)
         painter.restore()
         return
 
     kind = _svg_family(family)
-    vx, vy, vw, vh = VIEWBOX[kind]
-    margin = 8
-    available_w = rect.width() - 2 * margin
-    available_h = rect.height() - 2 * margin
-    if available_w <= 0 or available_h <= 0:
-        return
-    scale = min(available_w / vw, available_h / vh)
-    target = QRectF(0, 0, vw * scale, vh * scale)
-    target.moveCenter(rect.center())
 
     # Render tinted SVG (pure matte, no halo)
     painter.save()
-    painter.translate(target.topLeft())
-    painter.scale(scale, scale)
-    _get_renderer(kind, led_color).render(painter, QRectF(0, 0, vw, vh))
+    _get_renderer(kind, led_color).render(painter, target)
     painter.restore()
 
 
@@ -255,13 +317,8 @@ class ControllerPhoto(QWidget):
         self.update()
 
     def product_rect(self):
-        area = QRectF(self.rect()).adjusted(8, 4, -8, -4)
-        kind = _svg_family(self.family)
-        _, _, vw, vh = VIEWBOX[kind]
-        scale = min(area.width() / vw, area.height() / vh)
-        target = QRectF(0, 0, vw * scale, vh * scale)
-        target.moveCenter(area.center())
-        return target
+        stage = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        return controller_art_rect(stage, self.family)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -281,12 +338,22 @@ class ControllerInput(ControllerPhoto):
         self.axes = [0.] * 6
         self.available = None
         self.selected = None
+        self.selected_buttons = set()
 
     def select_button(self, key):
-        self.selected = key
+        self.select_buttons([] if key is None else [key])
+
+    def select_buttons(self, keys):
+        self.selected_buttons = {key for key in keys if key in self.anchors()
+                                 and (self.available is None or key in self.available)}
+        self.selected = min(self.selected_buttons) if self.selected_buttons else None
         self.update()
 
     def anchors(self):
+        source = controller_source_rect(self.family)
+        if not source.isEmpty() and self.family in RASTER_BUTTON_CENTERS:
+            return {key: ((x - source.left()) / source.width(), (y - source.top()) / source.height())
+                    for key, (x, y) in RASTER_BUTTON_CENTERS[self.family].items()}
         if self.family in ('dualsense', 'dualshock4', 'generic'):
             return {
                 0: (.773, .440),  # Cross
@@ -334,7 +401,8 @@ class ControllerInput(ControllerPhoto):
     def update_state(self, state):
         if state:
             self.set_family(state.get('family', 'generic'))
-        self.available = set(state.get('available_buttons', [])) if state else set()
+        if state:
+            self.available = set(state.get('available_buttons', []))
         buttons = set(state['buttons']) if state else set()
         axes = state['axes'] if state else [0.] * 6
         if buttons != self.buttons or axes != self.axes:
@@ -344,15 +412,32 @@ class ControllerInput(ControllerPhoto):
 
     def paintEvent(self, event):
         super().paintEvent(event)
+        if not self.selected_buttons:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.product_rect()
+        radius = max(9., min(20., rect.width() * .026))
+        stroke = QColor(TOKENS['accent'])
+        fill = QColor(stroke)
+        fill.setAlpha(38)
+        painter.setPen(QPen(stroke, 2.))
+        painter.setBrush(fill)
+        for key, (x, y) in self.anchors().items():
+            if key in self.selected_buttons and (self.available is None or key in self.available):
+                painter.drawEllipse(QPointF(rect.left() + x * rect.width(), rect.top() + y * rect.height()), radius, radius)
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
         rect = self.product_rect()
         points = {k: QPointF(rect.left() + x * rect.width(), rect.top() + y * rect.height())
-                  for k, (x, y) in self.anchors().items() if self.available is None or k in self.available}
+                  for k, (x, y) in self.anchors().items()}
         if not points:
             return
-        key = min(points, key=lambda k: (points[k] - event.position()).manhattanLength())
-        if (points[key] - event.position()).manhattanLength() < max(20, rect.width() * .065):
+        def distance_squared(point):
+            delta = point - event.position()
+            return delta.x() ** 2 + delta.y() ** 2
+        key = min(points, key=lambda k: distance_squared(points[k]))
+        if (self.available is None or key in self.available) and distance_squared(points[key]) < max(20, rect.width() * .075) ** 2:
             self.button_clicked.emit(key)

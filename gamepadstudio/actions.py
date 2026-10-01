@@ -118,9 +118,28 @@ class WindowsActions:
         attach_to_default_desktop()
         self.held = {}
         self.held_mouse = set()
+        self.held_gamepad_buttons = set()
+        self.held_turbo = {}
         self.user32 = C.WinDLL('user32', use_last_error=True)
         self.user32.SendInput.argtypes = [W.UINT, C.POINTER(INPUT), C.c_int]
         self.user32.SendInput.restype = W.UINT
+
+    def gamepad_button(self, button, down):
+        if down:
+            self.held_gamepad_buttons.add(button)
+        else:
+            self.held_gamepad_buttons.discard(button)
+
+    def gamepad_chord(self, buttons, down):
+        parts = buttons.split('+') if isinstance(buttons, str) else list(buttons)
+        for b in parts:
+            self.gamepad_button(b.strip(), down)
+
+    def gamepad_turbo(self, button, down, rate_hz=15):
+        if down:
+            self.held_turbo[button] = rate_hz
+        else:
+            self.held_turbo.pop(button, None)
 
     def _send(self, keys, down):
         if not keys:
@@ -338,6 +357,10 @@ class WindowsActions:
                 self.mouse_button(b, False)
             except Exception as exc:
                 errors.append(exc)
+        if hasattr(self, 'held_gamepad_buttons'):
+            self.held_gamepad_buttons.clear()
+        if hasattr(self, 'held_turbo'):
+            self.held_turbo.clear()
         if errors:
             raise OSError('部分键鼠按键未能释放；映射保持暂停，可再次尝试释放') from errors[0]
 

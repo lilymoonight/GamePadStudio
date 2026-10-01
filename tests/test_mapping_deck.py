@@ -1,0 +1,148 @@
+"""The controller visual deck routes real triggers, gestures and profile state."""
+import os
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
+from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+
+from gamepadstudio.mapping_deck import MappingDeck
+from gamepadstudio.studio_core import default_config
+from gamepadstudio.kbm_mapper import NIKKI_PROFILE_NAME
+
+
+class Owner:
+    def __init__(self, root):
+        self.config = default_config(root)
+        self.snapshot = {'family': 'xbox'}
+        self.profile = '主机体验'
+        self.config['profiles'][self.profile] = {
+            '0': {'short': {'action': 'gamepad_button', 'value': '1'},
+                  'long': {'action': 'gamepad_turbo', 'value': '2', 'rate_hz': 18}},
+            '9+10': {'short': {'action': 'gamepad_chord', 'value': '2+3'},
+                     'long': {'action': 'none'}},
+            '0+1+2+3': {'short': {'action': 'gamepad_chord', 'value': '9+10+LT+RT'},
+                        'long': {'action': 'none'}},
+            '1+2': {'short': {'action': 'none'}, 'long': {'action': 'none'}},
+        }
+        self.edits = []
+        self.changes = []
+
+    def current_gamepad_profile(self):
+        return self.profile
+
+    def edit_mapping(self, trigger, **kwargs):
+        self.edits.append((trigger, kwargs))
+
+    def mapping_change(self, change):
+        self.changes.append(change)
+        self.config['profiles'][change['profile']][change['trigger']] = {
+            'short': {'action': 'none'}, 'long': {'action': 'none'}}
+
+
+def app():
+    return QApplication.instance() or QApplication([])
+
+
+def flush():
+    app().processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
+def key_tokens(widget):
+    return [label.property('keyToken') for label in widget.findChildren(QLabel)
+            if label.property('keyToken') is not None]
+
+
+def test_combo_chips_use_canonical_triggers_and_edit_current_profile(tmp_path):
+    app()
+    owner = Owner(tmp_path)
+    deck = MappingDeck(owner)
+    selected = []
+    deck.trigger_selected.connect(selected.append)
+    assert set(deck.combo_buttons) == {'9+10', '0+1+2+3'}
+    deck.combo_buttons['9+10'].click()
+    flush()
+    assert selected == ['9+10']
+    assert deck.selected_trigger == '9+10'
+    assert key_tokens(deck.short_card) == ['9', '10', '2', '3']
+    deck.long_card.click()
+    assert owner.edits[-1] == ('9+10', {'profile': '主机体验', 'mode': 'gamepad'})
+    deck.combo_btn.click()
+    assert owner.edits[-1] == ('9+10', {'new': True, 'profile': '主机体验', 'mode': 'gamepad'})
+    deck.set_trigger('RB+LB')
+    assert selected == ['9+10']  # External synchronisation does not loop back.
+    assert deck.selected_trigger == '9+10'
+    deck.refresh()
+    assert deck.selected_trigger == '9+10'
+    deck.clear_btn.click()
+    deck.refresh()
+    assert owner.changes[-1] == {'op': 'unbind', 'trigger': '9+10', 'profile': '主机体验'}
+    assert '9+10' not in deck.combo_buttons
+    assert deck.selected_trigger == '9+10'
+    assert not deck.clear_btn.isEnabled()
+
+
+def test_feedback_cannot_light_an_inactive_profile(tmp_path):
+    app()
+    owner = Owner(tmp_path)
+    deck = MappingDeck(owner)
+    deck.set_trigger('0')
+    data = {'active': ['0', '9+10'], 'events': [{'trigger': '0', 'gesture': 'long'}]}
+    deck.feedback(data)
+    assert deck.long_card.active and not deck.short_card.active
+    assert deck.combo_buttons['9+10'].property('activeMapping')
+    deck.refresh()
+    assert deck.long_card.active and not deck.short_card.active
+    owner.config['active_profile'] = NIKKI_PROFILE_NAME
+    deck.feedback(data)
+    assert not deck.long_card.active and not deck.short_card.active
+    assert not deck.combo_buttons['9+10'].property('activeMapping')
+    owner.config['active_profile'] = owner.profile
+    deck.feedback({'active': []})
+    assert not deck.long_card.active
+
+
+def test_four_key_input_and_output_wrap_within_narrow_deck(tmp_path):
+    app()
+    window = QWidget()
+    layout = QVBoxLayout(window)
+    owner = Owner(tmp_path)
+    deck = MappingDeck(owner)
+    layout.addWidget(deck)
+    layout.addStretch()
+    deck.set_trigger('0+1+2+3')
+    window.resize(350, 560)
+    window.show()
+    flush()
+    try:
+        assert key_tokens(deck.short_card) == ['0', '1', '2', '3', '9', '10', 'LT', 'RT']
+        assert deck.width() <= 350
+        assert deck.short_card.height() >= 84
+        for child in deck.short_card.findChildren(QLabel):
+            corner = child.mapTo(deck.short_card, child.rect().bottomRight())
+            assert corner.x() < deck.short_card.width()
+        for button in deck.combo_buttons.values():
+            assert button.width() >= button.layout().sizeHint().width()
+            for child in button.findChildren(QLabel):
+                corner = child.mapTo(button, child.rect().bottomRight())
+                assert corner.x() < button.width()
+        assert deck.height() < 380
+    finally:
+        window.hide()
+
+
+def test_cards_show_turbo_rate_and_macro_steps_as_widgets(tmp_path):
+    app()
+    owner = Owner(tmp_path)
+    deck = MappingDeck(owner)
+    deck.set_trigger('0')
+    flush()
+    assert any(label.text() == '18 Hz' for label in deck.long_card.findChildren(QLabel))
+    owner.config['profiles'][owner.profile]['0']['short'] = {
+        'action': 'gamepad_macro',
+        'sequence': [{'value': '0'}, {'delay_ms': 80}, {'value': '1+2'}]}
+    deck.refresh()
+    flush()
+    assert key_tokens(deck.short_card) == ['0', '0', '1', '2']
+    assert any(label.text() == '80 ms' for label in deck.short_card.findChildren(QLabel))
+    assert all('{' not in label.text() for label in deck.short_card.findChildren(QLabel))

@@ -19,10 +19,13 @@ ALIASES = {'A': '0', 'B': '1', 'X': '2', 'Y': '3', 'BACK': '4',
            'LS_UP': 'LS:up', 'LS_DOWN': 'LS:down', 'LS_LEFT': 'LS:left', 'LS_RIGHT': 'LS:right'}
 INPUTS = [str(i) for i in range(21)] + ['LT', 'RT'] + [f'{s}:{d}' for s in ('LS', 'RS') for d in ('up', 'down', 'left', 'right')] + ['LS:outer']
 GESTURES = ('short', 'long')
-HOLD_ACTIONS = ('hold', 'mouse_hold')
+GAMEPAD_TARGETS = ['0', '1', '2', '3', '9', '10', 'LT', 'RT', '11', '12', '13', '14', '7', '8', '4', '6', '5', '15']
+GAMEPAD_ACTIONS = {'gamepad_button', 'gamepad_chord', 'gamepad_turbo', 'gamepad_macro'}
+HOLD_ACTIONS = ('hold', 'mouse_hold', 'gamepad_button', 'gamepad_chord', 'gamepad_turbo')
 ACTIONS = {'none', 'suppress', 'hold', 'shortcut', 'mouse_hold', 'mouse_click', 'wheel', 'capture',
            'replay_record', 'record_toggle', 'home', 'gallery', 'launch',
-           'volume_mute', 'volume_up', 'volume_down', 'media'}
+           'volume_mute', 'volume_up', 'volume_down', 'media',
+           'gamepad_button', 'gamepad_chord', 'gamepad_turbo', 'gamepad_macro'}
 
 
 def canonical_trigger(value):
@@ -40,6 +43,12 @@ def validate_binding(binding):
     if not isinstance(binding, dict) or binding.get('action', 'none') not in ACTIONS:
         raise ValueError('未知映射动作')
     action = binding.get('action', 'none')
+    if action == 'gamepad_button' and not str(binding.get('value', '')).strip():
+        raise ValueError('请选择目标手柄按键')
+    if action == 'gamepad_chord' and not str(binding.get('value', '')).strip():
+        raise ValueError('请设置目标手柄组合键')
+    if action == 'gamepad_turbo' and not str(binding.get('value', '')).strip():
+        raise ValueError('请选择手柄连发按键')
     if action in ('hold', 'shortcut') and not parse_keys(binding.get('value', '')):
         raise ValueError('请设置键盘按键或组合键')
     if action in ('mouse_hold', 'mouse_click') and binding.get('value') not in ('left', 'right', 'middle'):
@@ -111,9 +120,12 @@ def convert_scheme(scheme):
     return mappings
 
 
-def effective_mappings(config, state=None):
-    mappings = copy.deepcopy(config['profiles'][config['active_profile']])
-    family = (state or {}).get('family', config.get('profile_families', {}).get(config['active_profile'], 'generic'))
+def effective_mappings(config, state=None, profile_name=None):
+    target = profile_name or config.get('active_profile')
+    if target not in config.get('profiles', {}):
+        target = config.get('active_profile')
+    mappings = copy.deepcopy(config['profiles'][target])
+    family = (state or {}).get('family', config.get('profile_families', {}).get(target, 'generic'))
     if family == 'xbox' and config.get('gamebar_shield_enabled'):
         available = (state or {}).get('available_buttons', [5, 15])
         if 5 in available:
@@ -123,9 +135,10 @@ def effective_mappings(config, state=None):
     return mappings
 
 
-def profile_family(config, state=None):
+def profile_family(config, state=None, profile_name=None):
     from .controller_catalog import CATALOG
-    family = (state or {}).get('family', config.get('profile_families', {}).get(config['active_profile'], 'dualsense'))
+    target = profile_name or config.get('active_profile')
+    family = (state or {}).get('family', config.get('profile_families', {}).get(target, 'dualsense'))
     return family if family in CATALOG else 'dualsense'
 
 
@@ -139,10 +152,19 @@ def trigger_label(trigger, family='dualsense'):
     return ' + '.join(names.get(int(p), p) if p.isdigit() else extra.get(p, p) for p in canonical_trigger(trigger).split('+'))
 
 
-def binding_label(binding):
+def binding_label(binding, family='dualsense'):
     from .studio_core import ACTION_NAMES
     action = binding.get('action', 'none')
     value = binding.get('value', '')
+    if action == 'gamepad_button':
+        return '手柄 ' + trigger_label(value, family)
+    if action == 'gamepad_chord':
+        return '手柄组合 [' + trigger_label(value, family) + ']'
+    if action == 'gamepad_turbo':
+        hz = binding.get('rate_hz', 15)
+        return '手柄连发 [' + trigger_label(value, family) + f' {hz}Hz]'
+    if action == 'gamepad_macro':
+        return '手柄连招 (' + str(len(binding.get('sequence', []))) + ' 步)'
     if action in ('hold', 'shortcut'):
         return value + ('（按住）' if action == 'hold' else '')
     if action in ('mouse_hold', 'mouse_click'):
@@ -154,6 +176,12 @@ def binding_label(binding):
 
 def output_tokens(binding):
     action = binding.get('action', 'none')
+    if action == 'gamepad_button':
+        return [f'pad:{binding.get("value", "")}']
+    if action == 'gamepad_chord':
+        return [f'pad:{p}' for p in binding.get('value', '').split('+')]
+    if action == 'gamepad_turbo':
+        return [f'pad_turbo:{binding.get("value", "")}']
     if action in ('hold', 'shortcut'):
         return [f'key:{key}' for key in parse_keys(binding.get('value', ''))]
     if action in ('mouse_hold', 'mouse_click'):

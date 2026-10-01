@@ -4,7 +4,7 @@ import math
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout,
-                               QGridLayout, QPushButton, QFrame)
+                               QGridLayout, QPushButton, QFrame, QSizePolicy)
 
 from .controller_catalog import CATALOG, axis_labels, button_labels, button_order
 from .controller_schematic import ControllerSchematic
@@ -44,6 +44,8 @@ class StickHistory:
 
 def label(value='', size=13, bold=False):
     widget = QLabel(value)
+    widget.setWordWrap(True)
+    widget.setMinimumWidth(0)
     widget.setStyleSheet(
         f'color: {TOKENS["ink"] if bold else TOKENS["ink_2"]}; '
         f'font-size: {size}px; font-weight: {700 if bold else 500};'
@@ -87,17 +89,19 @@ class InputTester(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(12)
 
-        self.device_name = label(tr('DualSense 控制器'), 19, True)
+        self.device_name = label(tr('未连接手柄'), 19, True)
+        self.device_name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.device_name.setToolTip(self.device_name.text())
         self.device_name.setStyleSheet(
             f'color: {TOKENS["ink"]}; font-size: 19px; font-weight: 800; letter-spacing: -0.4px;'
         )
-        toolbar.addWidget(self.device_name)
+        toolbar.addWidget(self.device_name, 1)
 
-        self.raw_tag = label(tr('  ONLINE · 实时遥测  '), 11, True)
-        self.raw_tag.setStyleSheet(tag_style(TOKENS['accent'], 0.16, 0.45))
+        self.raw_tag = label(tr('  OFFLINE · 未连接  '), 11, True)
+        self.raw_tag.setWordWrap(False)
+        self.raw_tag.setStyleSheet(tag_style(TOKENS['ink_3'], 0.12, 0.25))
         self.raw_tag.setToolTip(tr('SDL 原始标准轴值；不应用软件死区。'))
-        toolbar.addWidget(self.raw_tag)
-        toolbar.addStretch()
+        toolbar.addWidget(self.raw_tag, 0, Qt.AlignTop)
         layout.addLayout(toolbar)
 
         # Headless tool state controllers (auto-active; hidden from UI to eliminate noise)
@@ -140,7 +144,7 @@ class InputTester(QWidget):
         stick_row = QHBoxLayout()
         stick_row.setSpacing(16)
         self.stick_gauges = [StickGauge(), StickGauge()]
-        self.axis_readings = [label('', 10) for _ in range(2)]
+        self.axis_readings = [label('X —  Y —', 10) for _ in range(2)]
         for i in range(2):
             col = QVBoxLayout()
             col.setSpacing(4)
@@ -179,15 +183,18 @@ class InputTester(QWidget):
         drift_info = QVBoxLayout()
         drift_info.setSpacing(4)
         drift_info.setAlignment(Qt.AlignVCenter)
-        self.drift_status = label(tr('● 回中良好'), 12, True)
-        self.drift_status.setStyleSheet(f'color: {TOKENS["green"]}; font-size: 12px; font-weight: 700;')
+        self.drift_status = label(tr('● 离线'), 12, True)
+        self.drift_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.drift_status.setStyleSheet(f'color: {TOKENS["ink_3"]}; font-size: 12px; font-weight: 700;')
         drift_info.addWidget(self.drift_status)
 
-        self.drift_reading = label(tr('偏移: 0.0%  (X +0.000, Y +0.000)'), 11)
+        self.drift_reading = label(tr('偏移: —'), 11)
+        self.drift_reading.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.drift_reading.setStyleSheet(f'font: 11px "Cascadia Code", Consolas; color: {TOKENS["ink"]}; font-weight: 600;')
         drift_info.addWidget(self.drift_reading)
 
         drift_spec = label(tr('硬件安全死区阈值: 12% 刻度参考'), 10.5)
+        drift_spec.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         drift_spec.setStyleSheet(f'color: {TOKENS["ink_3"]};')
         drift_info.addWidget(drift_spec)
         drift_row.addLayout(drift_info, 1)
@@ -215,10 +222,24 @@ class InputTester(QWidget):
         self.btn_tiles = {}
 
         # 16 slots in 2 rows of 8
+        init_names = button_labels('dualsense')
+        def clean_lbl(k):
+            raw = init_names.get(k, str(k))
+            return (raw.replace('方向键 ', '').replace('D-Pad ', '')
+                    .replace('  交叉', '').replace('  Cross', '')
+                    .replace('  圆圈', '').replace('  Circle', '')
+                    .replace('  方块', '').replace('  Square', '')
+                    .replace('  三角', '').replace('  Triangle', '')
+                    .replace('左摇杆按下', 'L3').replace('右摇杆按下', 'R3')
+                    .replace('Left Stick Click', 'L3').replace('Right Stick Click', 'R3')
+                    .replace('左缓冲键', 'LB').replace('右缓冲键', 'RB')
+                    .replace('Left Bumper', 'LB').replace('Right Bumper', 'RB')
+                    .replace('触摸板按键', 'TP').replace('Touchpad Click', 'TP')).strip()
+
         button_keys_row1 = [0, 1, 2, 3, 9, 10, 7, 8]
         button_keys_row2 = [11, 12, 13, 14, 4, 6, 5, 15]
         for col_idx, k in enumerate(button_keys_row1):
-            tile = QLabel(str(k))
+            tile = QLabel(clean_lbl(k))
             tile.setAlignment(Qt.AlignCenter)
             tile.setFixedHeight(30)
             tile.setStyleSheet(f"background: {TOKENS['void']}; color: {TOKENS['ink_2']}; font: 11px 'Cascadia Code', Consolas; font-weight: 600; border: 1px solid {TOKENS['border']}; border-radius: {TOKENS['r_sm']}px;")
@@ -226,7 +247,7 @@ class InputTester(QWidget):
             self.btn_tiles[k] = tile
 
         for col_idx, k in enumerate(button_keys_row2):
-            tile = QLabel(str(k))
+            tile = QLabel(clean_lbl(k))
             tile.setAlignment(Qt.AlignCenter)
             tile.setFixedHeight(30)
             tile.setStyleSheet(f"background: {TOKENS['void']}; color: {TOKENS['ink_2']}; font: 11px 'Cascadia Code', Consolas; font-weight: 600; border: 1px solid {TOKENS['border']}; border-radius: {TOKENS['r_sm']}px;")
@@ -239,14 +260,16 @@ class InputTester(QWidget):
         activity = QHBoxLayout()
         activity.setSpacing(8)
         self.live_dot = QLabel('●')
-        self.live_dot.setStyleSheet(f'color: {TOKENS["green"]}; font-size: 11px;')
+        self.live_dot.setStyleSheet(f'color: {TOKENS["ink_dim"]}; font-size: 11px;')
         activity.addWidget(self.live_dot)
 
         status_tag = QLabel(tr('实时响应:'))
         status_tag.setStyleSheet(f'color: {TOKENS["ink_3"]}; font-size: 11.5px; font-weight: 600;')
         activity.addWidget(status_tag)
 
-        self.pressed_reading = label(tr('等待按键操作...'), 11.5, True)
+        self.pressed_reading = label(tr('等待手柄接入...'), 11.5, True)
+        self.pressed_reading.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.pressed_reading.setToolTip(self.pressed_reading.text())
         self.pressed_reading.setStyleSheet(f'color: {TOKENS["accent"]}; font-size: 11.5px; font-weight: 700;')
         activity.addWidget(self.pressed_reading, 1)
 
@@ -312,13 +335,16 @@ class InputTester(QWidget):
             btn = QPushButton(title)
             btn.setObjectName('testAction')
             btn.setMinimumHeight(34)
+            btn.setEnabled(False)
+            btn.setAccessibleName(title)
             btn.setToolTip(tip)
             btn.clicked.connect(lambda checked=False, s=strength, c=count: self.rumble_pattern(s, c))
             rumble_grid.addWidget(btn, i // 2, i % 2)
             self.rumble_buttons.append(btn)
         rumble_col.addLayout(rumble_grid)
 
-        self.motor_status = label(tr('双马达独立频段 · 就绪'), 11)
+        self.motor_status = label(tr('未连接马达'), 11)
+        self.motor_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.motor_status.setStyleSheet(f"color: {TOKENS['ink_3']}; font-size: 11px;")
         rumble_col.addWidget(self.motor_status)
         rumble_col.addStretch(1)
@@ -370,9 +396,12 @@ class InputTester(QWidget):
             for h in self.histories:
                 h.clear()
             self.raw_tag.setText(tr('  OFFLINE · 未连接  '))
-            self.raw_tag.setStyleSheet(tag_style(TOKENS['ink_dim'], 0.12, 0.25))
+            self.raw_tag.setStyleSheet(tag_style(TOKENS['ink_3'], 0.12, 0.25))
             self.device_name.setText(tr('未连接手柄'))
+            self.device_name.setToolTip(self.device_name.text())
             self.pressed_reading.setText(tr('等待手柄接入...'))
+            self.pressed_reading.setToolTip(self.pressed_reading.text())
+            self.live_dot.setStyleSheet(f'color: {TOKENS["ink_dim"]}; font-size: 11px;')
             self.key_count.setText('—')
             self.drift_status.setText(tr('● 离线'))
             self.drift_status.setStyleSheet(f"color: {TOKENS['ink_3']}; font-size: 11px;")
@@ -380,6 +409,9 @@ class InputTester(QWidget):
             self.motor_status.setText(tr('未连接马达'))
             self.motor_status.setStyleSheet(f"color: {TOKENS['ink_3']}; font-size: 11px;")
             self.diagram.set_state(None, self.histories)
+            self.drift_gauge.set_position(None)
+            for reading in self.axis_readings:
+                reading.setText('X —  Y —')
             for g in self.stick_gauges:
                 g.set_position(None)
             for g in self.trigger_gauges:
@@ -400,8 +432,10 @@ class InputTester(QWidget):
 
         dev_name = state.get('name', tr('游戏控制器'))
         self.device_name.setText(dev_name)
+        self.device_name.setToolTip(dev_name)
         self.raw_tag.setText(tr('  ONLINE · 已连接  '))
         self.raw_tag.setStyleSheet(tag_style(TOKENS['green'], 0.16, 0.40))
+        self.live_dot.setStyleSheet(f'color: {TOKENS["green"]}; font-size: 11px;')
         if rumble_supported:
             self.motor_status.setText(tr('双马达独立频段 · 支持触觉'))
             self.motor_status.setStyleSheet(f"color: {TOKENS['green']}; font-size: 11px; font-weight: 600;")
@@ -444,14 +478,24 @@ class InputTester(QWidget):
         # Update mechanical button matrix tiles
         for k, tile in self.btn_tiles.items():
             if k in names:
-                raw = names[k].replace('方向键 ', '').replace('D-Pad ', '').replace('  交叉', '').replace('  Cross', '').replace('  圆圈', '').replace('  Circle', '').replace('  方块', '').replace('  Square', '').replace('  三角', '').replace('  Triangle', '')
-                tile.setText(raw)
+                raw = (names[k].replace('方向键 ', '').replace('D-Pad ', '')
+                       .replace('  交叉', '').replace('  Cross', '')
+                       .replace('  圆圈', '').replace('  Circle', '')
+                       .replace('  方块', '').replace('  Square', '')
+                       .replace('  三角', '').replace('  Triangle', '')
+                       .replace('左摇杆按下', 'L3').replace('右摇杆按下', 'R3')
+                       .replace('Left Stick Click', 'L3').replace('Right Stick Click', 'R3')
+                       .replace('左缓冲键', 'LB').replace('右缓冲键', 'RB')
+                       .replace('Left Bumper', 'LB').replace('Right Bumper', 'RB')
+                       .replace('触摸板按键', 'TP').replace('Touchpad Click', 'TP'))
+                tile.setText(raw.strip())
             is_avail = available is None or k in available
             tile.setVisible(is_avail)
             if k in pressed:
                 tile.setStyleSheet(
-                    f"background: {TOKENS['accent']}; color: #ffffff; font: 11px 'Cascadia Code', Consolas; font-weight: 700; "
-                    f"border: 1px solid #ff7043; border-radius: {TOKENS['r_sm']}px;"
+                    f"background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #ff6d3b, stop:1 #ff5722); "
+                    f"color: #ffffff; font: 11px 'Cascadia Code', Consolas; font-weight: 700; "
+                    f"border: 1px solid rgba(255, 255, 255, 0.45); border-radius: {TOKENS['r_sm']}px;"
                 )
             else:
                 tile.setStyleSheet(
@@ -466,6 +510,7 @@ class InputTester(QWidget):
         else:
             self.pressed_reading.setText(tr('等待按键操作...'))
             self.key_count.setText(f'0 / {len(self.diagram.available)}' if self.diagram.available else '—')
+        self.pressed_reading.setToolTip(self.pressed_reading.text())
 
     def snapshot(self):
         return {

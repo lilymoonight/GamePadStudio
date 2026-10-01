@@ -1,7 +1,6 @@
-"""GamepadTester Design System — inspired by https://www.gamepadtester.cn/
+"""Shared visual system for GamePad Studio's desktop workspace.
 
-Warm stone / obsidian palette, high-contrast typography, floating pill controls,
-and tactile hardware cards. Every color and dimension is derived from TOKENS.
+Warm graphite surfaces, restrained orange actions, and clear control states.
 """
 import ctypes
 from ctypes import wintypes
@@ -9,36 +8,35 @@ from functools import lru_cache
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import (QColor, QFont, QIcon, QLinearGradient, QPainter,
-                           QPainterPath, QPen, QPixmap, QRadialGradient)
+from PySide6.QtCore import QByteArray, QEvent, QPointF, QRectF, QSize, Qt
+from PySide6.QtGui import (QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFrame, QLabel,
                                QMainWindow, QPushButton, QWidget,
-                               QVBoxLayout, QHBoxLayout)
+                               QVBoxLayout, QHBoxLayout, QSizePolicy)
 
 ASSETS = Path(__file__).resolve().parent / 'assets'
 CHEVRON_DOWN_PATH = (ASSETS / 'chevron_down.svg').as_posix()
 
 # ─── Teenage Engineering & Dieter Rams Design Tokens ────────────────
 TOKENS = {
-    # Warm dark graphite & matte metal surfaces
-    'void':         '#181615',     # matte industrial chassis background
-    'base':         '#1d1b19',     # sub-panel level
-    'surface_lo':   '#1d1b19',     # low-contrast sub-surface level
-    'surface':      '#252220',     # milled graphite module panel
-    'elevated':     '#2e2b28',     # tactile button & input blocks
-    'overlay':      '#3e3935',     # active / hovered control surface
-    'border':       '#36322e',     # crisp 1px milled seam line
-    'border_hi':    '#4d4742',     # chamfered highlight border
-    'border_subtle':'#23201e',     # engraved divider groove
+    # Warm dark graphite & matte metal surfaces (obsidian titanium chassis)
+    'void':         '#121110',     # matte industrial chassis background
+    'base':         '#171614',     # sub-panel level
+    'surface_lo':   '#171614',     # low-contrast sub-surface level
+    'surface':      '#1e1c1a',     # milled graphite module panel
+    'elevated':     '#272421',     # tactile button & input blocks
+    'overlay':      '#34302c',     # active / hovered control surface
+    'border':       '#2f2b27',     # crisp 1px milled seam line
+    'border_hi':    '#46413a',     # chamfered highlight border
+    'border_subtle':'#211f1c',     # engraved divider groove
 
     # High-contrast technical typography
-    'ink':          '#f5f2eb',     # chalk white crisp technical text
-    'ink_2':        '#c4beae',     # laser-etched secondary readout
-    'ink_3':        '#8c8577',     # dial scale & ruler markings
-    'ink_dim':      '#5e5950',     # subtle placeholder / inactive
-    'muted':        '#8c8577',     # secondary muted text alias
+    'ink':          '#f7f4ed',     # chalk white crisp technical text
+    'ink_2':        '#c8c2b4',     # laser-etched secondary readout
+    'ink_3':        '#8e877a',     # dial scale & ruler markings
+    'ink_dim':      '#5c554b',     # subtle placeholder / inactive
+    'muted':        '#8e877a',     # secondary muted text alias
 
     # Teenage Engineering Iconic Accents
     'accent':       '#ff5722',     # TE Punchy Safety Orange
@@ -46,23 +44,25 @@ TOKENS = {
     'accent_lo':    '#e64a19',     # deep mechanical orange
     'accent_bg':    'rgba(255, 87, 34, 0.14)',
     'border_acc':   'rgba(255, 87, 34, 0.65)',
-    'chalk':        '#f5f2eb',     # mechanical chalk white
+    'chalk':        '#f7f4ed',     # mechanical chalk white
 
     # Semantic hardware indicators
-    'green':        '#22c55e',     # status LED active green
+    'green':        '#10b981',     # status LED active emerald green
+    'green_bg':     'rgba(16, 185, 129, 0.14)',
     'orange':       '#ff5722',     # rotary knob & primary action orange
-    'amber':        '#ffb300',     # alert / warning amber
+    'amber':        '#f59e0b',     # alert / warning amber
     'red':          '#ef4444',     # emergency / disconnect red
     'cyan':         '#06b6d4',     # secondary oscilloscope cyan
-    'purple':       '#a855f7',     # trigger / auxiliary purple
+    'purple':       '#8b5cf6',     # trigger / auxiliary purple
     'blue':         '#3b82f6',     # PlayStation cross blue
     'rose':         '#f43f5e',     # favorite pin rose
 
     # Soft squircle industrial radii (tactile, friendly, milled corners)
+    'r_xs':         6,             # tight squircle for tags and badges
     'r_sm':         8,             # soft squircle for compact controls (buttons, inputs, combos)
     'r_md':         10,            # soft squircle for buttons, tiles, badges
-    'r_lg':         14,            # modular rack panel
-    'r_pill':       16,            # tactile pill
+    'r_lg':         12,            # workspace panels
+    'r_pill':       18,            # tactile pill
 }
 
 INK = TOKENS['ink_3']
@@ -75,7 +75,7 @@ STYLE = f'''
 /* ── Base ─────────────────────────────────────────────── */
 QWidget {{
     color: {TOKENS['ink']};
-    font-family: "Segoe UI Variable Display", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+    font-family: "Microsoft YaHei UI", "Segoe UI", "Microsoft YaHei", sans-serif;
     font-size: 13px;
     background: transparent;
 }}
@@ -100,21 +100,21 @@ QLabel#eyebrow {{
 }}
 QLabel#heading {{
     font-size: 22px;
-    font-weight: 800;
+    font-weight: 700;
     color: {TOKENS['ink']};
-    letter-spacing: -0.4px;
+    letter-spacing: -0.3px;
 }}
 QLabel#section {{
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 700;
     color: {TOKENS['ink']};
     letter-spacing: -0.2px;
 }}
 QLabel#productTitle {{
-    font-size: 26px;
-    font-weight: 800;
+    font-size: 24px;
+    font-weight: 700;
     color: {TOKENS['ink']};
-    letter-spacing: -0.5px;
+    letter-spacing: -0.4px;
 }}
 QLabel#caption {{
     color: {TOKENS['ink_3']};
@@ -126,6 +126,12 @@ QLabel#metric {{
     font-size: 12px;
     font-weight: 600;
 }}
+QLabel#brandTitle {{ color: {TOKENS['ink']}; font-size: 15px; font-weight: 700; }}
+QLabel#brandCaption {{ color: {TOKENS['ink_3']}; font-size: 11px; }}
+QLabel#navSection {{ color: {TOKENS['ink_3']}; font-size: 11px; font-weight: 600; }}
+QLabel#pageTitle {{ color: {TOKENS['ink']}; font-size: 25px; font-weight: 700; }}
+QLabel#pageSubtitle {{ color: {TOKENS['ink_2']}; font-size: 12px; }}
+QLabel#footerStatus {{ color: {TOKENS['ink_3']}; font-size: 11px; }}
 
 /* ── Buttons (GamepadTester Pill & Card Style) ────────── */
 QPushButton {{
@@ -136,32 +142,37 @@ QPushButton {{
     border-radius: {TOKENS['r_sm']}px;
     font-weight: 600;
     font-size: 13px;
+    min-height: 20px;
 }}
 QPushButton:hover {{
     background: {TOKENS['overlay']};
     border-color: {TOKENS['ink_dim']};
 }}
-QPushButton:pressed {{ background: {TOKENS['base']}; }}
+QPushButton:pressed {{ background: {TOKENS['base']}; border-color: {TOKENS['accent']}; }}
 QPushButton:disabled {{
     color: {TOKENS['ink_dim']};
-    background: rgba(41, 37, 36, 0.4);
+    background: rgba(30, 28, 26, 0.4);
     border-color: {TOKENS['border']};
 }}
 QPushButton:focus {{ border-color: {TOKENS['accent']}; }}
 
 QPushButton#primary {{
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #ff6e40, stop:1 #ff5722);
+    background: {TOKENS['accent']};
     color: #ffffff;
-    border: 1px solid rgba(255,255,255,0.25);
+    border: 1px solid {TOKENS['accent']};
     border-radius: {TOKENS['r_sm']}px;
     font-weight: 700;
     padding: 8px 18px;
 }}
 QPushButton#primary:hover {{
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #ff8a65, stop:1 #ff7043);
-    border-color: rgba(255,255,255,0.40);
+    background: {TOKENS['accent_hi']};
+    border-color: {TOKENS['accent_hi']};
 }}
 QPushButton#primary:pressed {{ background: #e64a19; }}
+QPushButton#primary:focus {{ border-color: {TOKENS['chalk']}; }}
+QPushButton#primary:disabled {{
+    background: {TOKENS['elevated']}; border-color: {TOKENS['border']}; color: {TOKENS['ink_dim']};
+}}
 
 QPushButton#pill {{
     border-radius: {TOKENS['r_sm']}px;
@@ -224,18 +235,24 @@ QPushButton#icon_danger:hover {{
 
 QPushButton#mappingTile {{
     padding: 0;
+    min-height: 46px;
+    max-height: 46px;
     text-align: left;
     border-radius: {TOKENS['r_sm']}px;
     background: {TOKENS['surface']};
     border: 1px solid {TOKENS['border']};
 }}
 QPushButton#mappingTile:checked {{
-    background: rgba(59, 130, 246, 0.16);
-    border: 1.5px solid {TOKENS['accent']};
+    background: rgba(255, 87, 34, 0.16);
+    border: 1px solid {TOKENS['accent']};
 }}
 QPushButton#mappingTile:hover {{
     border-color: {TOKENS['border_hi']};
     background: {TOKENS['elevated']};
+}}
+QPushButton#mappingTile:checked:hover {{
+    background: rgba(255, 87, 34, 0.20);
+    border-color: {TOKENS['accent']};
 }}
 
 QPushButton#filter {{
@@ -259,12 +276,13 @@ QPushButton#filter:checked {{
 
 QPushButton#brand {{
     background: transparent;
-    border: none;
+    border: 1px solid transparent;
     padding: 0;
     border-radius: {TOKENS['r_md']}px;
 }}
 QPushButton#brand:hover {{
     background: {TOKENS['elevated']};
+    border-color: {TOKENS['border_hi']};
 }}
 
 QPushButton#nav {{
@@ -275,12 +293,41 @@ QPushButton#nav {{
 }}
 QPushButton#nav:hover {{
     background: {TOKENS['elevated']};
-    border-color: {TOKENS['border']};
+    border-color: {TOKENS['border_hi']};
 }}
 QPushButton#nav:checked {{
-    background: {TOKENS['elevated']};
-    border: 1px solid {TOKENS['border_hi']};
+    background: rgba(255, 87, 34, 0.18);
+    border: 1px solid rgba(255, 87, 34, 0.65);
 }}
+QPushButton#sidebarNav {{
+    background: transparent;
+    color: {TOKENS['ink_2']};
+    border: 1px solid transparent;
+    border-radius: {TOKENS['r_sm']}px;
+    text-align: left;
+    padding: 8px 12px;
+    min-height: 26px;
+    max-height: 26px;
+    font-size: 13px;
+    font-weight: 500;
+}}
+QPushButton#sidebarNav:hover {{
+    color: {TOKENS['ink']};
+    background: {TOKENS['elevated']};
+    border-color: {TOKENS['border']};
+}}
+QPushButton#sidebarNav:checked {{
+    color: {TOKENS['ink']};
+    font-weight: 600;
+    background: {TOKENS['accent_bg']};
+    border-color: rgba(255, 87, 34, 0.35);
+}}
+QPushButton#sidebarNav:checked:hover {{
+    background: rgba(255, 87, 34, 0.20);
+    border-color: {TOKENS['border_acc']};
+}}
+QPushButton#sidebarNav:focus {{ border-color: {TOKENS['accent']}; }}
+QPushButton#sidebarNav[compact="true"] {{ padding: 0; min-height: 42px; max-height: 42px; text-align: center; }}
 
 QPushButton#window {{
     border: none;
@@ -323,6 +370,14 @@ QPushButton#testAction:hover {{
     border-color: {TOKENS['accent']};
     color: #ffffff;
 }}
+QPushButton[iconOnly="true"], QPushButton#primary[iconOnly="true"] {{
+    min-height: 0; min-width: 0; padding: 0;
+}}
+QPushButton#icon:focus, QPushButton#icon_danger:focus,
+QPushButton#nav:focus, QPushButton#brand:focus,
+QPushButton#window:focus, QPushButton#close:focus {{
+    border: 1px solid {TOKENS['accent']};
+}}
 
 /* ── Inputs & Dropdowns ────────────────────────────────── */
 QLineEdit, QKeySequenceEdit {{
@@ -330,7 +385,7 @@ QLineEdit, QKeySequenceEdit {{
     border: 1px solid {TOKENS['border_hi']};
     border-radius: {TOKENS['r_sm']}px;
     padding: 6px 12px;
-    min-height: 24px;
+    min-height: 22px;
     color: {TOKENS['ink']};
     selection-background-color: {TOKENS['accent']};
     selection-color: #ffffff;
@@ -343,11 +398,11 @@ QComboBox {{
     background: {TOKENS['elevated']};
     border: 1px solid {TOKENS['border_hi']};
     border-radius: {TOKENS['r_sm']}px;
-    padding: 0px 4px 0px 10px;
-    min-height: 26px;
+    padding: 0px 28px 0px 12px;
+    min-height: 36px;
     color: {TOKENS['ink']};
     font-weight: 600;
-    font-size: 11.5px;
+    font-size: 12px;
 }}
 QComboBox:hover {{
     border-color: {TOKENS['ink_dim']};
@@ -357,7 +412,7 @@ QComboBox:focus {{ border-color: {TOKENS['accent']}; }}
 QComboBox::drop-down {{
     subcontrol-origin: padding;
     subcontrol-position: top right;
-    width: 18px;
+    width: 28px;
     border-left: none;
 }}
 QComboBox::down-arrow {{
@@ -376,7 +431,7 @@ QComboBox QAbstractItemView {{
     outline: none;
 }}
 QComboBox QAbstractItemView::item {{
-    min-height: 24px;
+    min-height: 28px;
     padding: 4px 8px;
     border-radius: 4px;
 }}
@@ -386,6 +441,9 @@ QComboBox QAbstractItemView::item:hover {{
 QComboBox QAbstractItemView::item:selected {{
     background: {TOKENS['accent']};
     color: #ffffff;
+}}
+QLineEdit:disabled, QKeySequenceEdit:disabled, QComboBox:disabled {{
+    color: {TOKENS['ink_dim']}; background: {TOKENS['surface']}; border-color: {TOKENS['border']};
 }}
 QComboBox QAbstractItemView QScrollBar:vertical {{
     background: transparent;
@@ -477,6 +535,43 @@ QMenu {{
 }}
 QMenu::item {{ padding: 7px 20px; border-radius: {TOKENS['r_sm']}px; }}
 QMenu::item:selected {{ background: {TOKENS['accent']}; color: #ffffff; }}
+
+/* ── Container Panels & Rails ─────────────────────────── */
+QWidget#navRail {{
+    background: {TOKENS['base']};
+    border: 1px solid {TOKENS['border']};
+    border-radius: {TOKENS['r_lg']}px;
+}}
+QWidget#statusCapsule {{
+    background: {TOKENS['surface']};
+    border: 1px solid {TOKENS['border_hi']};
+    border-radius: {TOKENS['r_pill']}px;
+}}
+QListWidget {{
+    background: {TOKENS['surface']};
+    border: 1px solid {TOKENS['border']};
+    border-radius: {TOKENS['r_md']}px;
+    padding: 4px;
+    color: {TOKENS['ink']};
+    outline: none;
+}}
+QListWidget::item {{
+    padding: 8px 12px;
+    border-radius: {TOKENS['r_sm']}px;
+    margin: 2px 0;
+    border: 1px solid transparent;
+}}
+QListWidget::item:hover {{
+    background: {TOKENS['elevated']};
+    border-color: {TOKENS['border']};
+}}
+QListWidget::item:selected {{
+    background: rgba(255, 87, 34, 0.16);
+    border-color: {TOKENS['accent']};
+    color: #ffffff;
+}}
+QListWidget::item:selected:hover {{ background: rgba(255, 87, 34, 0.20); }}
+QListWidget:focus {{ border-color: {TOKENS['border_acc']}; }}
 '''
 # fmt: on
 
@@ -535,6 +630,7 @@ PATHS = {
     'search':'<circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/>',
     'minimize':'<path d="M6 12h12"/>',
     'maximize':'<rect x="6" y="6" width="12" height="12" rx="3.5"/>',
+    'restore':'<path d="M9 7V4h11v11h-3"/><rect x="4" y="9" width="11" height="11" rx="2"/>',
     'close':'<path d="m6 6 12 12M18 6 6 18"/>',
     'check':'<path d="m5 12 5 5L20 6"/>',
     'usb':'<path d="M12 21V3m-3 3 3-3 3 3M12 15l-6-4V8m6 9 6-4V8"/><circle cx="6" cy="7" r="1"/><rect x="17" y="5" width="2" height="3"/>',
@@ -585,6 +681,7 @@ class LedSwatch(QPushButton):
         self.setFixedSize(26, 26)
         self.setCursor(Qt.PointingHandCursor)
         self.setObjectName('ledSwatch')
+        self.setProperty('iconOnly', True)
         self.setStyleSheet('QPushButton#ledSwatch { background: transparent; border: none; padding: 0; margin: 0; }')
         if callback:
             self.clicked.connect(callback)
@@ -628,15 +725,17 @@ class LedSwatch(QPushButton):
 # ─── GamepadTester Components ────────────────────────────────────────
 
 class IconButton(QPushButton):
-    """Icon-only button with tooltip and hover state."""
+    """Icon-only button with tooltip, hover state, and active accent illumination."""
 
     def __init__(self, symbol, description, callback=None, size=38, parent=None):
         super().__init__(parent)
         self.setObjectName('icon')
+        self.setProperty('iconOnly', True)
         self.setFixedSize(size, size)
         self.setIconSize(QSize(20, 20))
-        self.setStyleSheet(f'border-radius: {min(TOKENS["r_md"], size // 2 - 1)}px;')
         self.setCursor(Qt.PointingHandCursor)
+        self.symbol = symbol
+        self._custom_color = None
         self.set_symbol(symbol)
         self.setText(description)
         if callback:
@@ -648,7 +747,25 @@ class IconButton(QPushButton):
 
     def set_symbol(self, symbol, color=None):
         self.symbol = symbol
-        self.setIcon(glyph(symbol, color or TOKENS['ink_2']))
+        self._custom_color = color
+        self._update_icon()
+
+    def setChecked(self, checked):
+        super().setChecked(checked)
+        self._update_icon()
+
+    def nextCheckState(self):
+        super().nextCheckState()
+        self._update_icon()
+
+    def _update_icon(self):
+        col = self._custom_color
+        if not col:
+            if self.isCheckable() and self.isChecked() and self.objectName() == 'nav':
+                col = TOKENS['accent']
+            else:
+                col = TOKENS['ink_2']
+        self.setIcon(glyph(self.symbol, col))
 
 
 class Indicator(QLabel):
@@ -731,7 +848,7 @@ class Toggle(QCheckBox):
 
 
 class GlassPanel(QFrame):
-    """GamepadTester Card — stone-900 surface with crisp 1px stone-800 border and subtle ambient glow."""
+    """Quiet grouped surface with a consistent border and keyboard focus ring."""
 
     def __init__(self, parent=None, kind='card'):
         super().__init__(parent)
@@ -752,16 +869,6 @@ class GlassPanel(QFrame):
         hover = getattr(self, 'hover_amount', 0)
         painter.fillPath(path, fill)
 
-        # Subtle card top highlight (light catching top edge)
-        specular = QLinearGradient(rect.topLeft(), rect.topRight())
-        specular.setColorAt(0, QColor(255, 255, 255, 0))
-        specular.setColorAt(0.3, QColor(255, 255, 255, 18))
-        specular.setColorAt(0.7, QColor(255, 255, 255, 18))
-        specular.setColorAt(1, QColor(255, 255, 255, 0))
-        painter.setPen(QPen(specular, 1))
-        painter.drawLine(QPointF(rect.left() + radius, rect.top()),
-                         QPointF(rect.right() - radius, rect.top()))
-
         # Card border
         border_col = (QColor(TOKENS['accent']) if hover > 0.5
                       else QColor(TOKENS['border']))
@@ -775,14 +882,18 @@ class GlassPanel(QFrame):
 
 
 class GlassCanvas(QWidget):
-    """Teenage Engineering field unit chassis: matte dark graphite with laser-etched ruler scales."""
+    """Matte workspace that meets screen edges cleanly when expanded."""
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect())
+        expanded = self.window().isFullScreen() or self.window().isMaximized()
+        if expanded:
+            painter.fillRect(rect, QColor(TOKENS['void']))
+            return
         path = QPainterPath()
-        path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 12, 12)
+        path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), TOKENS['r_lg'], TOKENS['r_lg'])
         painter.setClipPath(path)
 
         # 1. Industrial matte dark graphite chassis
@@ -808,17 +919,19 @@ def transparency_enabled():
 
 
 class GlassWindow(QMainWindow):
-    """Frameless main window with rounded corners and DWM acrylic integration."""
+    """Frameless window with fullscreen-aware resizing and desktop controls."""
 
     def __init__(self):
         super().__init__()
         self.native_glass = False
         self.glass_attempted = False
+        self._fullscreen_restore_state = Qt.WindowNoState
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._sync_window_chrome()
         if self.glass_attempted:
             return
         self.glass_attempted = True
@@ -835,7 +948,7 @@ class GlassWindow(QMainWindow):
                 wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
             ]
             backdrop = ctypes.c_int(3)
-            corner = ctypes.c_int(2)
+            corner = ctypes.c_int(1 if self.isFullScreen() or self.isMaximized() else 2)
             dark = ctypes.c_int(1)
             dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), 4)
             dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(corner), 4)
@@ -849,10 +962,44 @@ class GlassWindow(QMainWindow):
         except (OSError, AttributeError):
             pass
 
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            if self.isFullScreen() and not event.oldState() & Qt.WindowFullScreen:
+                self._fullscreen_restore_state = event.oldState() & Qt.WindowMaximized
+            self._sync_window_chrome()
+
+    def _sync_window_chrome(self):
+        if self.centralWidget():
+            self.centralWidget().update()
+        for titlebar in self.findChildren(TitleBar):
+            titlebar.sync_window_state()
+        if self.native_glass and sys.platform == 'win32':
+            try:
+                corner = ctypes.c_int(1 if self.isFullScreen() or self.isMaximized() else 2)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    wintypes.HWND(int(self.winId())), 33, ctypes.byref(corner), 4,
+                )
+            except (OSError, AttributeError):
+                pass
+
+    def toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.leave_fullscreen()
+        else:
+            self.showFullScreen()
+
+    def leave_fullscreen(self):
+        if self.isFullScreen():
+            if self._fullscreen_restore_state & Qt.WindowMaximized:
+                self.showMaximized()
+            else:
+                self.showNormal()
+
     def nativeEvent(self, eventType, message):
         if sys.platform == 'win32':
             msg = wintypes.MSG.from_address(int(message))
-            if msg.message == 0x84 and not self.isMaximized():
+            if msg.message == 0x84 and not (self.isMaximized() or self.isFullScreen()):
                 rect = wintypes.RECT()
                 ctypes.windll.user32.GetWindowRect(
                     wintypes.HWND(int(self.winId())), ctypes.byref(rect),
@@ -878,10 +1025,11 @@ class GlassWindow(QMainWindow):
 
 
 class TitleBar(QWidget):
-    """Draggable title bar with double-click maximize."""
+    """Desktop controls remain available in fullscreen and windowed modes."""
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self.window().windowHandle():
+        if (event.button() == Qt.LeftButton and not self.window().isFullScreen()
+                and self.window().windowHandle()):
             self.window().windowHandle().startSystemMove()
         super().mousePressEvent(event)
 
@@ -891,7 +1039,13 @@ class TitleBar(QWidget):
 
     def toggle_maximized(self):
         window = self.window()
-        window.showNormal() if window.isMaximized() else window.showMaximized()
+        window.showNormal() if window.isFullScreen() or window.isMaximized() else window.showMaximized()
+
+    def sync_window_state(self):
+        expanded = self.window().isFullScreen() or self.window().isMaximized()
+        for control in self.findChildren(IconButton):
+            if control.symbol in ('maximize', 'restore'):
+                control.set_symbol('restore' if expanded else 'maximize')
 
 
 class SquircleBadge(QWidget):
@@ -947,6 +1101,9 @@ class AppleRow(QWidget):
         text_layout.setSpacing(2)
 
         self.title_label = QLabel(title)
+        self.title_label.setWordWrap(True)
+        self.title_label.setMinimumWidth(0)
+        self.title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.title_label.setStyleSheet(
             f'font-size: 13.5px; font-weight: 700; color: {TOKENS["ink"]};'
         )
@@ -954,6 +1111,9 @@ class AppleRow(QWidget):
 
         if subtitle:
             self.subtitle_label = QLabel(subtitle)
+            self.subtitle_label.setWordWrap(True)
+            self.subtitle_label.setMinimumWidth(0)
+            self.subtitle_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             self.subtitle_label.setStyleSheet(
                 f'font-size: 11.5px; color: {TOKENS["ink_3"]}; font-weight: 500;'
             )
