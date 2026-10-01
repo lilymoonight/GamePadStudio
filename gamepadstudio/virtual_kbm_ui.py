@@ -18,7 +18,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QPushButton, QComboBox, QLineEdit, QScrollArea,
-    QFrame, QSlider, QInputDialog, QMessageBox, QSizePolicy, QCheckBox, QMenu, QLayout
+    QFrame, QSlider, QInputDialog, QMessageBox, QSizePolicy, QCheckBox, QMenu, QLayout,
+    QDialog, QDialogButtonBox, QFormLayout, QDoubleSpinBox, QSpinBox
 )
 
 from .glass import (
@@ -27,6 +28,11 @@ from .glass import (
 )
 from .hidhide import HidHideClient, HIDHIDE_RELEASE_URL
 from .i18n import tr, tr_profile
+from .controller_glyphs import (button_text, display_parts, draw_token,
+                                token_advance, make_token_label)
+from .response_curves import curve_capabilities
+from .touch_ui import supports_touch
+from .mapping_deck import FlowLayout
 
 
 def label(text, kind=None, wrap=False):
@@ -59,7 +65,7 @@ def card(kind='card'):
 
 
 def compact_trigger(raw_label: str) -> str:
-    """精简手柄按键名称，便于在紧凑键帽徽章中清晰易读展示"""
+    """兼容旧调用中的完整按键名称；正式界面使用输入 ID 选择符号"""
     if not raw_label:
         return ""
     s = str(raw_label).strip()
@@ -82,20 +88,21 @@ def compact_trigger(raw_label: str) -> str:
 
 def trigger_tokens(raw_label: str) -> Tuple[str, ...]:
     """Display controller modifiers first without changing a chord's identity."""
-    aliases = {'Options': 'OPT', 'Create': 'SHARE', '触摸板': 'TP', 'Touchpad': 'TP',
+    aliases = {'触摸板': 'Touchpad', 'Touchpad': 'Touchpad',
                '麦克风': 'MIC', 'Mic': 'MIC', 'LS:推满': 'LS MAX',
                'LS:↑': 'LS↑', 'LS:↓': 'LS↓', 'LS:←': 'LS←', 'LS:→': 'LS→',
                'RS:↑': 'RS↑', 'RS:↓': 'RS↓', 'RS:←': 'RS←', 'RS:→': 'RS→'}
     parts = [aliases.get(part.strip(), part.strip()) for part in compact_trigger(raw_label).split('+') if part.strip()]
-    modifiers = {'L1', 'R1', 'L2', 'R2', 'LB', 'RB', 'LT', 'RT', 'Ctrl', 'Shift', 'Alt', 'Win'}
+    modifiers = {'L1', 'R1', 'L2', 'R2', 'LB', 'RB', 'LT', 'RT', 'Ctrl', 'Shift', 'Alt', 'Win',
+                 'Create', 'SHARE', 'Share', 'View', 'Back', '−', '-'}
     return tuple([part for part in parts if part in modifiers] + [part for part in parts if part not in modifiers])
 
 
 class KeyCap(QPushButton):
     """
-    Apple 深色玻璃质感高级虚拟键帽：
+    虚拟键帽：
     - 直接在键帽上展示绑定的手柄按键
-    - 显著区分【短按 (短)】与【长按 (长)】文字标识及色彩光环
+    - 用颜色和细小长按标记区分手势，绑定符号不再套框
     - 支持自适应动态放大铺满屏幕
     - 鼠标悬停发光与详细卡片说明、左键编辑、右键快捷解绑
     """
@@ -122,6 +129,7 @@ class KeyCap(QPushButton):
         self.short_bindings: List[str] = []
         self.long_bindings: List[str] = []
         self.badges: List[str] = []
+        self.binding_sources = {}
         self.is_capturing = False
         self.is_pressed = False
         self.is_hovered = False
@@ -178,10 +186,12 @@ class KeyCap(QPushButton):
         self.short_bindings = []
         self.long_bindings = []
         self.badges = []
+        self.binding_sources = {}
         self.is_capturing = capturing
         for item in info:
             trigger = item.get('trigger', '')
             gesture = item.get('gesture', 'short')
+            self.binding_sources[(trigger, gesture == 'long')] = item
             if gesture == 'long':
                 if trigger not in self.long_bindings:
                     self.long_bindings.append(trigger)
@@ -198,11 +208,13 @@ class KeyCap(QPushButton):
         self.short_bindings = []
         self.long_bindings = []
         self.badges = []
+        self.binding_sources = {}
         self.is_capturing = capturing
         for item in badges:
             if isinstance(item, dict):
                 trigger = item.get('trigger', '')
                 gesture = item.get('gesture', 'short')
+                self.binding_sources[(trigger, gesture == 'long')] = item
                 if gesture == 'long':
                     if trigger not in self.long_bindings: self.long_bindings.append(trigger)
                     self.badges.append(f"{trigger} 长按")
@@ -308,8 +320,8 @@ class KeyCap(QPushButton):
         else:
             main_font.setPixelSize(max(9, min(11, int(h * 0.22))))
         main_font.setBold(True)
-        stacked_chord = w < 48 and any(len(trigger_tokens(trigger)) > 1
-                                     for trigger in self.short_bindings + self.long_bindings)
+        display_plan = self.binding_display_plan(w - 6, 22)
+        stacked_chord = any(item.get('stacked') for item in display_plan)
         if stacked_chord and h < 40:
             main_font.setPixelSize(min(9, main_font.pixelSize()))
         while main_font.pixelSize() > 7 and QFontMetrics(main_font).horizontalAdvance(self.display_name) > w - 6:
@@ -357,45 +369,62 @@ class KeyCap(QPushButton):
             if item['kind'] == 'count':
                 self._draw_binding_count(painter, area, item['count'], item['overflow'])
             else:
-                self._draw_binding_chips(painter, area, item)
+                self._draw_binding(painter, area, item)
             x += item['width'] + 8
             if index < len(plan) - 1:
-                painter.setPen(QPen(QColor(TOKENS['border_hi']), 1))
-                painter.drawLine(x - 4, rect.center().y() - 4, x - 4, rect.center().y() + 4)
+                painter.setPen(QPen(QColor(TOKENS['ink_3']), 1))
+                painter.drawLine(x - 4, rect.center().y() - 3, x - 4, rect.center().y() + 3)
         painter.restore()
 
     @staticmethod
-    def _chip_font(size):
+    def _binding_font(size):
         font = QFont('Segoe UI', -1)
         font.setFamilies(['Segoe UI', 'Microsoft YaHei', 'sans-serif'])
         font.setPixelSize(size)
         font.setBold(True)
         return font
 
+    def _binding_items(self):
+        items = []
+        for bindings, is_long in ((self.short_bindings, False), (self.long_bindings, True)):
+            for trigger in bindings:
+                source = self.binding_sources.get((trigger, is_long), {})
+                family = source.get('family', 'generic')
+                keys = display_parts(source['input']) if source.get('input') else ()
+                tokens = tuple(button_text(key, family) for key in keys) if keys else trigger_tokens(trigger)
+                items.append({'tokens': tokens, 'keys': keys, 'family': family, 'long': is_long})
+        return items
+
+    def _token_widths(self, item, font):
+        if item['keys']:
+            return [token_advance(key, item['family'], font) for key in item['keys']]
+        fm = QFontMetrics(font)
+        return [max(5, fm.horizontalAdvance(token)) for token in item['tokens']]
+
     def binding_display_plan(self, width, height):
-        """Keep chord members separate from the count of independent bindings."""
-        items = [{'tokens': trigger_tokens(trigger), 'long': is_long}
-                 for bindings, is_long in ((self.short_bindings, False), (self.long_bindings, True))
-                 for trigger in bindings]
+        """Fit bare button marks first; wrap only when a full chord needs it."""
+        items = self._binding_items()
         if not items:
             return []
         minimum = 7 if width < 48 else 8
         candidates = []
-        for size in range(12, minimum - 1, -1):
-            fm = QFontMetrics(self._chip_font(size))
+        for size in range(min(14, max(8, height - 3)), minimum - 1, -1):
+            font = self._binding_font(size)
             measured = []
             for item in items:
-                token_widths = [max(11, fm.horizontalAdvance(token) + 6) for token in item['tokens']]
+                widths = self._token_widths(item, font)
                 measured.append(dict(item, kind='binding', font=size, stacked=False,
-                                     width=sum(token_widths) + 6 * (len(token_widths) - 1) + 6))
+                                     width=sum(widths) + 6 * (len(widths) - 1) + (5 if item['long'] else 0)))
             candidates.append(measured)
             if sum(item['width'] for item in measured) + 8 * (len(measured) - 1) <= width:
                 return measured
         if len(items) == 1:
-            return [dict(items[0], kind='binding', font=7, stacked=len(items[0]['tokens']) > 1, width=width)]
-        # A stack symbol labels binding counts; an ellipsis inside a chord only
-        # folds its members. Neither is rendered as another chord separator.
-        count_width = min(width, 17 + QFontMetrics(self._chip_font(8)).horizontalAdvance('+' + str(len(items))))
+            return [dict(items[0], kind='binding', font=max(8, min(11, (height - 2) // 2)),
+                         stacked=len(items[0]['tokens']) > 1, width=width)]
+        # A count describes independent bindings, never the members of a chord.
+        count_width = min(width, max(55 if width >= 55 else 0,
+            QFontMetrics(self._binding_font(9)).horizontalAdvance(
+                self.binding_count_text(len(items), True, width)) + 2))
         shown = []
         for measured in candidates:
             candidate = []
@@ -409,74 +438,75 @@ class KeyCap(QPushButton):
         omitted = len(items) - len(shown)
         return shown + [{'kind': 'count', 'count': omitted, 'overflow': bool(shown), 'width': count_width}]
 
-    def _draw_binding_chips(self, painter, rect, item):
-        color = QColor('#fbbf24' if item['long'] else '#7dd3fc')
-        if self.is_pressed:
-            color = QColor('#ffffff')
-        font = self._chip_font(item['font'])
-        fm = QFontMetrics(font)
-        tokens = item['tokens']
-        if item['stacked']:
-            row_h = max(8, (rect.height() - 1) // 2)
-            prefix = ' + '.join(tokens[:-1])
-            prefix = fm.elidedText(prefix, Qt.ElideRight, max(8, rect.width() - 7))
-            self._draw_chip(painter, QRect(rect.x(), rect.y(), rect.width() - 4, row_h), prefix, font, color, True)
-            painter.setFont(font)
-            painter.setPen(QColor(TOKENS['ink_3']))
-            painter.drawText(QRect(rect.right() - 4, rect.y(), 5, row_h), Qt.AlignCenter, '+')
-            main_rect = QRect(rect.x(), rect.y() + row_h + 1, rect.width(), row_h)
-            main_font = self._chip_font(item['font'] + 1)
-            main_text = QFontMetrics(main_font).elidedText(tokens[-1], Qt.ElideRight, rect.width() - 4)
-            self._draw_chip(painter, main_rect, main_text, main_font, color, False)
+    def _draw_token_row(self, painter, rect, item, start, end, font, color, long_mark=False):
+        tokens = item['tokens'][start:end]
+        keys = item['keys'][start:end]
+        part = dict(item, tokens=tokens, keys=keys)
+        widths = self._token_widths(part, font)
+        mark_width = 5 if long_mark else 0
+        total = sum(widths) + 6 * (len(widths) - 1) + mark_width
+        x = rect.x() + (rect.width() - total) // 2
+        painter.setFont(font)
+        painter.setPen(color)
+        if total > rect.width():
+            # Keep every member visible in unusual three/four-button chords.
+            # The full-width keys use the ordinary size; only a tight row scales.
+            painter.save()
+            painter.translate(rect.x(), rect.y())
+            painter.scale(rect.width() / total, 1)
+            self._draw_token_row(painter, QRect(0, 0, total, rect.height()), item,
+                                 start, end, font, color, long_mark)
+            painter.restore()
             return
-        if len(tokens) == 1 and item['width'] == rect.width():
-            token = fm.elidedText(tokens[0], Qt.ElideRight, max(1, rect.width() - 8))
-            token_widths = [min(rect.width() - 6, max(11, fm.horizontalAdvance(token) + 6))]
-            tokens = (token,)
-        else:
-            token_widths = [max(11, fm.horizontalAdvance(token) + 6) for token in tokens]
-        pill_h = min(rect.height() - 2, 19)
-        y = rect.y() + (rect.height() - pill_h) // 2
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(color)
-        if item['long']:
-            painter.drawRoundedRect(QRect(rect.x(), y + pill_h // 2 - 1, 4, 3), 1, 1)
-        else:
-            painter.drawEllipse(QRect(rect.x() + 1, y + pill_h // 2 - 1, 3, 3))
-        x = rect.x() + 6
-        for index, (token, token_w) in enumerate(zip(tokens, token_widths)):
-            self._draw_chip(painter, QRect(x, y, token_w, pill_h), token, font, color, index < len(tokens) - 1)
-            x += token_w
+        if long_mark:
+            painter.setPen(QPen(color, 2, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(x, rect.center().y(), x + 2, rect.center().y())
+            x += mark_width
+        for index, (token, token_width) in enumerate(zip(tokens, widths)):
+            area = QRect(x, rect.y(), token_width, rect.height())
+            if keys:
+                draw_token(painter, area, keys[index], item['family'], font, color)
+            else:
+                painter.setFont(font)
+                painter.setPen(color)
+                painter.drawText(area, Qt.AlignCenter, token)
+            x += token_width
             if index < len(tokens) - 1:
                 painter.setFont(font)
                 painter.setPen(QColor(TOKENS['ink_3']))
-                painter.drawText(QRect(x, y, 6, pill_h), Qt.AlignCenter, '+')
+                painter.drawText(QRect(x, rect.y(), 6, rect.height()), Qt.AlignCenter, '+')
                 x += 6
 
-    def _draw_chip(self, painter, rect, text, font, color, prefix):
-        fill = QColor(color)
-        fill.setAlpha(14 if prefix else 36)
-        edge = QColor(color)
-        edge.setAlpha(70 if prefix else 155)
+    def _draw_binding(self, painter, rect, item):
+        color = QColor('#fbbf24' if item['long'] else '#7dd3fc')
         if self.is_pressed:
-            fill = QColor(20, 20, 24, 185)
-        painter.setBrush(fill)
-        painter.setPen(QPen(edge, 1))
-        painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), 3, 3)
-        painter.setFont(font)
-        painter.setPen(QColor(TOKENS['ink_2']) if prefix and not self.is_pressed else color)
-        painter.drawText(rect, Qt.AlignCenter, text)
+            color = QColor('#ffffff')
+        font = self._binding_font(item['font'])
+        if item['stacked']:
+            row_h = max(8, (rect.height() - 1) // 2)
+            prefix_rect = QRect(rect.x(), rect.y(), rect.width() - 5, row_h)
+            self._draw_token_row(painter, prefix_rect, item, 0, len(item['tokens']) - 1, font, color)
+            painter.setFont(font)
+            painter.setPen(QColor(TOKENS['ink_3']))
+            painter.drawText(QRect(rect.right() - 4, rect.y(), 5, row_h), Qt.AlignCenter, '+')
+            self._draw_token_row(painter, QRect(rect.x(), rect.y() + row_h + 1, rect.width(), row_h),
+                                 item, len(item['tokens']) - 1, len(item['tokens']), font, color, item['long'])
+        else:
+            self._draw_token_row(painter, rect, item, 0, len(item['tokens']), font, color, item['long'])
+
+    @staticmethod
+    def binding_count_text(count, overflow, width):
+        suffix = tr('组绑定') if width >= 55 else tr('组')
+        return ('+' if overflow else '') + str(count) + suffix
 
     def _draw_binding_count(self, painter, rect, count, overflow):
-        painter.setPen(QPen(QColor(TOKENS['ink_3']), 1))
-        painter.setBrush(Qt.NoBrush)
-        y = rect.center().y() - 4
-        painter.drawRoundedRect(QRect(rect.x() + 1, y - 2, 6, 6), 1, 1)
-        painter.drawRoundedRect(QRect(rect.x() + 4, y + 1, 6, 6), 1, 1)
-        painter.setFont(self._chip_font(8))
+        text = self.binding_count_text(count, overflow, rect.width())
+        font = self._binding_font(9)
+        while font.pixelSize() > 7 and QFontMetrics(font).horizontalAdvance(text) > rect.width():
+            font.setPixelSize(font.pixelSize() - 1)
+        painter.setFont(font)
         painter.setPen(QColor(TOKENS['ink_2']))
-        painter.drawText(QRect(rect.x() + 12, rect.y(), rect.width() - 12, rect.height()),
-                         Qt.AlignCenter, ('+' if overflow else '') + str(count))
+        painter.drawText(rect, Qt.AlignCenter, text)
 
 
 # 标准 108 键主打字区 (60% Typing Block + F-Row) - 6 行每行精准对齐至 15.00U
@@ -636,6 +666,355 @@ class KeyboardCanvas(QWidget):
             self.page.recompute_key_sizes(target_u, target_h)
 
 
+class KbmFeelDialog(QDialog):
+    """One profile's pointer, input response and optional walking controls."""
+
+    def __init__(self, owner, profile, parent=None):
+        super().__init__(parent or owner)
+        from .mapping_engine import effective_mappings, input_thresholds, output_tokens, input_sources
+        from .studio_core import profile_scope
+        self.owner = owner
+        self.device_identity = (profile_scope(owner.snapshot), (owner.snapshot or {}).get('instance_id'))
+        sources = set(input_sources(owner.snapshot))
+        self.has_pointer = bool(sources & {'RS:left', 'RS:right', 'RS:up', 'RS:down'})
+        self.has_stick = any(key.startswith(('LS:', 'RS:')) for key in sources)
+        self.has_walk = 'LS:inner' in sources
+        self.has_trigger = bool(sources & {'LT', 'RT'})
+        self.profile = profile
+        self.original = copy.deepcopy(owner.config.get('profile_options', {}).get(profile, {}))
+        self.mouse = copy.deepcopy(self.original.get('mouse') or {})
+        self.input_settings = copy.deepcopy(self.original.get('input') or {})
+        thresholds = input_thresholds(self.input_settings)
+        entry = effective_mappings(owner.config, owner.snapshot, profile).get('LS:inner', {})
+        self.can_walk = any('key:17' in output_tokens(entry.get(g, {})) for g in ('short', 'long'))
+        self.setWindowTitle(tr('操作手感'))
+        self.setMinimumWidth(440)
+        self.resize(min(620, max(440, owner.width() - 80)), min(760, max(480, owner.height() - 100)))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+        layout.addWidget(label(tr_profile(profile), 'section', True))
+        layout.addWidget(label(tr('调整当前预设的视角、按键响应与行走手感。'), 'caption', True))
+
+        self.area = QScrollArea()
+        self.area.setWidgetResizable(True)
+        self.area.setFrameShape(QFrame.NoFrame)
+        self.area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        content = QWidget()
+        content.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        body = QVBoxLayout(content)
+        body.setContentsMargins(0, 0, 8, 0)
+        body.setSpacing(14)
+
+        pointer, pointer_layout = card()
+        pointer_layout.addWidget(label(tr('视角与指针'), 'section'))
+        pointer_form = QFormLayout()
+        pointer_form.setHorizontalSpacing(18)
+        pointer_form.setVerticalSpacing(10)
+        self.mode = QComboBox()
+        self.mode.addItem(tr('游戏视角'), 'game')
+        self.mode.addItem(tr('桌面指针'), 'desktop')
+        self.mode.setCurrentIndex(max(0, self.mode.findData(self.mouse.get('mode', 'game'))))
+        pointer_form.addRow(tr('用途'), self.mode)
+        self.mouse_fields = {}
+        for key, title, low, high, default in (
+            ('sensitivity', '转向速度', 1, 100, 28),
+            ('deadzone', '居中容错', 1, 50, 6),
+            ('y_ratio', '垂直速度比例', .1, 2, .7),
+            ('edge_boost', '推满加速', 1, 3, 1.7),
+        ):
+            field = QDoubleSpinBox()
+            field.setRange(low, high)
+            field.setSingleStep(.05 if high <= 3 else 1)
+            field.setDecimals(2 if high <= 3 else 0)
+            value = self.mouse.get(key, default / 100 if key == 'deadzone' else default)
+            field.setValue(value * 100 if key == 'deadzone' else value)
+            if key == 'deadzone':
+                field.setSuffix(' %')
+            pointer_form.addRow(tr(title), field)
+            self.mouse_fields[key] = field
+        pointer_layout.addLayout(pointer_form)
+        pointer_layout.addWidget(label(tr('居中容错越大，越不容易因摇杆漂移而转动视角。'), 'caption', True))
+        body.addWidget(pointer)
+        pointer.setVisible(self.has_pointer)
+
+        response, response_layout = card()
+        response_layout.addWidget(label(tr('按键响应'), 'section'))
+        response_layout.addWidget(label(tr('开始响应要高于松开位置，避免边缘反复触发。'), 'caption', True))
+        response_form = QFormLayout()
+        response_form.setHorizontalSpacing(18)
+        response_form.setVerticalSpacing(10)
+        self.input_fields = {}
+        for group, title in (('stick', '摇杆方向'), ('trigger', '扳机按键')):
+            if not (self.has_stick if group == 'stick' else self.has_trigger):
+                continue
+            pair = QWidget()
+            row = QHBoxLayout(pair)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+            for suffix, caption in (('press', '开始响应'), ('release', '松开位置')):
+                key = group + '_' + suffix
+                field = QSpinBox()
+                field.setRange(1, 100)
+                field.setSuffix(' %')
+                field.setValue(round(thresholds[key] * 100))
+                field.setAccessibleName(tr(title) + ' · ' + tr(caption))
+                column = QVBoxLayout()
+                column.setSpacing(4)
+                column.addWidget(label(tr(caption), 'caption', True))
+                column.addWidget(field)
+                row.addLayout(column, 1)
+                self.input_fields[key] = field
+            response_form.addRow(tr(title), pair)
+        self.chord_window = QSpinBox()
+        self.chord_window.setRange(20, 200)
+        self.chord_window.setSuffix(' ms')
+        self.chord_window.setValue(round(thresholds['chord_window'] * 1000))
+        response_form.addRow(tr('组合识别时间'), self.chord_window)
+        response_layout.addLayout(response_form)
+        response_layout.addWidget(label(tr('给同时按下的两个按键留一点余量；时间越短，单键响应越快。'), 'caption', True))
+        body.addWidget(response)
+
+        walking, walking_layout = card()
+        self.walk_toggle = QCheckBox(tr('轻推慢走'))
+        self.walk_toggle.setChecked(self.can_walk and 'walk_press' in thresholds)
+        self.walk_toggle.setEnabled(self.can_walk)
+        walking_layout.addWidget(self.walk_toggle)
+        walking_layout.addWidget(label(tr('轻推时按住 Ctrl，推深后恢复正常跑。冲刺仍由独立按键控制。')
+                                       if self.can_walk else tr('先将“左摇杆轻推”映射为 Ctrl，即可启用轻推慢走。'), 'caption', True))
+        self.walk_controls = QWidget()
+        walk_form = QFormLayout(self.walk_controls)
+        walk_form.setContentsMargins(0, 4, 0, 0)
+        walk_form.setVerticalSpacing(10)
+        for key, title, default in (('walk_press', '回到慢走', .62), ('walk_release', '转为正常跑', .72)):
+            field = QSpinBox()
+            field.setRange(1, 100)
+            field.setSuffix(' %')
+            field.setValue(round(thresholds.get(key, default) * 100))
+            walk_form.addRow(tr(title), field)
+            self.input_fields[key] = field
+        walking_layout.addWidget(self.walk_controls)
+        self.walk_toggle.toggled.connect(self.walk_controls.setEnabled)
+        self.walk_controls.setEnabled(self.walk_toggle.isChecked())
+        body.addWidget(walking)
+        walking.setVisible(self.has_walk)
+        body.addStretch()
+        self.area.setWidget(content)
+        layout.addWidget(self.area, 1)
+        self.error = label('', wrap=True)
+        self.error.setStyleSheet(f"color: {TOKENS['amber']};")
+        self.error.hide()
+        layout.addWidget(self.error)
+        self.controls = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        self.controls.button(QDialogButtonBox.Save).setText(tr('保存'))
+        self.controls.button(QDialogButtonBox.Cancel).setText(tr('取消'))
+        self.controls.accepted.connect(self.validate)
+        self.controls.rejected.connect(self.reject)
+        layout.addWidget(self.controls)
+        self.device_timer = QTimer(self)
+        self.device_timer.timeout.connect(self.check_device)
+        self.device_timer.start(200)
+
+    def check_device(self):
+        from .studio_core import profile_scope
+        state = self.owner.snapshot
+        changed = self.device_identity != (profile_scope(state), (state or {}).get('instance_id'))
+        self.controls.button(QDialogButtonBox.Save).setEnabled(not changed)
+        if changed:
+            self.error.setText(tr('设备已改变，请重新打开映射编辑器。'))
+            self.error.show()
+        return not changed
+
+    def validate(self):
+        if not self.check_device():
+            return
+        values = {key: field.value() for key, field in self.input_fields.items()}
+        for group, title in (('stick', '摇杆方向'), ('trigger', '扳机按键')):
+            if group + '_press' not in values:
+                continue
+            if values[group + '_release'] >= values[group + '_press']:
+                self.error.setText(tr(title) + '：' + tr('松开位置必须低于开始响应。'))
+                self.error.show()
+                return
+        if self.has_walk and self.walk_toggle.isChecked():
+            if not values['stick_press'] < values['walk_press'] < values['walk_release']:
+                self.error.setText(tr('慢走区间需满足：摇杆开始响应 < 回到慢走 < 转为正常跑。'))
+                self.error.show()
+                return
+        self.error.clear()
+        self.accept()
+
+    def options(self):
+        mouse = copy.deepcopy(self.mouse)
+        if self.has_pointer:
+            mouse.update({key: field.value() / 100 if key == 'deadzone' else field.value()
+                          for key, field in self.mouse_fields.items()})
+            mouse['mode'] = self.mode.currentData()
+        inputs = copy.deepcopy(self.input_settings)
+        inputs.update({key: self.input_fields[key].value() / 100
+                       for key in ('stick_press', 'stick_release', 'trigger_press', 'trigger_release')
+                       if key in self.input_fields})
+        inputs['chord_window'] = self.chord_window.value() / 1000
+        for key in ('walk_press', 'walk_release'):
+            if not self.has_walk:
+                continue
+            if self.walk_toggle.isChecked():
+                inputs[key] = self.input_fields[key].value() / 100
+            else:
+                inputs.pop(key, None)
+        return {'mouse': mouse, 'input': inputs}
+
+
+class NikkiLayoutDialog(QDialog):
+    """A compact controller-first guide built from the selected profile's actions."""
+
+    def __init__(self, owner, profile, parent=None):
+        super().__init__(parent or owner)
+        self.owner = owner
+        self.profile = profile
+        self.setWindowTitle(tr('无限暖暖 · 操作布局'))
+        self.setMinimumWidth(440)
+        self.resize(min(800, max(440, owner.width() - 80)), min(820, max(480, owner.height() - 100)))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+        layout.addWidget(label(tr_profile(profile), 'section', True))
+        layout.addWidget(label(tr('按常用动作分组，显示当前预设的实际按键；以游戏内键位和已解锁槽位为准。'), 'caption', True))
+        self.area = QScrollArea()
+        self.area.setWidgetResizable(True)
+        self.area.setFrameShape(QFrame.NoFrame)
+        self.area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.area.viewport().installEventFilter(self)
+        layout.addWidget(self.area, 1)
+        controls = QDialogButtonBox(QDialogButtonBox.Close)
+        controls.button(QDialogButtonBox.Close).setText(tr('关闭'))
+        controls.rejected.connect(self.reject)
+        layout.addWidget(controls)
+        self.refresh()
+
+    def refresh(self):
+        from .kbm_mapper import NIKKI_LAYOUT_GROUPS, nikki_binding_hint
+        from .mapping_engine import (binding_label, canonical_trigger, effective_mappings,
+                                     input_thresholds, profile_family, trigger_label)
+        entries = effective_mappings(self.owner.config, self.owner.snapshot, self.profile)
+        family = profile_family(self.owner.config, self.owner.snapshot, self.profile)
+        self.trigger_cards = {}
+        self.group_grids = []
+        content = QWidget()
+        content.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        body = QVBoxLayout(content)
+        body.setContentsMargins(0, 0, 8, 0)
+        body.setSpacing(14)
+        for group in NIKKI_LAYOUT_GROUPS:
+            triggers = [canonical_trigger(t) for t in group['triggers']]
+            triggers = [t for t in triggers if t in entries and any(
+                entries[t].get(g, {}).get('action', 'none') not in ('none', 'suppress') for g in ('short', 'long'))]
+            if not triggers:
+                continue
+            section, section_layout = card()
+            section_layout.addWidget(label(tr(group['title']), 'section', True))
+            description = group['description']
+            if group['title'] == '衣柜、任务与社交' and not any(t.startswith('TP:') for t in triggers):
+                description = '按住组合辅助键，将常用功能集中在同一区域。'
+            section_layout.addWidget(label(tr(description), 'caption', True))
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(10)
+            grid.setVerticalSpacing(10)
+            cards = []
+            for trigger in triggers:
+                tile = QFrame()
+                tile.setMinimumWidth(0)
+                tile.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+                tile.setStyleSheet(f"QFrame {{ background: {TOKENS['surface']}; border: 1px solid {TOKENS['border']}; border-radius: 8px; }} QLabel {{ border: none; background: transparent; }}")
+                tile_layout = QVBoxLayout(tile)
+                tile_layout.setContentsMargins(12, 10, 12, 10)
+                tile_layout.setSpacing(8)
+                head = QHBoxLayout()
+                trigger_name = QWidget()
+                trigger_name.setMinimumWidth(0)
+                trigger_name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+                trigger_row = QHBoxLayout(trigger_name)
+                trigger_row.setContentsMargins(0, 0, 0, 0)
+                trigger_row.setSpacing(4)
+                for part_index, part in enumerate(display_parts(trigger)):
+                    if part_index:
+                        separator = label('+', 'caption')
+                        trigger_row.addWidget(separator)
+                    trigger_row.addWidget(make_token_label(part, family, trigger_name, TOKENS['accent'], 15))
+                if trigger.startswith('TP:'):
+                    trigger_row.addWidget(label(tr(trigger_label(trigger, family)), 'caption', True), 1)
+                trigger_row.addStretch()
+                head.addWidget(trigger_name, 1)
+                edit = button(tr('编辑'), lambda checked=False, t=trigger: self.edit(t))
+                edit.setFixedWidth(48 if tr('编辑') == '编辑' else 58)
+                head.addWidget(edit, 0, Qt.AlignTop)
+                tile_layout.addLayout(head)
+                tile.output_labels = {}
+                tile.hint_labels = {}
+                entry = entries[trigger]
+                for gesture in ('short', 'long'):
+                    binding = entry.get(gesture, {})
+                    if binding.get('action', 'none') in ('none', 'suppress'):
+                        continue
+                    duration = float(entry.get('long_press', .65))
+                    if trigger.startswith('TP:'):
+                        gesture_text = tr('每格触发') if trigger.startswith('TP:scroll_') else tr('触发动作')
+                    else:
+                        gesture_text = tr('短按') if gesture == 'short' else tr('长按') + f' · {duration:g} ' + tr('秒')
+                    tile_layout.addWidget(label(gesture_text, 'caption'))
+                    output_text = binding_label(binding, family)
+                    if binding.get('action') == 'hold':
+                        output_text = str(binding.get('value', '')) + ' ' + tr('（按住）')
+                    output = label(tr(output_text), wrap=True)
+                    output.setMinimumWidth(0)
+                    output.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+                    tile_layout.addWidget(output)
+                    tile.output_labels[gesture] = output
+                    hint_text = nikki_binding_hint(binding)
+                    if trigger == 'LS:inner':
+                        options = self.owner.config.get('profile_options', {}).get(self.profile, {})
+                        if 'walk_press' not in input_thresholds(options.get('input')):
+                            hint_text = '轻推慢走已关闭'
+                    hint = label(tr(hint_text), 'caption', True)
+                    hint.setMinimumWidth(0)
+                    hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+                    tile_layout.addWidget(hint)
+                    tile.hint_labels[gesture] = hint
+                cards.append(tile)
+                self.trigger_cards[trigger] = tile
+            self.group_grids.append((grid, cards))
+            section_layout.addLayout(grid)
+            body.addWidget(section)
+        if not self.trigger_cards:
+            body.addWidget(label(tr('当前预设还没有可显示的游戏操作。'), 'caption', True))
+        body.addStretch()
+        previous = self.area.takeWidget()
+        if previous is not None:
+            previous.hide()
+            previous.deleteLater()
+        self.area.setWidget(content)
+        self.reflow(self.area.viewport().width())
+
+    def edit(self, trigger):
+        self.owner.edit_mapping(trigger, profile=self.profile, mode='kbm')
+        self.refresh()
+
+    def eventFilter(self, watched, event):
+        if watched is self.area.viewport() and event.type() == QEvent.Resize:
+            self.reflow(event.size().width())
+        return super().eventFilter(watched, event)
+
+    def reflow(self, width):
+        columns = 2 if width >= 650 else 1
+        for grid, cards in getattr(self, 'group_grids', []):
+            for tile in cards:
+                grid.removeWidget(tile)
+            for column in range(2):
+                grid.setColumnStretch(column, 1 if column < columns else 0)
+            for index, tile in enumerate(cards):
+                grid.addWidget(tile, index // columns, index % columns)
+
+
 class VirtualKbmPage(QWidget):
     """标准布局虚拟键鼠与手柄按键全映射工作台"""
     def __init__(self, owner, store=None, parent=None):
@@ -687,7 +1066,7 @@ class VirtualKbmPage(QWidget):
         more.setCursor(Qt.PointingHandCursor)
         more_menu = QMenu(more)
         more_menu.addAction(tr('后台设置'), lambda: owner.navigate(4))
-        more_menu.addAction(tr('设备隐身'), self.open_cloaking)
+        self.cloaking_action = more_menu.addAction(tr('设备隐身'), self.open_cloaking)
         if hasattr(owner, 'reset_profile'):
             more_menu.addSeparator()
             more_menu.addAction(tr('恢复默认'), owner.reset_profile)
@@ -709,20 +1088,42 @@ class VirtualKbmPage(QWidget):
         divider.setStyleSheet(f"background: {TOKENS['border']}; border: none;")
         toolbar_layout.addWidget(divider)
 
-        options = QHBoxLayout()
-        options.setSpacing(12)
-        options.addWidget(label(tr('输入选项'), 'caption'))
+        options = FlowLayout(spacing=10)
+        option_label = label(tr('输入选项'), 'caption')
+        option_label.setFixedHeight(36)
+        options.addWidget(option_label)
         self.mouse_toggle = QCheckBox(tr('右摇杆控制鼠标'))
+        self.mouse_toggle.setFixedHeight(36)
         self.mouse_toggle.toggled.connect(lambda enabled: owner.mapping_change({'op': 'options', 'profile': self.current_scheme(), 'options': {'right_stick_mouse': enabled}}))
         options.addWidget(self.mouse_toggle)
-        self.mouse_settings_btn = button(tr('指针设置'), self.mouse_settings)
+        self.mouse_settings_btn = button(tr('操作手感'), self.mouse_settings)
         options.addWidget(self.mouse_settings_btn)
+        self.layout_btn = button(tr('操作布局'), self.show_layout)
+        options.addWidget(self.layout_btn)
+        self.touchpad_btn = button(tr('触摸板'), self.open_touch)
+        self.touchpad_btn.setAccessibleName(tr('触摸板手势'))
+        options.addWidget(self.touchpad_btn)
+        self.refresh_touch_action(owner.snapshot)
+        self.curves_btn = QPushButton(tr('曲线'))
+        self.curves_btn.setCursor(Qt.PointingHandCursor)
+        self.curves_btn.setAccessibleName(tr('编辑曲线'))
+        self.curve_menu = QMenu(self.curves_btn)
+        self.curve_actions = {}
+        for kind, title in (('trigger', '扳机输入曲线'),
+                            ('rumble', '双马达振动曲线'),
+                            ('trigger_rumble', '扳机振动曲线')):
+            action = self.curve_menu.addAction(tr(title))
+            action.triggered.connect(lambda checked=False, k=kind: self.open_curve(k))
+            self.curve_actions[kind] = action
+        self.curves_btn.setMenu(self.curve_menu)
+        options.addWidget(self.curves_btn)
+        self.refresh_curve_actions(owner.snapshot)
 
         self.preview_toggle = QCheckBox(tr('安全试按'))
+        self.preview_toggle.setFixedHeight(36)
         self.preview_toggle.setChecked(False)  # 默认关闭安全试按，确保启动即可畅快操作
         self.preview_toggle.setToolTip(tr('勾选后，当前映射窗口有焦点时仅回显，不向系统发送键鼠；取消勾选或切至游戏即可正常输出。'))
         options.addWidget(self.preview_toggle)
-        options.addStretch()
         toolbar_layout.addLayout(options)
         layout.addWidget(toolbar)
 
@@ -933,7 +1334,7 @@ class VirtualKbmPage(QWidget):
 
     def handle_right_click(self, key, name):
         """右键点击按键：支持快速清除该键绑定的手柄输入"""
-        from .mapping_engine import output_tokens, effective_mappings
+        from .mapping_engine import output_tokens, effective_mappings, trigger_label, profile_family
         token = self.key_token(key)
         scheme = self.current_scheme()
         entries = effective_mappings(self.owner.config, self.owner.snapshot, scheme)
@@ -953,26 +1354,21 @@ class VirtualKbmPage(QWidget):
             self.edit_output(key, name)
 
     def mouse_settings(self):
-        from PySide6.QtWidgets import QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox
-        import copy
         profile = self.current_scheme()
-        settings = copy.deepcopy(self.owner.config.get('profile_options', {}).get(profile, {}).get('mouse', {}))
-        dialog = QDialog(self); dialog.setWindowTitle('右摇杆指针'); form = QFormLayout(dialog)
-        mode = QComboBox(); mode.addItem('游戏视角', 'game'); mode.addItem('桌面指针', 'desktop')
-        mode.setCurrentIndex(max(0, mode.findData(settings.get('mode', 'game')))); form.addRow('用途', mode)
-        fields = {}
-        for key, title, low, high, default in [('sensitivity', '速度', 1, 100, 28), ('deadzone', '死区', .01, .5, .06), ('y_ratio', '垂直比例', .1, 2, .7), ('edge_boost', '推满加速', 1, 3, 1.7)]:
-            field = QDoubleSpinBox(); field.setRange(low, high); field.setSingleStep(.01 if high <= 3 else 1); field.setValue(settings.get(key, default))
-            form.addRow(title, field); fields[key] = field
-        controls = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        controls.button(QDialogButtonBox.Save).setText('保存'); controls.button(QDialogButtonBox.Cancel).setText('取消')
-        controls.accepted.connect(dialog.accept); controls.rejected.connect(dialog.reject); form.addRow(controls)
+        if not profile:
+            return
+        dialog = KbmFeelDialog(self.owner, profile, self)
         if dialog.exec() == QDialog.Accepted:
-            settings.update({key: field.value() for key, field in fields.items()}); settings['mode'] = mode.currentData()
-            self.owner.mapping_change({'op': 'options', 'profile': profile, 'options': {'mouse': settings}})
+            self.owner.mapping_change({'op': 'options', 'profile': profile, 'options': dialog.options()})
+
+    def show_layout(self):
+        from .studio_core import is_nikki_profile
+        profile = self.current_scheme()
+        if is_nikki_profile(self.owner.config, profile):
+            NikkiLayoutDialog(self.owner, profile, self).exec()
 
     def edit_output(self, key, name):
-        from .mapping_engine import output_tokens, effective_mappings
+        from .mapping_engine import output_tokens, effective_mappings, trigger_label, profile_family
         token = self.key_token(key)
         scheme = self.current_scheme()
         entries = effective_mappings(self.owner.config, self.owner.snapshot, scheme)
@@ -982,10 +1378,12 @@ class VirtualKbmPage(QWidget):
             self.owner.edit_mapping(matches[0], profile=scheme, mode='kbm')
         elif matches:
             from PySide6.QtWidgets import QInputDialog
-            options = ['添加新的绑定'] + matches
-            value, ok = QInputDialog.getItem(self, name, '选择绑定', options, 0, False)
+            family = profile_family(self.owner.config, self.owner.snapshot, scheme)
+            options = [tr('添加新的绑定')] + [tr(trigger_label(t, family)) for t in matches]
+            value, ok = QInputDialog.getItem(self, name, tr('选择绑定'), options, 0, False)
             if ok:
-                self.owner.edit_mapping(value if value != options[0] else '0', new=value == options[0],
+                index = options.index(value)
+                self.owner.edit_mapping(matches[index - 1] if index else '0', new=index == 0,
                                         output=key if value == options[0] else None, profile=scheme, mode='kbm')
         else:
             self.owner.edit_mapping('0', new=True, output=key, profile=scheme, mode='kbm')
@@ -1001,6 +1399,7 @@ class VirtualKbmPage(QWidget):
         from .mapping_engine import effective_mappings, output_tokens, trigger_label, profile_family
         from .studio_core import profile_mode
         config = self.owner.config
+        self.refresh_touch_action(self.owner.snapshot)
         kbm_items = self.store.profiles_for(self.owner.snapshot, mode='kbm')
         previous = self.current_scheme()
 
@@ -1044,9 +1443,16 @@ class VirtualKbmPage(QWidget):
                 control.style().polish(control)
             self._arrange_toolbar()
 
+        from .mapping_engine import input_sources
+        sources = input_sources(self.owner.snapshot)
+        self.mouse_toggle.setVisible(bool({'RS:up', 'RS:down', 'RS:left', 'RS:right'} & set(sources)))
+        self.cloaking_action.setEnabled(bool(self.owner.snapshot and self.owner.snapshot.get('vendor') and self.owner.snapshot.get('product')))
         self.mouse_toggle.blockSignals(True)
         self.mouse_toggle.setChecked(config.get('profile_options', {}).get(selected, {}).get('right_stick_mouse', False))
         self.mouse_toggle.blockSignals(False)
+        from .studio_core import is_nikki_profile
+        self.layout_btn.setEnabled(is_nikki_profile(config, selected))
+        self.mouse_settings_btn.setEnabled(bool(selected))
         family = profile_family(config, self.owner.snapshot, selected)
 
         # 结构化抽取绑定信息，严格分离短按与长按
@@ -1058,6 +1464,8 @@ class VirtualKbmPage(QWidget):
                 for token in output_tokens(binding):
                     badges.setdefault(token, []).append({
                         'trigger': t_label,
+                        'input': trigger,
+                        'family': family,
                         'gesture': gesture,
                     })
 
@@ -1068,6 +1476,39 @@ class VirtualKbmPage(QWidget):
 
     def set_device_state(self, state):
         self.device_state = state
+        self.refresh_curve_actions(state)
+        self.refresh_touch_action(state)
+        self.cloaking_action.setEnabled(bool(state and state.get('vendor') and state.get('product')))
+        if hasattr(self, 'cloaking_dialog') and self.cloaking_dialog.isVisible():
+            self.refresh_cloaking_status()
+
+    def refresh_curve_actions(self, state):
+        capabilities = curve_capabilities(state)
+        supported = {'trigger': bool(capabilities['trigger_axes']),
+                     'rumble': capabilities['rumble'],
+                     'trigger_rumble': capabilities['trigger_rumble']}
+        for kind, action in self.curve_actions.items():
+            available = supported[kind] and callable(getattr(self.owner, 'open_curve_editor', None))
+            action.setVisible(available)
+            action.setEnabled(available)
+        self.curves_btn.setVisible(any(action.isVisible() for action in self.curve_actions.values()))
+
+    def open_curve(self, kind):
+        # Recheck the current snapshot if a device changes while the menu is open.
+        self.refresh_curve_actions(self.owner.snapshot)
+        if self.curve_actions[kind].isEnabled():
+            self.owner.open_curve_editor(kind)
+
+    def refresh_touch_action(self, state):
+        available = supports_touch(state) and callable(getattr(self.owner, 'open_touch_editor', None))
+        self.touchpad_btn.setVisible(available)
+        self.touchpad_btn.setEnabled(available)
+
+    def open_touch(self):
+        self.refresh_touch_action(self.owner.snapshot)
+        profile = self.current_scheme()
+        if self.touchpad_btn.isEnabled() and profile:
+            self.owner.open_touch_editor(profile=profile, mode='kbm')
 
     def update_feedback(self, data, connected=False, suspended=False):
         from .mapping_engine import trigger_label
@@ -1079,12 +1520,21 @@ class VirtualKbmPage(QWidget):
                 cap.update()
         events = data.get('events', [])
         state = self.device_state or {}
-        family = state.get('family', 'dualsense')
-        inputs = ' + '.join(trigger_label(k, family) for k in data.get('inputs', []))
+        family = state.get('family', 'generic')
+        inputs = ' + '.join(button_text(k, family) for k in data.get('inputs', []))
         status = '编辑中 · 输出已暂停' if suspended else ('已连接' if connected else '未连接')
         if data.get('preview') and not suspended: status = '安全试按 · 不发送到游戏'
         last = events[-1] if events else None
-        result = (trigger_label(last['trigger'], family) + ' ' + ('长按' if last['gesture'] == 'long' else '短按') + ' → ' + last['action']) if last and last.get('trigger') else ''
+        result = ''
+        if last and last.get('trigger'):
+            if last.get('gesture') == 'scroll':
+                event_label = tr('滚动')
+            elif last['trigger'].startswith('TP:'):
+                event_label = button_text(last['trigger'], family)
+            else:
+                event_label = ' + '.join(button_text(k, family) for k in display_parts(last['trigger']))
+                event_label += ' ' + tr('长按' if last.get('gesture') == 'long' else '短按')
+            result = event_label + ' → ' + last.get('action', '')
         self.live.setText(' · '.join(x for x in (status, inputs, result) if x))
         if hasattr(self, 'bindings'):
             self.bindings.feedback(data)
@@ -1096,7 +1546,7 @@ class VirtualKbmPage(QWidget):
         self.set_device_state(state)
 
     def get_current_device_info(self):
-        state = self.device_state or self.owner.snapshot or {}
+        state = self.owner.snapshot or self.device_state or {}
         return state.get('vendor'), state.get('product')
 
     def open_cloaking(self):
@@ -1117,16 +1567,25 @@ class VirtualKbmPage(QWidget):
     def refresh_cloaking_status(self):
         vendor, product = self.get_current_device_info()
         installed = self.hidhide.is_driver_installed()
-        active = bool(installed and self.hidhide.is_active())
+        from .hidhide import selected_device_instances
+        state = self.owner.snapshot or self.device_state or {}
+        instances = selected_device_instances(vendor, product, state.get('device_path')) if vendor and product and installed else []
+        hidden = {item.upper() for item in self.hidhide.get_blacklist()} if instances else set()
+        active = bool(installed and instances and self.hidhide.is_active() and all(item.upper() in hidden for item in instances))
         self.cloaking_toggle.blockSignals(True); self.cloaking_toggle.setChecked(active)
         self.cloaking_toggle.setEnabled(bool(installed and vendor)); self.cloaking_toggle.blockSignals(False)
         self.btn_install_driver.setVisible(not installed)
-        text = 'HidHide 未安装' if not installed else ('已隐身（物理设备已对外部应用彻底屏蔽）' if active else '原始输入可见（未开启屏蔽）')
+        text = '未连接设备' if not vendor else 'HidHide 未安装' if not installed else ('已隐身（当前设备的原始输入已隐藏）' if active else '当前设备原始输入可见')
         self.cloaking_status_label.setText(text)
 
     def toggle_cloaking(self, enabled):
         vendor, product = self.get_current_device_info()
-        ok, text = self.hidhide.cloak_controller(vendor, product) if enabled else self.hidhide.uncloak_controller(vendor, product)
+        if not vendor or not product:
+            self.refresh_cloaking_status()
+            return
+        state = self.owner.snapshot or self.device_state or {}
+        kwargs = {'device_path': state['device_path']} if state.get('device_path') else {}
+        ok, text = self.hidhide.cloak_controller(vendor, product, **kwargs) if enabled else self.hidhide.uncloak_controller(vendor, product, **kwargs)
         if ok: self.owner.setting('device_cloaking_enabled', enabled)
         self.refresh_cloaking_status()
         self.cloaking_status_label.setText(text)

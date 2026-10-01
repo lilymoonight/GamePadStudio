@@ -7,6 +7,7 @@ from .controller_catalog import CATALOG, button_labels
 
 class ControllerArt(QWidget):
     button_clicked = Signal(int)
+    input_clicked = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -14,8 +15,8 @@ class ControllerArt(QWidget):
         self.buttons = set()
         self.axes = [0.] * 6
         self.led = '#5686ff'
-        self.family='dualsense';self.interactive=True;self.available=None
-        self.set_family('dualsense')
+        self.family='generic';self.interactive=True;self.available=None;self.available_axes=None
+        self.set_family('generic')
 
     def set_family(self,family):
         self.family=family if family in CATALOG else 'generic'
@@ -23,10 +24,11 @@ class ControllerArt(QWidget):
                        4: (232, 116), 5: (320, 227), 6: (408, 116),
                        7: (260, 214), 8: (380, 214), 9: (174, 69), 10: (466, 69),
                        11: (151, 125), 12: (151, 176), 13: (126, 151), 14: (176, 151),
-                       15: (320, 252), 20: (320, 127)}
+                       15: (320, 252), 20: (320, 127), 'LT': (174, 44), 'RT': (466, 44)}
         if CATALOG[self.family]['layout']=='offset':
             self.points.update({7:(160,145),11:(260,191),12:(260,238),13:(237,214),14:(283,214),
-                                4:(280,136),5:(320,108),6:(360,136),15:(320,182)})
+                                4:(280,136),5:(320,108),6:(360,136),15:(320,182),
+                                'LT':(169,43),'RT':(469,43)})
             self.points.pop(20,None)
         elif self.family=='dualshock4':self.points.pop(15,None)
         self.update()
@@ -34,8 +36,9 @@ class ControllerArt(QWidget):
     def update_state(self, state):
         if state and state.get('family',self.family)!=self.family:self.set_family(state['family'])
         self.available=set(state['available_buttons']) if state and 'available_buttons' in state else None
+        self.available_axes = (set(state['available_axes']) if 'available_axes' in state else set(range(len(state.get('axes', []))))) if state else None
         self.buttons = set(state['buttons']) if state else set()
-        self.axes = state['axes'] if state else [0.] * 6
+        self.axes = (list(state.get('axes', [])) + [0.] * 6)[:6] if state else [0.] * 6
         self.update()
 
     def mousePressEvent(self, event):
@@ -43,18 +46,43 @@ class ControllerArt(QWidget):
         scale = min(self.width()/640, self.height()/365)
         x = (event.position().x()-(self.width()-640*scale)/2)/scale
         y = (event.position().y()-(self.height()-365*scale)/2)/scale
-        candidates={k:v for k,v in self.points.items() if self.available is None or k in self.available}
+        for key in ('LT', 'RT'):
+            tx, ty = self.points[key]
+            if QRectF(tx-24, ty-12, 48, 24).contains(QPointF(x, y)):
+                if self.input_is_available(key):
+                    self.input_clicked.emit(key)
+                return
+        candidates={k:v for k,v in self.points.items() if isinstance(k, int)}
         if not candidates:return
         near = min(candidates, key=lambda b: (self.points[b][0]-x)**2+(self.points[b][1]-y)**2)
-        if (self.points[near][0]-x)**2+(self.points[near][1]-y)**2 < 40**2:
+        if self.input_is_available(near) and (self.points[near][0]-x)**2+(self.points[near][1]-y)**2 < 40**2:
             self.button_clicked.emit(near)
+            self.input_clicked.emit(str(near))
+
+    def input_is_available(self, key):
+        if key in ('LT', 'RT'):
+            if self.available is not None and (not self.available or any(isinstance(item, str) for item in self.available)):
+                return key in self.available
+            return self.available_axes is None or (4 if key == 'LT' else 5) in self.available_axes
+        return self.available is None or key in self.available or str(key) in self.available
+
+    def paint_trigger_labels(self, painter):
+        labels = ('L2', 'R2') if self.family in ('dualsense', 'dualshock4') else ('ZL', 'ZR') if self.family == 'switch' else ('LT', 'RT')
+        painter.setFont(QFont('Segoe UI', 10, QFont.DemiBold))
+        for index, key in enumerate(('LT', 'RT')):
+            if not self.input_is_available(key):
+                continue
+            x, y = self.points[key]
+            amount = max(0., min(1., self.axes[index + 4]))
+            painter.setPen(QColor('#81a3ff' if amount > .01 else '#c0c9d9'))
+            painter.drawText(QRectF(x-24,y-13,48,22), Qt.AlignCenter, labels[index])
 
     def paintEvent(self, event):
         p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
         scale = min(self.width()/640, self.height()/365)
         p.translate((self.width()-640*scale)/2, (self.height()-365*scale)/2); p.scale(scale, scale)
         if CATALOG[self.family]['layout']=='offset':
-            self.paint_offset(p);p.end();return
+            self.paint_offset(p);self.paint_trigger_labels(p);p.end();return
         glow = QRadialGradient(320, 188, 290)
         glow.setColorAt(0, QColor(64, 104, 232, 36)); glow.setColorAt(1, QColor(15, 20, 31, 0))
         p.setPen(Qt.NoPen); p.setBrush(glow); p.drawEllipse(QRectF(35, 2, 570, 350))
@@ -114,6 +142,7 @@ class ControllerArt(QWidget):
         if not dark:p.drawRoundedRect(QRectF(311,249,18,5),2,2)
         p.setPen(QColor('#71809a')); p.setFont(QFont('Segoe UI', 8))
         p.drawText(QRectF(90,331,460,22), Qt.AlignCenter, 'D U A L S H O C K  4' if dark else 'D U A L S E N S E')
+        self.paint_trigger_labels(p)
         p.end()
 
     def paint_offset(self,p):

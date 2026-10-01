@@ -61,6 +61,7 @@ def test_clicking_keyboard_or_mouse_uses_same_binding_editor(view):
     # existing bindings without relying on shipped preset contents.
     owner.config['profiles']['Editor keyboard fixture'] = {}
     owner.config['profile_modes']['Editor keyboard fixture'] = 'kbm'
+    owner.config['profile_devices']['Editor keyboard fixture'] = 'offline:xinput'
     owner.change_profile('Editor keyboard fixture')
     page.keycaps['Space'].left_clicked.emit('Space','Space')
     assert owner.edits[-1]==(('0',),{'new':True,'output':'Space','profile':'Editor keyboard fixture','mode':'kbm'})

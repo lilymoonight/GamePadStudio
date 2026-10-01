@@ -8,7 +8,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from PySide6.QtCore import QCoreApplication, QLockFile, QObject, QTimer, Signal
-from .studio_core import ConfigStore, GestureEngine, BUTTONS
+from .studio_core import ConfigStore, GestureEngine, BUTTONS, device_config, profile_scope
 from .controller_catalog import button_labels
 from .device import Device
 from .actions import WindowsActions, launch_command
@@ -31,6 +31,8 @@ class Agent(QObject):
         self.state=None;self.enabled=bool(self.config.get('mapping_enabled', True));self.suspended_until=0.;self.blocked=set();self.last_touch=None
         self.preview_until = 0.
         self.busy=False;self.last_capture=0.;self.last_buttons=set();self.last_ui=0.;self.closed=False
+        self.capture_device_context = None
+        self.replay_device_context = None
         self.executor=ThreadPoolExecutor(max_workers=1);self.captured.connect(self.on_captured)
         self.replay_finished.connect(self.on_replay_finished)
         self.replay_busy = False
@@ -44,39 +46,76 @@ class Agent(QObject):
             codec=self.config.get('replay_codec', 'hevc'),
             bitrate_mbps=self.config.get('replay_bitrate_mbps', 50),
             fps=self.config.get('replay_fps', 30),
-            capture_mode=self.config.get('capture_mode', 'game'),
+            capture_mode=self.config.get('replay_capture_mode') or self.config.get('capture_mode', 'game'),
             on_event=self.log
         )
         if self.config.get('replay_buffer_enabled', False):
             self.replay_engine.start()
         self.haptic_engine = HapticEngine(self.device, on_notice=self.log)
-        self.haptic_engine.set_config(
-            sound_enabled=self.config.get('capture_sound_enabled', True),
-            haptics_enabled=self.config.get('capture_haptics_enabled', True),
-            intensity=self.config.get('haptic_intensity', 1.0),
-            profile=self.config.get('haptic_profile', 'crisp')
-        )
+        self.apply_device_settings()
         self.apply_gamebar_shield()
         self.scan()
         self.apply_device_cloaking()
         self.log('后台映射已启动')
 
     def apply_device_cloaking(self):
-        if not self.config.get('device_cloaking_enabled', True):
+        settings = device_config(self.config, self.state)
+        if not self.state:
             return
-        vendor = self.state.get('vendor') if self.state else None
-        product = self.state.get('product') if self.state else None
+        vendor = self.state.get('vendor')
+        product = self.state.get('product')
+        if not vendor:
+            return
         try:
             from .hidhide import HidHideClient
             client = HidHideClient()
             if client.is_driver_installed():
-                ok, msg = client.cloak_controller(vendor, product)
+                enabled = settings.get('device_cloaking_enabled', True)
+                options = {'device_path': self.state['device_path']} if self.state.get('device_path') else {}
+                ok, msg = client.cloak_controller(vendor, product, **options) if enabled else client.uncloak_controller(vendor, product, **options)
                 if ok:
-                    self.log(f'硬件独占隐身已就绪：{msg}')
+                    self.log(f'硬件独占隐身已就绪：{msg}' if enabled else f'手柄原始输入已恢复：{msg}')
                 else:
                     self.log(f'硬件独占隐身未生效：{msg}')
         except Exception as exc:
             self.log(f'硬件独占隐身配置异常：{exc}')
+
+    def apply_device_settings(self):
+        """Apply settings for the selected input device, including reconnects."""
+        settings = device_config(self.config, self.state)
+        if hasattr(self.device, 'set_response_curves'):
+            self.device.set_response_curves(settings)
+        if hasattr(self, 'haptic_engine'):
+            self.haptic_engine.set_config(
+                sound_enabled=settings.get('capture_sound_enabled', True),
+                haptics_enabled=bool(self.state and self.state.get('rumble', True)
+                                     and settings.get('haptic_engine_enabled', True)
+                                     and settings.get('capture_haptics_enabled', True)),
+                intensity=settings.get('haptic_intensity', 1.0),
+                profile=settings.get('haptic_profile', 'crisp'),
+                trigger_rumble_enabled=bool(self.state and self.state.get('trigger_rumble')
+                                           and settings.get('trigger_rumble_enabled', False))
+            )
+        if self.state and self.state.get('led'):
+            self.device.led(settings.get('led', '#5686ff'))
+
+    def check_device_scope(self, message):
+        """A delayed editor request must not edit a newly selected controller."""
+        if 'device_scope' in message and message['device_scope'] != profile_scope(self.state):
+            raise ValueError('输入设备已变化，请重新打开当前设备设置')
+
+    def feedback_device_context(self):
+        return (profile_scope(self.state), self.state.get('instance_id')) if self.state else None
+
+    def completed_feedback(self, event_type, context):
+        if not hasattr(self, 'haptic_engine'):
+            return
+        if context == self.feedback_device_context():
+            self.haptic_engine.trigger_feedback(event_type)
+        else:
+            # Capture/replay audio is global. A completed task from a previous
+            # controller must not create a new pulse on the selected one.
+            self.haptic_engine.play_shutter_sound()
 
     def status(self):
         return {'pid':os.getpid(),'device':self.state,'enabled':self.enabled,'capturing':self.busy,
@@ -142,15 +181,22 @@ class Agent(QObject):
             self._last_prtsc_down = prtsc_down
 
             previous=self.state;self.state=self.device.read()
-            identity=lambda s: (True,s.get('instance_id')) if s else None
+            identity=lambda s: (s.get('instance_id'),profile_scope(s)) if s else None
             if identity(previous)!=identity(self.state):
                 self.release();self.last_buttons=set()
-                self.engine.blocked.update(self.engine.normalizer.update(self.state))
                 self.log('手柄已连接' if self.state else '手柄已断开')
-                if self.state:
+                # Legacy test/headless clients may provide buttons without an
+                # identity. Keep their explicitly selected profile untouched.
+                if not self.state or any(key in self.state for key in ('instance_id', 'family', 'profile_key', 'device_key')):
                     self.store.activate_controller(self.state);self.store.save()
+                if self.state:
                     self.apply_device_cloaking()
-                if self.state and self.state['led']:self.device.led(self.config['led'])
+                self.apply_device_settings()
+                settings = device_config(self.config, self.state)
+                options = settings.get('profile_options', {}).get(settings['active_profile'], {})
+                inputs = dict(options.get('input') or {})
+                inputs['trigger_curves'] = settings.get('trigger_curves', {})
+                self.engine.blocked.update(self.engine.normalizer.update(self.state, inputs))
             if not self.state:
                 self.engine.update(None, self.config, enabled=False);return
             buttons=set(self.state['buttons']);new=buttons-self.last_buttons;self.last_buttons=buttons
@@ -172,6 +218,11 @@ class Agent(QObject):
 
     def handle(self,message):
         command=message.get('command')
+        if command in ('mapping_change', 'set_device_cloaking', 'test_haptics', 'rumble', 'led', 'preview_curve'):
+            self.check_device_scope(message)
+        if command == 'preview_curve' and 'instance_id' in message:
+            if message['instance_id'] != (self.state or {}).get('instance_id'):
+                raise ValueError('输入设备已变化，请重新打开当前设备设置')
         if command=='status':return self.status()
         if command in ('pause','resume'):
             self.set_enabled(command=='resume');self.log('映射已恢复' if self.enabled else '映射已暂停')
@@ -196,7 +247,7 @@ class Agent(QObject):
             if hasattr(self, 'replay_engine'):
                 replay_defaults = {'replay_buffer_minutes': 5, 'replay_codec': 'hevc',
                                    'replay_bitrate_mbps': 50, 'replay_fps': 30,
-                                   'capture_mode': 'game'}
+                                   'replay_capture_mode': 'game'}
                 replay_changed = any(previous_config.get(k, default) != self.config.get(k, default)
                                      for k, default in replay_defaults.items())
                 replay_enabled = bool(self.config.get('replay_buffer_enabled', False))
@@ -208,21 +259,15 @@ class Agent(QObject):
                 self.replay_engine.codec = self.config.get('replay_codec', 'hevc')
                 self.replay_engine.bitrate_mbps = self.config.get('replay_bitrate_mbps', 50)
                 self.replay_engine.fps = self.config.get('replay_fps', 30)
-                self.replay_engine.capture_mode = self.config.get('capture_mode', 'game')
+                self.replay_engine.capture_mode = self.config.get('replay_capture_mode') or self.config.get('capture_mode', 'game')
                 if replay_enabled and (replay_changed or newly_enabled):
                     self.replay_engine.start()
-            if hasattr(self, 'haptic_engine'):
-                self.haptic_engine.set_config(
-                    sound_enabled=self.config.get('capture_sound_enabled', True),
-                    haptics_enabled=self.config.get('capture_haptics_enabled', True),
-                    intensity=self.config.get('haptic_intensity', 1.0),
-                    profile=self.config.get('haptic_profile', 'crisp')
-                )
-            if self.state and self.state['led']:self.device.led(self.config['led'])
+            self.apply_device_settings()
         elif command=='set_device_cloaking':
+            if not self.state or not self.state.get('vendor'):
+                raise ValueError('请先连接支持设备隐身的手柄')
             enabled = bool(message.get('enabled', True))
-            self.config['device_cloaking_enabled'] = enabled
-            self.store.data['device_cloaking_enabled'] = enabled
+            self.store.set_setting('device_cloaking_enabled', enabled, self.state)
             self.store.save()
             applied = False
             msg = '未连接手柄或无需隐身'
@@ -232,7 +277,8 @@ class Agent(QObject):
                 if client.is_driver_installed():
                     vendor = self.state.get('vendor')
                     product = self.state.get('product')
-                    applied, msg = client.cloak_controller(vendor, product) if enabled else client.uncloak_controller(vendor, product)
+                    options = {'device_path': self.state['device_path']} if self.state.get('device_path') else {}
+                    applied, msg = client.cloak_controller(vendor, product, **options) if enabled else client.uncloak_controller(vendor, product, **options)
                     self.log(msg)
             return {'applied': applied, 'message': msg, 'enabled': enabled}
         elif command=='set_gamebar_shield':
@@ -250,7 +296,7 @@ class Agent(QObject):
             if type(instance) is not int:raise ValueError('无效设备')
             self.release();self.device.select(instance);self.poll();self.broadcast()
             if self.state:
-                self.config['preferred_controller']=self.state.get('profile_key','')
+                self.config['preferred_controller']=self.state.get('device_key') or self.state.get('profile_key','')
                 self.device.preferred_key=self.config['preferred_controller'];self.store.save()
             self.log('已切换手柄：'+self.state['name'] if self.state else '设备已断开')
         elif command=='scan':self.scan();self.poll();self.broadcast()
@@ -262,18 +308,31 @@ class Agent(QObject):
             if hasattr(self, 'replay_engine'):
                 return self.replay_engine.get_status()
             return {'enabled': False, 'running': False}
+        elif command=='preview_curve':
+            from .curve_preview import preview_response_curve
+            success = preview_response_curve(
+                self.device, device_config(self.config, self.state), self.state,
+                message.get('kind'), message.get('channel'), message.get('curve'),
+                message.get('strength', .55), self.haptic_engine)
+            return {'supported': success}
         elif command=='test_haptics':
             pattern = message.get('pattern', 'shutter')
+            if not self.state or not self.state.get('rumble', False):
+                return {'status': 'unsupported', 'pattern': pattern}
             if hasattr(self, 'haptic_engine'):
                 self.haptic_engine.trigger_feedback(pattern)
             return {'status': 'ok', 'pattern': pattern}
         elif command=='record_toggle':self.record_toggle()
         elif command=='rumble':
+            if not self.state or not self.state.get('rumble', False):
+                return {'supported': False}
             success=self.device.rumble(max(0.,min(1.,float(message.get('strength',.35)))))
             self.log('振动已发送' if success else '振动不可用');return {'supported':success}
         elif command=='led':
             color=message.get('color','')
             if not isinstance(color,str) or not re.fullmatch(r'#[0-9a-fA-F]{6}',color):raise ValueError('无效颜色')
+            if not self.state or not self.state.get('led', False):
+                return {'supported': False}
             success=self.device.led(color);self.log('灯条已更新' if success else '灯条不可用');return {'supported':success}
         elif command in ('stop', 'exit', 'quit'):
             QTimer.singleShot(50, QCoreApplication.quit)
@@ -317,6 +376,7 @@ class Agent(QObject):
             if not self.replay_engine.is_running():
                 self.replay_engine.start()
             self.replay_busy = True
+            self.replay_device_context = self.feedback_device_context()
             def worker():
                 try:self.replay_finished.emit(self.replay_engine.save_replay(title) or '', '')
                 except Exception as exc:self.replay_finished.emit('', str(exc))
@@ -337,10 +397,11 @@ class Agent(QObject):
     def on_replay_finished(self, path, error):
         self.replay_busy = False
         if path:
-            self.haptic_engine.trigger_feedback('replay_saved')
+            self.completed_feedback('replay_saved', self.replay_device_context)
             self.log('回放已保存：' + Path(path).name)
         else:
             self.log('回放保存失败：' + error if error else '回放尚未就绪，请稍后重试')
+        self.replay_device_context = None
         self.server.broadcast({'type':'replay_record', 'status':'success' if path else 'not_ready', 'path':path, 'error':error})
 
     def record_toggle(self):
@@ -361,6 +422,7 @@ class Agent(QObject):
         now=time.monotonic()
         if self.busy or now-self.last_capture<self.config['cooldown']:return
         self.busy=True;self.last_capture=now
+        self.capture_device_context = self.feedback_device_context()
         folder,mode=self.config['save_dir'],self.config['capture_mode']
         def worker():
             try:self.captured.emit(take_screenshot(folder,mode=mode),'')
@@ -370,11 +432,11 @@ class Agent(QObject):
     def on_captured(self,path,error):
         self.busy=False
         if not error:
-            if hasattr(self, 'haptic_engine'):
-                self.haptic_engine.trigger_feedback('capture')
-            self.log('截图已保存 (已触发机械快门与触觉反馈)')
+            self.completed_feedback('capture', self.capture_device_context)
+            self.log('截图已保存')
         else:
             self.log('截图失败：'+error)
+        self.capture_device_context = None
         self.server.broadcast({'type':'capture','path':path,'error':error})
 
     def close(self):

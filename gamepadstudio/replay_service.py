@@ -11,6 +11,7 @@ import collections
 import ctypes
 from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -22,6 +23,8 @@ import time
 from typing import Callable, Deque, Dict, List, Optional, Tuple
 import mss
 from .replay_capture import create_replay_capture
+from .display_info import match_monitors, enumerate_displays
+from .replay_timing import TimestampedRGBWriter, TransportStreamClock, mp4_duration_seconds
 
 from .screenshot_service import (
     foreground_info,
@@ -219,13 +222,23 @@ class ReplayBufferEngine:
         self._lock = threading.Lock()
         self._ram_lock = threading.Lock()
         self._ram_chunks: Deque[Tuple[float, bytes]] = collections.deque()
+        self._ram_chunk_spans: Deque[Tuple[float, float]] = collections.deque()
         self._total_bytes: int = 0
 
         self._worker_thread: Optional[threading.Thread] = None
         self._reader_thread: Optional[threading.Thread] = None
+        self._stderr_thread: Optional[threading.Thread] = None
         self._ffmpeg_proc: Optional[subprocess.Popen] = None
+        self._capture_source = None
         self._last_save_time = 0.0
         self._current_width = 0
+        self._current_height = 0
+        self._last_error = ''
+        self._encoder_errors = collections.deque(maxlen=8)
+        self.capture_method = ''
+        self.color_mode = ''
+        self._captured_frames = 0
+        self._capture_seconds = 0.0
         self.encoder = None
         import atexit
         atexit.register(self.stop)
@@ -241,14 +254,49 @@ class ReplayBufferEngine:
         with self._lock:
             return self.running and self._ffmpeg_proc is not None and self._ffmpeg_proc.poll() is None
 
+    def _fail(self, reason):
+        self._last_error = str(reason)
+        self.log(self._last_error)
+
+    def _panorama_error(self, capture=None):
+        if self.capture_mode != 'all':
+            return ''
+        if capture is None:
+            try:
+                with create_replay_capture() as source:
+                    return self._panorama_error(source)
+            except Exception as exc:
+                return f'无法读取显示器信息，请选择单个屏幕录制（{exc}）'
+        displays = enumerate_displays()
+        monitors = match_monitors(capture.monitors, displays)
+        info = monitors[0] if monitors else {}
+        geometry = lambda row: tuple(row.get(key) for key in ('left', 'top', 'width', 'height'))
+        if {geometry(row) for row in displays} != {geometry(row) for row in capture.monitors[1:]}:
+            return '显示器配置已变化或无法完整读取，请选择单个屏幕录制'
+        if info.get('mixed_refresh_rate') is not False:
+            return info.get('recording_reason') or '无法确认所有显示器的刷新率，请选择单个屏幕录制'
+        return ''
+
     def start(self) -> bool:
+        if not self.running and (self._ffmpeg_proc is not None or self._worker_thread is not None
+                                 or self._capture_source is not None):
+            self.stop()
         with self._lock:
             if self.running:
                 return True
+            if self._worker_thread and self._worker_thread.is_alive():
+                self._fail('上一段回放录制仍在结束，请稍后重试')
+                return False
+
+            self._last_error = ''
+            reason = self._panorama_error()
+            if reason:
+                self._fail(f'启动回放失败：{reason}')
+                return False
 
             ffmpeg = get_ffmpeg_path()
             if not ffmpeg:
-                self.log("启动回放引擎失败：未检测到可用 FFmpeg 组件")
+                self._fail("启动回放引擎失败：未检测到可用 FFmpeg 组件")
                 return False
 
             self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -259,44 +307,69 @@ class ReplayBufferEngine:
 
             with self._ram_lock:
                 self._ram_chunks.clear()
+                self._ram_chunk_spans.clear()
                 self._total_bytes = 0
+
+            self._captured_frames = 0
+            self._capture_seconds = 0.0
+            self._encoder_errors.clear()
 
             self.running = True
             self._worker_thread = threading.Thread(target=self._capture_and_encode_loop, daemon=True, name="ReplayCaptureThread")
             self._worker_thread.start()
-            mode_desc = "双屏全景 (7680x2160)" if self.capture_mode == 'all' else ("智能游戏屏幕" if self.capture_mode in ('game', 'smart', 'monitor') else self.capture_mode)
+            mode_desc = "全部屏幕" if self.capture_mode == 'all' else ("智能游戏屏幕" if self.capture_mode in ('game', 'smart', 'monitor') else self.capture_mode)
             self.log(f"4K 极清回放引擎已启动（纯内存环形缓冲, 目标: {mode_desc}, 编码: {self.codec.upper()}, 回看: {self.minutes}分钟, 码率: {self.bitrate_mbps}Mbps）")
             return True
 
     def stop(self):
         with self._lock:
-            if not self.running:
+            if (not self.running and self._ffmpeg_proc is None and self._worker_thread is None
+                    and self._capture_source is None):
                 return
             self.running = False
+            source = self._capture_source
 
-        if self._ffmpeg_proc:
+        # Only cancellation is safe across threads: MSS owns native HDCs on
+        # its capture thread, whose context manager remains responsible for
+        # close(). HDR cancellation wakes a grab waiting for its first frame.
+        cancel = getattr(source, 'cancel', None)
+        if callable(cancel):
             try:
-                if self._ffmpeg_proc.stdin:
-                    self._ffmpeg_proc.stdin.close()
-                self._ffmpeg_proc.terminate()
-                self._ffmpeg_proc.wait(timeout=1.5)
+                cancel()
+            except Exception as exc:
+                self.log(f'取消屏幕采集时发生异常：{exc}')
+
+        proc = self._ffmpeg_proc
+        if proc:
+            try:
+                # A frame writer may be blocked on a full pipe. Termination
+                # releases it before close() can wait for the buffered lock.
+                proc.terminate()
+                proc.wait(timeout=1.5)
             except Exception:
                 try:
-                    self._ffmpeg_proc.kill()
+                    proc.kill()
                 except Exception:
                     pass
-            self._ffmpeg_proc = None
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except (OSError, ValueError):
+                pass
 
-        if self._reader_thread and self._reader_thread.is_alive():
-            self._reader_thread.join(timeout=1.0)
-            self._reader_thread = None
-
-        if self._worker_thread and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=1.0)
-            self._worker_thread = None
+        for attr in ('_worker_thread', '_reader_thread', '_stderr_thread'):
+            thread = getattr(self, attr)
+            if thread and thread.is_alive() and thread is not threading.current_thread():
+                thread.join(timeout=1.5)
+            if not thread or not thread.is_alive():
+                setattr(self, attr, None)
+        self._ffmpeg_proc = None
+        if self._worker_thread is None:
+            self._capture_source = None
 
         with self._ram_lock:
             self._ram_chunks.clear()
+            self._ram_chunk_spans.clear()
             self._total_bytes = 0
 
         self.log("4K 极清回放引擎已停止（内存缓冲区已清空释放）")
@@ -304,112 +377,155 @@ class ReplayBufferEngine:
     def _stdout_reader_loop(self, proc: subprocess.Popen):
         """后台独立读取 FFmpeg 硬件编码器标准输出流，实时推入纯内存环形缓冲队列"""
         max_ram_bytes = int((self.minutes * 60 * self.bitrate_mbps * 1e6) / 8 * 1.5)
-        while self.running and proc.poll() is None:
+        clock = TransportStreamClock()
+        # Drain until EOF, including packets buffered after encoder exit.
+        while True:
             try:
                 chunk = proc.stdout.read1(65536) if hasattr(proc.stdout, 'read1') else proc.stdout.read(4096)
                 if not chunk:
                     break
-                now = time.monotonic()
+                start, end = clock.span(chunk)
                 with self._ram_lock:
-                    self._ram_chunks.append((now, chunk))
+                    self._ram_chunks.append((end, chunk))
+                    self._ram_chunk_spans.append((start, end))
                     self._total_bytes += len(chunk)
-                    
-                    # 滑动环形窗口淘汰：修剪超过最大回看时间的数据包
-                    cutoff = now - (self.minutes * 60 + 3)
+
+                    # Keep a short keyframe lead-in; retention follows media
+                    # PTS, independent of stdout batching or pipe congestion.
+                    cutoff = end - (self.minutes * 60 + 3)
                     while self._ram_chunks and (self._ram_chunks[0][0] < cutoff or self._total_bytes > max_ram_bytes):
                         _, old_data = self._ram_chunks.popleft()
+                        self._ram_chunk_spans.popleft()
                         self._total_bytes -= len(old_data)
             except Exception:
                 break
 
+    def _stderr_reader_loop(self, proc):
+        for line in iter(proc.stderr.readline, b''):
+            text = line.decode('utf-8', errors='replace').strip()
+            if text:
+                self._encoder_errors.append(text)
+
+    def _encoder_command(self, ffmpeg, encoder, source):
+        fallback_filter = ('scale=in_range=pc:out_range=tv:out_color_matrix=bt709,format=yuv420p,'
+                           'setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709')
+        video_filter = getattr(source, 'encoder_filter', fallback_filter)
+        color_args = getattr(source, 'output_color_args', (
+            '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', 'tv'))
+        return [ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
+                '-f', 'matroska', '-i', 'pipe:0', '-vf', video_filter, '-c:v', encoder,
+                '-b:v', f'{self.bitrate_mbps}M', '-pix_fmt', 'yuv420p', *color_args,
+                '-fps_mode', 'passthrough', '-enc_time_base', '1:1000',
+                '-g', str(self.fps * 2), '-force_key_frames', 'expr:gte(t,n_forced*2)',
+                '-flush_packets', '1', '-f', 'mpegts', 'pipe:1']
+
     def _capture_and_encode_loop(self):
         """后台屏幕抓取与纯内存流式硬件编码主循环"""
-        _ensure_dpi_awareness()
-        ffmpeg = get_ffmpeg_path()
-        if not ffmpeg:
-            return
+        proc = None
+        source = None
+        try:
+            _ensure_dpi_awareness()
+            ffmpeg = get_ffmpeg_path()
+            if not ffmpeg:
+                raise RuntimeError('未检测到可用 FFmpeg 组件')
+            encoder = detect_hardware_encoder(self.codec)
+            self.encoder = encoder
+            with create_replay_capture() as sct:
+                source = sct
+                with self._lock:
+                    if not self.running:
+                        return
+                    self._capture_source = sct
+                reason = self._panorama_error(sct)
+                if reason:
+                    raise RuntimeError(reason)
+                explicit_monitor = re.fullmatch(r'monitor_(\d+)', self.capture_mode)
+                if explicit_monitor:
+                    index = int(explicit_monitor.group(1))
+                    if index < 1 or index >= len(sct.monitors):
+                        raise RuntimeError('所选显示器已断开，请重新选择录制屏幕')
+                    bbox = sct.monitors[index]
+                else:
+                    bbox = get_target_monitor_bbox(sct, mode=self.capture_mode)
+                w, h = int(bbox['width']) & ~1, int(bbox['height']) & ~1
+                if w < 2 or h < 2:
+                    raise RuntimeError('录制区域尺寸无效')
+                self._current_width, self._current_height = w, h
+                crop_bbox = dict(left=bbox['left'], top=bbox['top'], width=w, height=h)
+                if hasattr(sct, 'configure'):
+                    sct.configure(crop_bbox, self.fps)
+                if not self.running:
+                    return
+                self.capture_method = str(getattr(sct, 'capture_method', 'MSS'))
+                self.color_mode = str(getattr(sct, 'color_mode', 'SDR'))
 
-        encoder = detect_hardware_encoder(self.codec)
-        self.encoder = encoder
-        seg_duration = 2  # 2秒一个 GOP 关键帧区间
-        gop_size = self.fps * seg_duration
-
-        with create_replay_capture() as sct:
-            bbox = get_target_monitor_bbox(sct, mode=self.capture_mode)
-            w = bbox["width"] - (bbox["width"] % 2)
-            h = bbox["height"] - (bbox["height"] % 2)
-            self._current_width = w
-            self._current_height = h
-            crop_bbox = dict(left=bbox["left"], top=bbox["top"], width=w, height=h)
-
-            cmd = [
-                ffmpeg,
-                "-y",
-                "-f", "rawvideo",
-                "-pix_fmt", "rgb24",
-                "-s", f"{w}x{h}",
-                "-r", str(self.fps),
-                "-i", "pipe:0",
-                "-c:v", encoder,
-                "-b:v", f"{self.bitrate_mbps}M",
-                "-g", str(gop_size),
-                "-flush_packets", "1",
-                "-f", "mpegts",
-                "pipe:1"
-            ]
-
-            try:
-                self._ffmpeg_proc = subprocess.Popen(
-                    cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    **_subprocess_hidden_flags()
-                )
-                _assign_process_to_job(self._ffmpeg_proc)
-            except Exception as exc:
-                self.log(f"启动 FFmpeg 硬件编码器进程失败: {exc}")
-                self.running = False
-                return
-
-            # 启动内存数据流提取守护线程
-            self._reader_thread = threading.Thread(
-                target=self._stdout_reader_loop,
-                args=(self._ffmpeg_proc,),
-                daemon=True,
-                name="ReplayReaderThread"
-            )
-            self._reader_thread.start()
-
-            frame_interval = 1.0 / self.fps
-
-            try:
+                # Raw RGB in Matroska carries capture PTS. Input -r would
+                # overwrite them; passthrough also prevents CFR duplicates.
+                cmd = self._encoder_command(ffmpeg, encoder, sct)
+                with self._lock:
+                    if not self.running:
+                        return
+                    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, **_subprocess_hidden_flags())
+                    self._ffmpeg_proc = proc
+                _assign_process_to_job(proc)
+                for attr, target, name in (
+                    ('_reader_thread', self._stdout_reader_loop, 'ReplayReaderThread'),
+                    ('_stderr_thread', self._stderr_reader_loop, 'ReplayErrorThread')):
+                    thread = threading.Thread(target=target, args=(proc,), daemon=True, name=name)
+                    setattr(self, attr, thread)
+                    thread.start()
+                writer = TimestampedRGBWriter(proc.stdin, w, h, self.fps)
+                frame_interval = 1.0 / self.fps
+                first_timestamp = last_timestamp = None
+                last_display_check = time.monotonic()
                 while self.running:
                     t_start = time.perf_counter()
+                    if time.monotonic() - last_display_check >= 1.0:
+                        reason = self._panorama_error(sct)
+                        if reason:
+                            raise RuntimeError(reason)
+                        last_display_check = time.monotonic()
                     shot = sct.grab(crop_bbox)
-                    
-                    if not self.running or self._ffmpeg_proc.poll() is not None:
+                    timestamp = getattr(shot, 'timestamp', None)
+                    if timestamp is None:
+                        timestamp = time.monotonic()
+                    if not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp):
+                        raise RuntimeError('屏幕采集时间无效，请重新启动录制')
+                    if not self.running:
                         break
-
-                    try:
-                        self._ffmpeg_proc.stdin.write(shot.rgb)
-                        self._ffmpeg_proc.stdin.flush()
-                    except (BrokenPipeError, OSError):
-                        break
-
-                    # 精准帧率节奏控制
+                    if proc.poll() is not None:
+                        raise RuntimeError('视频编码器已退出：' + '；'.join(self._encoder_errors))
+                    if last_timestamp is not None and timestamp < last_timestamp:
+                        raise RuntimeError('屏幕采集时间发生变化，请重新启动录制')
+                    if timestamp != last_timestamp:
+                        if first_timestamp is None:
+                            first_timestamp = timestamp
+                        self._capture_seconds = writer.write_frame(shot.rgb, timestamp - first_timestamp)
+                        self._captured_frames += 1
+                        last_timestamp = timestamp
+                    # Target FPS is an upper bound; slow capture keeps its
+                    # real elapsed time instead of accelerating playback.
                     elapsed = time.perf_counter() - t_start
                     sleep_time = frame_interval - elapsed
                     if sleep_time > 0:
                         time.sleep(sleep_time)
-            except Exception as e:
-                self.log(f"回放录制抓取循环异常: {e}")
-            finally:
-                if self._ffmpeg_proc and self._ffmpeg_proc.poll() is None:
+        except Exception as exc:
+            if self.running:
+                self._fail(f'回放录制失败：{exc}')
+        finally:
+            with self._lock:
+                self.running = False
+                if self._capture_source is source:
+                    self._capture_source = None
+            if proc:
+                try:
+                    if proc.stdin:
+                        proc.stdin.close()
+                    proc.wait(timeout=2.0)
+                except Exception:
                     try:
-                        if self._ffmpeg_proc.stdin:
-                            self._ffmpeg_proc.stdin.close()
-                        self._ffmpeg_proc.wait(timeout=1.0)
+                        proc.kill()
                     except Exception:
                         pass
 
@@ -432,6 +548,7 @@ class ReplayBufferEngine:
                 self.log("回放内存缓冲区尚在初始化积蓄，请稍后再试")
                 return None
             all_raw = b"".join(c[1] for c in self._ram_chunks)
+            media_seconds = self._buffered_seconds_locked()
 
         valid_ts = _align_ts_stream(all_raw)
         if len(valid_ts) < 5_000:
@@ -446,12 +563,18 @@ class ReplayBufferEngine:
         out_path = self.save_dir / out_filename
 
         try:
+            # Lead-in packets retained for the decoder do not extend the
+            # requested window. Stream copy starts at the next keyframe.
+            trim_seconds = max(0.0, media_seconds - self.minutes * 60)
             cmd_mux = [
                 ffmpeg,
                 "-y",
                 "-f", "mpegts",
                 "-i", "pipe:0",
+                "-ss", f"{trim_seconds:.6f}",
+                "-t", str(self.minutes * 60),
                 "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
                 "-movflags", "+faststart",
                 str(out_path)
             ]
@@ -464,10 +587,10 @@ class ReplayBufferEngine:
                 stderr=subprocess.DEVNULL,
                 **_subprocess_hidden_flags()
             )
-            proc.communicate(input=valid_ts)
+            proc.communicate(input=valid_ts, timeout=60)
             elapsed = time.perf_counter() - t0
 
-            if out_path.is_file() and out_path.stat().st_size > 1000:
+            if proc.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 1000:
                 # 瞬间为画廊生成一帧高保真封面预览图 (供画廊秒级展示，零卡顿)
                 thumb_jpg = out_path.with_suffix('.jpg')
                 try:
@@ -485,15 +608,22 @@ class ReplayBufferEngine:
 
                 # 保存元数据 sidecar
                 sidecar_json = out_path.with_suffix('.json')
+                duration = mp4_duration_seconds(out_path)
+                if duration is None:
+                    duration = min(media_seconds, self.minutes * 60)
                 meta = {
                     "title": title,
                     "raw_title": title,
                     "created": datetime.now().isoformat(),
-                    "duration_minutes": self.minutes,
+                    "duration_seconds": round(duration, 3),
+                    "duration_minutes": round(duration / 60, 4),
+                    "buffer_minutes": self.minutes,
                     "codec": self.codec,
                     "bitrate_mbps": self.bitrate_mbps,
                     "resolution": f"{self._current_width}x{self._current_height}",
                     "mode": self.capture_mode,
+                    "capture_method": self.capture_method,
+                    "color_mode": self.color_mode,
                     "favorite": False,
                     "is_video": True
                 }
@@ -506,8 +636,21 @@ class ReplayBufferEngine:
                 self.log(f"🎬 极清回放录像已瞬间保存: {out_filename} ({size_mb:.1f}MB, 耗时 {elapsed:.2f}s, 零磁盘读写损耗)")
                 return str(out_path)
         except Exception as exc:
+            if isinstance(exc, subprocess.TimeoutExpired):
+                proc.kill()
+                proc.communicate()
             self.log(f"合并保存回放失败: {exc}")
         return None
+
+    def _buffered_seconds_locked(self):
+        if not self._ram_chunks:
+            return 0.0
+        if len(self._ram_chunk_spans) == len(self._ram_chunks):
+            start = self._ram_chunk_spans[0][0]
+            end = self._ram_chunk_spans[-1][1]
+            return max(0.0, end - start) + 1.0 / self.fps
+        # Preserve compatibility with consumers that seed legacy chunks.
+        return max(0.0, self._ram_chunks[-1][0] - self._ram_chunks[0][0])
 
     def get_status(self) -> dict:
         """获取当前引擎实时状态、纯内存缓冲区占用与时长"""
@@ -518,10 +661,7 @@ class ReplayBufferEngine:
         with self._ram_lock:
             total_mb = self._total_bytes / (1024 * 1024)
             chunks_count = len(self._ram_chunks)
-            if chunks_count > 1:
-                buffered_sec = max(0.0, self._ram_chunks[-1][0] - self._ram_chunks[0][0])
-            else:
-                buffered_sec = 0.0
+            buffered_sec = min(self._buffered_seconds_locked(), self.minutes * 60)
 
         return {
             "enabled": is_run,
@@ -532,6 +672,10 @@ class ReplayBufferEngine:
             "bitrate_mbps": self.bitrate_mbps,
             "fps": self.fps,
             "capture_mode": self.capture_mode,
+            "capture_method": self.capture_method,
+            "color_mode": self.color_mode,
+            "last_error": self._last_error,
+            "captured_fps": round((self._captured_frames - 1) / self._capture_seconds, 1) if self._capture_seconds > 0 else 0.0,
             "buffered_seconds": round(buffered_sec, 1),
             "chunks_count": chunks_count,
             "current_size_mb": round(total_mb, 1),

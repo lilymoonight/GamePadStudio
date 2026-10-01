@@ -186,7 +186,7 @@ def test_test_protection_leases_agent_and_preserves_manual_pause(tmp_path,monkey
         window.cleanup();window.hide();agent.close()
 
 
-def test_disconnected_pages_follow_saved_controller_family(tmp_path,monkeypatch):
+def test_disconnected_pages_use_generic_xinput_and_hide_saved_other_devices(tmp_path,monkeypatch):
     class OfflineDevice:
         available=[]
         def scan(self): pass
@@ -203,12 +203,20 @@ def test_disconnected_pages_follow_saved_controller_family(tmp_path,monkeypatch)
     window=Studio(tmp_path,standalone=True)
     try:
         window.poll()
-        assert window.art.family == window.mapping_art.family == 'switch'
-        assert window.button_names[0]=='B' and window.capture_heading.text()=='Capture'
-        assert window.mapping_boxes[15][0].isVisibleTo(window.mapping_boxes[15][0].parentWidget())
-        window.change_profile('Xbox · 默认')
-        assert window.art.family == window.mapping_art.family == 'xbox'
-        assert window.button_names[0]=='A' and window.capture_heading.text()=='截图'
+        assert window.art.family == window.mapping_art.family == 'generic'
+        assert window.button_names[0]=='A'
         assert window.mapping_boxes[15][0].isHidden()
+        assert window.mapping_boxes[20][0].isHidden()
+        available_profiles=[window.profile_combo.itemText(index) for index in range(window.profile_combo.count())]
+        assert 'Switch Pro · 默认' not in available_profiles
+        assert 'Xbox · 默认' not in available_profiles
+        active=window.config['active_profile']
+        window.change_profile('Xbox · 默认')
+        assert window.config['active_profile']==active
+        assert window.art.family == window.mapping_art.family == 'generic'
+        assert window.button_names[0]=='A'
+        assert window.mapping_boxes[15][0].isHidden()
+        assert 'Switch Pro · 默认' in window.config['profiles']
+        assert 'Xbox · 默认' in window.config['profiles']
     finally:
         window.cleanup();window.hide()

@@ -32,7 +32,7 @@ VIEWBOX = {
 
 
 def source_family(family):
-    if family in ('dualsense', 'dualshock4', 'generic'):
+    if family in ('dualsense', 'dualshock4'):
         return 'playstation'
     if family == 'switch':
         return 'switch'
@@ -42,8 +42,8 @@ def source_family(family):
 class ControllerSchematic(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.family = 'dualsense'
-        self.names = button_labels('dualsense')
+        self.family = 'generic'
+        self.names = button_labels('generic')
         self.available = set()
         self.pressed = set()
         self.axes = []
@@ -57,7 +57,7 @@ class ControllerSchematic(QWidget):
         self.setToolTip('图形来源：GamepadTester.cn；Switch 图为 Joy-Con 示意')
 
     def set_state(self, state, histories):
-        self.family = state.get('family', 'dualsense') if state else 'dualsense'
+        self.family = state.get('family', 'generic') if state else 'generic'
         self.names = button_labels(self.family, state.get('controller_type', 0) if state else 0)
         self.available = set(state.get('available_buttons', [])) if state else set()
         self.pressed = set(state.get('buttons', [])) & self.available if state else set()

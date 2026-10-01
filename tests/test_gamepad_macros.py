@@ -63,6 +63,22 @@ def test_gamepad_macro_gesture_dispatch():
     assert ('gamepad_chord', '2+3', False) in events
 
 
+@pytest.mark.parametrize('action,value', [('gamepad_button', '3'),
+                                        ('gamepad_chord', '2+3'), ('gamepad_turbo', '0')])
+def test_mapping_runtime_routes_gamepad_holds_to_gamepad_dispatch(action, value):
+    from gamepadstudio.mapping_engine import MappingRuntime
+    from tests.test_unified_mapping import Actions, entry, frame
+    actions = Actions()
+    dispatched = []
+    runtime = MappingRuntime(actions, lambda binding, down: dispatched.append(
+        (binding['action'], binding['value'], down)), start_mouse=False)
+    config = {'active_profile': 'test', 'profiles': {'test': {'0': entry(action, value)}}}
+    runtime.update(frame([0]), config, now=0)
+    runtime.update(frame(), config, now=.1)
+    assert dispatched == [(action, value, True), (action, value, False)]
+    assert not actions.calls and not runtime.feedback()['outputs']
+
+
 def test_gamepad_target_selector_ui(tmp_path):
     app = QApplication.instance() or QApplication([])
     selector = GamepadTargetSelector('dualsense')
@@ -111,8 +127,9 @@ def test_dropdown_isolation_gamepad_vs_kbm(tmp_path):
         studio.refresh_mappings()
         # Page 1: Gamepad mapping combo MUST ONLY contain gamepad profiles
         mapping_items = [studio.mapping_combo.itemText(i) for i in range(studio.mapping_combo.count())]
-        assert '主机体验' in mapping_items
-        assert '动作与格斗宏' in mapping_items
+        assert mapping_items == studio.store.profiles_for(studio.snapshot, 'gamepad')
+        assert '主机体验' not in mapping_items
+        assert '动作与格斗宏' not in mapping_items
         assert '桌面导航' not in mapping_items
         assert NIKKI_PROFILE_NAME not in mapping_items
 
@@ -122,10 +139,11 @@ def test_dropdown_isolation_gamepad_vs_kbm(tmp_path):
         assert '主机体验' not in scheme_items
         assert '动作与格斗宏' not in scheme_items
 
-        # Page 0: Profile combo contains all profiles
+        # Page 0: Profile combo contains only the current input device's profiles.
         profile_items = [studio.profile_combo.itemText(i) for i in range(studio.profile_combo.count())]
-        assert '主机体验' in profile_items
-        assert '动作与格斗宏' in profile_items
+        assert profile_items == studio.store.profiles_for(studio.snapshot)
+        assert '主机体验' not in profile_items
+        assert '动作与格斗宏' not in profile_items
         assert '桌面导航' not in profile_items
         assert NIKKI_PROFILE_NAME in profile_items
     finally:
@@ -164,7 +182,7 @@ def test_kbm_and_gamepad_dialog_modes(tmp_path):
     studio = Studio(tmp_path, standalone=True)
     try:
         # Gamepad mode dialog
-        g_dialog = BindingDialog(studio, '0', profile='主机体验', mode='gamepad')
+        g_dialog = BindingDialog(studio, '0', profile=studio.current_gamepad_profile(), mode='gamepad')
         assert g_dialog.mode == 'gamepad'
         assert 'gamepad_button' in [g_dialog.action_combos['short'].itemData(i) for i in range(g_dialog.action_combos['short'].count())]
         assert 'hold' not in [g_dialog.action_combos['short'].itemData(i) for i in range(g_dialog.action_combos['short'].count())]

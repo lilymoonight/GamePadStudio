@@ -51,12 +51,15 @@ def test_gui_pages_capture_and_persistent_mapping(tmp_path,monkeypatch):
     for index in range(6):
         window.navigate(index); app.processEvents()
         assert window.stack.currentIndex()==index
+    native_profile=window.config['active_profile']
+    window.store.apply_mapping_change({'op':'binding','trigger':'4','mapping':{
+        'short':{'action':'capture'},'long':{'action':'replay_record'}}},None)
     dialog=MappingDialog(window,4,window.store.mappings['4'])
     assert dialog.value()['short']['action']=='capture'
     assert dialog.value()['long']['action']=='replay_record'
     window.change_profile(NIKKI_PROFILE_NAME)
     assert window.store.mappings['0']['short']['value']=='Space'
-    window.change_profile('主机体验')
+    window.change_profile(native_profile)
     window.toggle_pause(); assert not window.enabled
     window.toggle_pause(); assert window.enabled
     window.cleanup(); window.quitting=True; window.hide()
@@ -85,12 +88,15 @@ def test_gallery_filters_favorites_and_device_specific_capabilities(tmp_path,mon
         assert all(not button.isEnabled() for button in window.led_buttons)
         assert not window.touch_mouse_box.isEnabled() and window.feedback_rumble.isEnabled()
         assert window.mapping_boxes[20][0].isHidden()
-        gallery=window.controllers;assert gallery.grid.count()==5
+        gallery=window.controllers;assert gallery.grid.count()==1
+        assert gallery.current_family()=='xbox'
+        assert gallery.grid.itemAt(0).widget().accessibleName()=='Xbox test fixture'
         gallery.search.setText('Xbox');assert gallery.grid.count()==1
         gallery.search.clear();gallery.filter.setCurrentIndex(1);assert gallery.grid.count()==1
-        gallery.toggle_favorite('switch');gallery.filter.setCurrentIndex(2);assert gallery.grid.count()==1
+        gallery.toggle_favorite('xbox');gallery.filter.setCurrentIndex(2);assert gallery.grid.count()==1
+        assert not gallery.empty_state
         from gamepadstudio.studio_core import ConfigStore
-        assert ConfigStore(tmp_path).data['controller_favorites']==['switch']
+        assert ConfigStore(tmp_path).data['controller_favorites']==['xbox']
         window.navigate(5);window.resize(960,640);QTest.qWait(80);assert gallery.columns==2
         assert gallery.grid.itemAt(0).widget().isVisible()
     finally:window.cleanup();window.hide()
@@ -154,7 +160,9 @@ def test_controller_card_favorite_does_not_open_and_keyboard_opens():
     gallery.set_devices([dict(instance_id=7,name='Fixture DualSense',family='dualsense',supported=True)],7)
     gallery.resize(1050,680);gallery.show();QTest.qWait(30)
     try:
+        assert gallery.grid.count()==1
         box=gallery.grid.itemAt(0).widget()
+        assert box.accessibleName()=='Fixture DualSense'
         heart=next(b for b in box.findChildren(IconButton) if b.symbol=='heart')
         QTest.mouseClick(heart,Qt.LeftButton);app.processEvents()
         assert saved==[['dualsense']] and opened==[]

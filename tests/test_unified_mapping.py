@@ -4,7 +4,7 @@ import json
 import pytest
 from gamepadstudio.mapping_engine import (GestureEngine, MappingRuntime, InputNormalizer,
     canonical_trigger, validate_mappings, convert_scheme, effective_mappings)
-from gamepadstudio.studio_core import ConfigStore, profile_mode
+from gamepadstudio.studio_core import ConfigStore, profile_mode, is_nikki_profile
 from gamepadstudio.kbm_mapper import NIKKI_PROFILE_NAME, LEGACY_NIKKI_PROFILE_NAME, infinity_nikki_defaults
 from gamepadstudio.actions import parse_keys
 
@@ -224,8 +224,11 @@ def test_new_installs_only_include_dedicated_keyboard_preset(tmp_path):
     assert store.data['mapping_version'] == 2
     assert store.profiles_for(None, 'kbm') == [NIKKI_PROFILE_NAME]
     for family in ('xbox', 'dualshock4', 'switch', 'generic'):
-        store.activate_controller({'family': family, 'profile_key': family, 'available_buttons': list(range(16))})
-        assert [name for name in store.data['profiles'] if profile_mode(store.data, name) == 'kbm'] == [NIKKI_PROFILE_NAME]
+        state = {'family': family, 'profile_key': family, 'available_buttons': list(range(16))}
+        store.activate_controller(state)
+        keyboard = store.profiles_for(state, 'kbm')
+        assert len(keyboard) == 1 and is_nikki_profile(store.data, keyboard[0])
+        assert keyboard[0] != NIKKI_PROFILE_NAME
     store.save()
     assert ConfigStore(tmp_path).profiles_for(None, 'kbm') == [NIKKI_PROFILE_NAME]
 
@@ -265,25 +268,29 @@ def test_stale_writer_cannot_resurrect_cleaned_keyboard_profiles(tmp_path):
 
 def test_resetting_keyboard_profile_offline_preserves_native_profile(tmp_path):
     store = ConfigStore(tmp_path)
+    store.activate_controller(None)
     native = copy.deepcopy(store.mappings)
+    active = store.data['active_profile']
     store.data['profiles'][NIKKI_PROFILE_NAME]['0'] = entry('hold', 'Ctrl+S')
     store.data['profile_options'][NIKKI_PROFILE_NAME]['mouse']['sensitivity'] = 3
     store.apply_mapping_change({'op': 'reset', 'profile': NIKKI_PROFILE_NAME})
-    assert store.data['active_profile'] == '主机体验' and store.mappings == native
-    assert store.data['profiles'][NIKKI_PROFILE_NAME] == infinity_nikki_defaults('dualsense')
-    assert store.data['profile_options'][NIKKI_PROFILE_NAME]['mouse']['sensitivity'] == 28
-    with pytest.raises(ValueError, match='请先连接手柄'):
+    assert store.data['active_profile'] == active and store.mappings == native
+    assert store.data['profiles'][NIKKI_PROFILE_NAME] == infinity_nikki_defaults('xbox', range(15))
+    assert store.data['profile_options'][NIKKI_PROFILE_NAME]['mouse']['sensitivity'] == 24
+    with pytest.raises(ValueError, match='不属于当前输入设备'):
         store.apply_mapping_change({'op': 'reset', 'profile': '主机体验'})
 
 
 def test_stale_settings_writer_cannot_overwrite_mapping_or_active_profile(tmp_path):
-    ui=ConfigStore(tmp_path); agent=ConfigStore(tmp_path)
+    ui=ConfigStore(tmp_path); ui.activate_controller(None); ui.save()
+    agent=ConfigStore(tmp_path); agent.activate_controller(None)
+    native = agent.data['active_profile']
     agent.apply_mapping_change({'op':'binding','trigger':'LB+0','mapping':entry('shortcut','Ctrl+1')})
     agent.apply_mapping_change({'op':'select','profile':NIKKI_PROFILE_NAME})
     ui.data['rumble']=.2; ui.save()
     fresh=ConfigStore(tmp_path)
     assert fresh.data['rumble']==.2 and fresh.data['active_profile']==NIKKI_PROFILE_NAME
-    assert fresh.data['profiles']['主机体验']['0+9']['short']['value']=='Ctrl+1'
+    assert fresh.data['profiles'][native]['0+9']['short']['value']=='Ctrl+1'
 
 
 def test_validation_rejects_ambiguous_and_empty_sequences():

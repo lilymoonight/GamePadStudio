@@ -7,15 +7,16 @@ from PySide6.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabe
     QPushButton, QComboBox, QLineEdit, QDialogButtonBox, QListWidget, QListWidgetItem,
     QFormLayout, QFileDialog, QMessageBox, QDoubleSpinBox, QGridLayout, QSpinBox, QGroupBox)
 from .mapping_engine import (INPUTS, GAMEPAD_TARGETS, InputNormalizer, canonical_trigger, trigger_label,
-                             binding_label, validate_mappings, effective_mappings, profile_family)
-from .studio_core import ACTION_NAMES
+                             binding_label, validate_mappings, effective_mappings, profile_family, input_sources)
+from .studio_core import ACTION_NAMES, device_config
 from .glass import TOKENS
+from .touch_gestures import TouchGestureRecognizer, touch_sources
 
 
 class GamepadTargetSelector(QWidget):
     """Tactile target button and chord selector for pure Gamepad-to-Gamepad actions."""
 
-    def __init__(self, family='dualsense', parent=None):
+    def __init__(self, family='generic', parent=None):
         super().__init__(parent)
         self.family = family
         self.mode = 'single'  # 'single', 'chord', 'turbo'
@@ -209,6 +210,10 @@ class BindingDialog(QDialog):
         self.new_binding = new
         self.profile = profile or owner.config.get('active_profile')
         self.family = profile_family(owner.config, owner.snapshot, self.profile)
+        self.device_context = self._device_context(owner.snapshot)
+        self.context_changed = False
+        self.original_trigger = canonical_trigger(trigger)
+        self.touch_gesture = self.original_trigger.startswith('TP:')
 
         # Resolve mode: 'gamepad' or 'kbm'
         mapping = copy.deepcopy(mapping or {})
@@ -218,16 +223,20 @@ class BindingDialog(QDialog):
             else:
                 from .studio_core import profile_mode
                 mode = profile_mode(owner.config, self.profile)
-        self.mode = mode
+        self.base_mode = mode
+        self.mode = 'kbm' if self.touch_gesture else mode
+        self.available_inputs = input_sources(owner.snapshot)
 
-        title = '编辑手柄按键与原生宏' if self.mode == 'gamepad' else '编辑虚拟键鼠映射'
+        from .i18n import tr
+        title = tr('编辑触摸板手势') if self.touch_gesture else ('编辑手柄按键与原生宏' if self.mode == 'gamepad' else '编辑虚拟键鼠映射')
         self.setWindowTitle(title)
-        self.setMinimumWidth(660)
+        self.setMinimumWidth(520 if self.touch_gesture else 660)
         self.normalizer = InputNormalizer()
+        self.touch_recognizer = TouchGestureRecognizer()
         self.capturing = False
         self.ready = False
         self.best = set()
-        self.original_trigger = canonical_trigger(trigger)
+        self.finished_editing = False
 
         layout = QVBoxLayout(self)
         layout.setSpacing(14)
@@ -240,13 +249,17 @@ class BindingDialog(QDialog):
         top_bar.addWidget(prof_title, 1)
 
         badge_text = "手柄 ➔ 手柄 原生宏生产" if self.mode == 'gamepad' else "手柄 ➔ 虚拟键鼠 映射生产"
+        if self.touch_gesture:
+            badge_text = tr('触摸板 → 键鼠与快捷动作')
         macro_badge = QLabel(badge_text)
+        self.mode_badge = macro_badge
         macro_badge.setStyleSheet(f"background: {TOKENS['surface']}; color: {TOKENS['cyan'] if self.mode == 'gamepad' else TOKENS['accent']}; padding: 3px 8px; border-radius: 4px; font-weight: 600; font-size: 11px;")
         top_bar.addWidget(macro_badge)
         layout.addLayout(top_bar)
 
         # Trigger Input Selection
-        source_group = QGroupBox("触发源 (物理手柄按键 / 组合键)")
+        source_group = QGroupBox(tr('输入来源：手柄按键或触摸手势') if touch_sources(owner.snapshot)
+                                 else "触发源 (物理手柄按键 / 组合键)")
         source_group.setStyleSheet(f"QGroupBox {{ font-weight: 700; color: {TOKENS['ink']}; }}")
         sg_l = QVBoxLayout(source_group)
         sg_l.setSpacing(8)
@@ -257,15 +270,24 @@ class BindingDialog(QDialog):
         for i in range(4):
             combo = QComboBox()
             combo.addItem('—', '')
-            for key in INPUTS:
+            for key in self.available_inputs:
+                if i and key.startswith('TP:'):
+                    continue
                 combo.addItem(trigger_label(key, self.family), key)
-            combo.setCurrentIndex(combo.findData(parts[i] if i < len(parts) else ''))
+            value = parts[i] if i < len(parts) else ''
+            if new and i == 0 and value not in self.available_inputs:
+                value = next(iter(self.available_inputs), '')
+            combo.setCurrentIndex(max(0, combo.findData(value)))
             self.inputs.append(combo)
             source.addWidget(combo)
+            if self.touch_gesture and i:
+                combo.setEnabled(False)
+                combo.hide()
         sg_l.addLayout(source)
 
         capture_row = QHBoxLayout()
-        self.capture_button = QPushButton('从手柄录入组合键')
+        self.capture_button = QPushButton(tr('录入手柄按键或触摸手势') if touch_sources(owner.snapshot)
+                                         else '从手柄录入组合键')
         self.capture_button.clicked.connect(self.start_capture)
         capture_row.addWidget(self.capture_button)
 
@@ -301,7 +323,27 @@ class BindingDialog(QDialog):
             ('none', '保留原始输入 (Pass-through)'),
             ('suppress', '屏蔽此按键 (Suppress)'),
             ('launch', '启动应用程序 (Launch App)'),
+            ('capture', tr('保存截图')),
+            ('replay_record', tr('保存精彩瞬间')),
+            ('record_toggle', tr('开始或结束录屏')),
+            ('home', tr('打开控制中心')),
+            ('gallery', tr('打开截图资料库')),
         ]
+        TOUCH_UI_ACTIONS = [
+                ('none', tr('未设置')),
+                ('shortcut', tr('键盘按键或组合键')),
+                ('mouse_click', tr('鼠标单击')),
+                ('wheel', tr('鼠标滚轮滚动')),
+                ('capture', tr('保存截图')),
+                ('replay_record', tr('保存精彩瞬间')),
+                ('record_toggle', tr('开始或结束录屏')),
+                ('home', tr('打开控制中心')),
+                ('gallery', tr('打开截图资料库')),
+                ('launch', tr('启动应用程序')),
+            ]
+        self.keyboard_action_options = KBM_UI_ACTIONS
+        self.touch_action_options = TOUCH_UI_ACTIONS
+        self.gamepad_action_options = GAMEPAD_UI_ACTIONS
 
         self.action_combos = {}
         self.target_selectors = {}
@@ -309,8 +351,11 @@ class BindingDialog(QDialog):
         self.mouse_combos = {}
         self.launch_paths = {}
         self.launch_args = {}
+        self.action_boxes = {}
+        self.action_mode_memory = {}
 
-        for gesture, title in [('short', '短按 (SHORT PRESS)'), ('long', '长按 (LONG PRESS)')]:
+        gestures = [('short', '短按 (SHORT PRESS)'), ('long', '长按 (LONG PRESS)')]
+        for gesture, title in gestures:
             box = QGroupBox(title)
             box.setStyleSheet(f"QGroupBox {{ font-weight: 700; color: {TOKENS['ink']}; }}")
             b_l = QVBoxLayout(box)
@@ -335,7 +380,7 @@ class BindingDialog(QDialog):
             act_row.addWidget(action, 1)
             b_l.addLayout(act_row)
 
-            if self.mode == 'gamepad':
+            if self.base_mode == 'gamepad':
                 selector = GamepadTargetSelector(self.family)
                 if current_act == 'gamepad_chord':
                     selector.set_mode('chord')
@@ -368,77 +413,83 @@ class BindingDialog(QDialog):
                 updater = make_gamepad_updater(action, selector)
                 action.currentIndexChanged.connect(updater)
                 updater()
-            else:
-                # KBM Mode Controls
-                kbm_row = QWidget()
-                k_layout = QHBoxLayout(kbm_row)
-                k_layout.setContentsMargins(0, 0, 0, 0)
-                field = KeySequenceField(binding.get('value', ''))
-                record_btn = QPushButton('录入键盘按键')
-                record_btn.clicked.connect(field.start_recording)
-                k_layout.addWidget(field, 1)
-                k_layout.addWidget(record_btn)
-                b_l.addWidget(kbm_row)
-                self.kbm_fields[gesture] = field
+            # KBM Mode Controls
+            kbm_row = QWidget()
+            k_layout = QHBoxLayout(kbm_row)
+            k_layout.setContentsMargins(0, 0, 0, 0)
+            field = KeySequenceField(binding.get('value', ''))
+            record_btn = QPushButton('录入键盘按键')
+            record_btn.clicked.connect(field.start_recording)
+            k_layout.addWidget(field, 1)
+            k_layout.addWidget(record_btn)
+            b_l.addWidget(kbm_row)
+            self.kbm_fields[gesture] = field
 
-                mouse_combo = QComboBox()
-                for v, m_name in [('left', '鼠标左键'), ('right', '鼠标右键'), ('middle', '鼠标中键'), ('up', '滚轮向上'), ('down', '滚轮向下')]:
-                    mouse_combo.addItem(m_name, v)
-                m_idx = mouse_combo.findData(binding.get('value', 'left'))
-                mouse_combo.setCurrentIndex(max(0, m_idx))
-                b_l.addWidget(mouse_combo)
-                self.mouse_combos[gesture] = mouse_combo
+            mouse_combo = QComboBox()
+            for v, m_name in [('left', '鼠标左键'), ('right', '鼠标右键'), ('middle', '鼠标中键'), ('up', '滚轮向上'), ('down', '滚轮向下')]:
+                mouse_combo.addItem(m_name, v)
+            m_idx = mouse_combo.findData(binding.get('value', 'left'))
+            mouse_combo.setCurrentIndex(max(0, m_idx))
+            b_l.addWidget(mouse_combo)
+            self.mouse_combos[gesture] = mouse_combo
 
-                launch_row = QWidget()
-                l_layout = QHBoxLayout(launch_row)
-                l_layout.setContentsMargins(0, 0, 0, 0)
-                path_edit = QLineEdit(binding.get('executable', ''))
-                path_edit.setPlaceholderText('应用程序路径 (.exe)')
-                browse_btn = QPushButton('浏览...')
-                browse_btn.clicked.connect(lambda chk=False, p=path_edit: self.browse_app(p))
-                args_edit = QLineEdit(binding.get('arguments', ''))
-                args_edit.setPlaceholderText('启动参数 (可选)')
-                l_layout.addWidget(path_edit, 2)
-                l_layout.addWidget(browse_btn)
-                l_layout.addWidget(args_edit, 1)
-                b_l.addWidget(launch_row)
-                self.launch_paths[gesture] = path_edit
-                self.launch_args[gesture] = args_edit
+            launch_row = QWidget()
+            l_layout = QHBoxLayout(launch_row)
+            l_layout.setContentsMargins(0, 0, 0, 0)
+            path_edit = QLineEdit(binding.get('executable', ''))
+            path_edit.setPlaceholderText('应用程序路径 (.exe)')
+            browse_btn = QPushButton('浏览...')
+            browse_btn.clicked.connect(lambda chk=False, p=path_edit: self.browse_app(p))
+            args_edit = QLineEdit(binding.get('arguments', ''))
+            args_edit.setPlaceholderText('启动参数 (可选)')
+            l_layout.addWidget(path_edit, 2)
+            l_layout.addWidget(browse_btn)
+            l_layout.addWidget(args_edit, 1)
+            b_l.addWidget(launch_row)
+            self.launch_paths[gesture] = path_edit
+            self.launch_args[gesture] = args_edit
 
-                def make_kbm_updater(a=action, kr=kbm_row, mc=mouse_combo, lr=launch_row):
-                    def update():
-                        k = a.currentData()
-                        kr.setVisible(k in ('hold', 'shortcut'))
-                        mc.setVisible(k in ('mouse_hold', 'mouse_click', 'wheel'))
-                        lr.setVisible(k == 'launch')
-                    return update
-                updater = make_kbm_updater(action, kbm_row, mouse_combo, launch_row)
-                action.currentIndexChanged.connect(updater)
-                updater()
+            def make_kbm_updater(a=action, kr=kbm_row, mc=mouse_combo, lr=launch_row):
+                def update():
+                    k = a.currentData()
+                    kr.setVisible(k in ('hold', 'shortcut'))
+                    mc.setVisible(k in ('mouse_hold', 'mouse_click', 'wheel'))
+                    lr.setVisible(k == 'launch')
+                return update
+            updater = make_kbm_updater(action, kbm_row, mouse_combo, launch_row)
+            action.currentIndexChanged.connect(updater)
+            updater()
 
             self.action_combos[gesture] = action
+            self.action_boxes[gesture] = box
             layout.addWidget(box)
 
         # Long press timing
-        timing = QHBoxLayout()
+        self.timing_box = QWidget()
+        timing = QHBoxLayout(self.timing_box)
+        timing.setContentsMargins(0, 0, 0, 0)
         timing.addWidget(QLabel('长按识别阈值:'))
-        self.long_press = QDoubleSpinBox()
+        self.long_press = QDoubleSpinBox(self)
         self.long_press.setRange(.15, 3.)
         self.long_press.setSingleStep(.05)
         self.long_press.setSuffix(' 秒')
-        self.long_press.setValue(mapping.get('long_press', owner.config.get('long_press', .65)))
+        from .studio_core import device_config
+        self.long_press.setValue(mapping.get('long_press', device_config(owner.config, owner.snapshot).get('long_press', .65)))
         timing.addWidget(self.long_press)
         timing.addStretch()
-        layout.addLayout(timing)
+        layout.addWidget(self.timing_box)
 
         # Tip banner
-        if self.mode == 'gamepad':
+        if self.touch_gesture:
+            tip_text = tr('每个手势触发一次动作；按下触摸板仍使用独立按键映射。')
+        elif self.mode == 'gamepad':
             tip_text = '💡 纯手柄原生宏：无需额外背键，通过原始手柄按键的短按、长按与组合键，即可直接触发全新手柄单键重映射或组合宏。'
         else:
             tip_text = '💡 虚拟键鼠模拟：将物理手柄输入无缝转换为真实键盘按键、鼠标点击、滚轮或应用快捷键。'
         tip_lbl = QLabel(tip_text)
         tip_lbl.setWordWrap(True)
         tip_lbl.setStyleSheet(f"color: {TOKENS['ink_3']}; font-size: 11px; padding: 4px 0;")
+        self.tip_label = tip_lbl
         layout.addWidget(tip_lbl)
 
         self.error = QLabel('')
@@ -447,15 +498,115 @@ class BindingDialog(QDialog):
         layout.addWidget(self.error)
 
         controls = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        self.save_button = controls.button(QDialogButtonBox.Save)
         controls.button(QDialogButtonBox.Save).setText('保存映射')
         controls.button(QDialogButtonBox.Cancel).setText('取消')
         controls.accepted.connect(self.validate)
         controls.rejected.connect(self.reject)
         layout.addWidget(controls)
 
+        self.inputs[0].currentIndexChanged.connect(self.sync_source_kind)
+        self.sync_source_kind(preserve_action=True)
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
         self.timer.start(16)
+
+    def stop_capture_session(self):
+        """Discard live input when this editor leaves its modal loop."""
+        self.timer.stop()
+        self.capturing = False
+        self.ready = False
+        self.best.clear()
+        self.normalizer.reset()
+        self.touch_recognizer.reset(block_until_release=True)
+        self.finished_editing = True
+
+    def done(self, result):
+        self.stop_capture_session()
+        super().done(result)
+
+    def closeEvent(self, event):
+        # QDialog only rejects a visible dialog. Tests and other nonmodal owners
+        # can close an editor before showing it, and must also stop its timer.
+        self.stop_capture_session()
+        super().closeEvent(event)
+
+    def sync_source_kind(self, _index=None, preserve_action=False):
+        """A touch source is a completed action, rather than a held chord."""
+        from .i18n import tr
+        touch = str(self.inputs[0].currentData() or '').startswith('TP:')
+        previous_touch = self.touch_gesture
+        previous_kind = 'touch' if previous_touch else self.base_mode
+        kind = 'touch' if touch else self.base_mode
+        if touch != previous_touch:
+            self.action_mode_memory[previous_kind] = {
+                gesture: action.currentData() for gesture, action in self.action_combos.items()}
+        self.touch_gesture = touch
+        self.mode = 'kbm' if touch else self.base_mode
+        for combo in self.inputs[1:]:
+            if touch:
+                combo.setCurrentIndex(0)
+            combo.setVisible(not touch)
+            combo.setEnabled(not touch and not self.context_changed)
+        self.action_boxes['short'].setTitle(tr('触发动作') if touch else '短按 (SHORT PRESS)')
+        self.action_boxes['long'].setVisible(not touch)
+        self.timing_box.setVisible(not touch)
+        self.long_press.setVisible(not touch)
+        if touch != previous_touch or preserve_action:
+            for gesture, action in self.action_combos.items():
+                selected = self.action_mode_memory.get(kind, {}).get(gesture, action.currentData())
+                if touch and gesture == 'short' and not preserve_action:
+                    selected = {'hold': 'shortcut', 'mouse_hold': 'mouse_click', 'suppress': 'none'}.get(selected, selected)
+                options = list(self.touch_action_options if touch else self.gamepad_action_options
+                               if self.mode == 'gamepad' else self.keyboard_action_options)
+                # Existing one-shot mappings may use the bounded hold representation.
+                if touch and selected in ('hold', 'mouse_hold'):
+                    options.append((selected, tr('按键短按') if selected == 'hold' else tr('鼠标单击')))
+                action.blockSignals(True)
+                action.clear()
+                for key, name in options:
+                    action.addItem(name, key)
+                action.setCurrentIndex(max(0, action.findData(selected)))
+                action.blockSignals(False)
+                action.currentIndexChanged.emit(action.currentIndex())
+        self.setWindowTitle(tr('编辑触摸板手势') if touch else
+                            '编辑手柄按键与原生宏' if self.mode == 'gamepad' else '编辑虚拟键鼠映射')
+        self.mode_badge.setText(tr('触摸板 → 键鼠与快捷动作') if touch else
+                                '手柄 ➔ 手柄 原生宏生产' if self.mode == 'gamepad' else '手柄 ➔ 虚拟键鼠 映射生产')
+        if touch:
+            self.tip_label.setText(tr('每个手势触发一次动作；按下触摸板仍使用独立按键映射。'))
+        elif self.mode == 'kbm':
+            self.tip_label.setText(tr('选择手柄按键或触摸手势，也可以点击录入后实际操作。'))
+        else:
+            self.tip_label.setText(tr('手柄按键支持原生映射；触摸手势可绑定键鼠或快捷动作。'))
+
+    @staticmethod
+    def _device_context(state):
+        from .studio_core import profile_scope
+        # Anonymous input samples are used by preview/capture harnesses. Real
+        # hardware always has an identity, supplied by Device.read().
+        identified = state and any(key in state for key in ('device_key', 'profile_key', 'instance_id', 'family'))
+        return (profile_scope(state) if identified else 'offline:xinput',
+                state.get('instance_id') if state else None,
+                (state or {}).get('family', 'generic'), tuple(input_sources(state)))
+
+    def check_device_context(self):
+        from .i18n import tr
+        if self.context_changed or self._device_context(self.owner.snapshot) != self.device_context:
+            self.context_changed = True
+            self.capturing = False
+            self.best.clear()
+            self.normalizer.reset()
+            self.touch_recognizer.reset(block_until_release=True)
+            self.timer.stop()
+            self.capture_button.setEnabled(False)
+            self.save_button.setEnabled(False)
+            for combo in self.inputs:
+                combo.setEnabled(False)
+            self.error.setText(tr('输入设备已变化，请重新打开映射编辑。'))
+            return False
+        return True
 
     def browse_app(self, field):
         from PySide6.QtWidgets import QFileDialog
@@ -464,24 +615,74 @@ class BindingDialog(QDialog):
             field.setText(value)
 
     def start_capture(self):
+        if self.finished_editing:
+            return
+        if not self.check_device_context():
+            return
         self.capturing = True
         self.ready = False
         self.best = set()
-        self.capture_button.setText('请先松开按键，再同时按下目标组合键...')
+        self.normalizer.reset()
+        self.touch_recognizer.reset(block_until_release=True)
+        from .i18n import tr
+        self.capture_button.setText(tr('先松开按键并抬起手指，再输入按键或手势'))
         self.error.clear()
 
+    def finish_capture(self, trigger):
+        from .i18n import tr
+        parts = canonical_trigger(trigger).split('+')
+        for i, combo in enumerate(self.inputs):
+            combo.setCurrentIndex(max(0, combo.findData(parts[i] if i < len(parts) else '')))
+        self.capturing = False
+        self.best.clear()
+        self.touch_recognizer.reset(block_until_release=True)
+        self.live.setText(trigger_label(trigger, self.family))
+        self.capture_button.setText(tr('重新录入来源'))
+
     def poll(self):
+        if self.finished_editing:
+            return
+        if not self.check_device_context():
+            return
         state = self.owner.snapshot
-        current = self.normalizer.update(state)
-        current.discard('LS:outer')
+        options = self.owner.config.get('profile_options', {}).get(self.profile, {})
+        inputs = copy.deepcopy(options.get('input') or {})
+        inputs['trigger_curves'] = device_config(self.owner.config, state).get('trigger_curves', {})
+        current = self.normalizer.update(state, inputs)
+        current.difference_update({'LS:outer', 'LS:inner'})
         if not self.capturing:
-            self.live.setText(' + '.join(trigger_label(k, self.family) for k in sorted(current)) if current else '等待输入' if state else '未连接 · 可手动在上方选择按键')
+            self.live.setText(' + '.join(trigger_label(k, self.family) for k in sorted(current)) if current else
+                              trigger_label(self.inputs[0].currentData(), self.family) if self.touch_gesture else
+                              '等待输入' if state else '未连接 · 可手动在上方选择按键')
             return
+        touch = self.touch_recognizer.update(state, settings=device_config(self.owner.config, state))
         if not self.ready:
-            self.ready = not current
+            self.ready = not current and not touch['contacts']
+            if self.ready:
+                self.touch_recognizer.reset(block_until_release=False)
             return
+        if current or self.best:
+            # A completed touch action cannot join a held physical chord.
+            self.touch_recognizer.reset(block_until_release=True)
+            if not current and touch['contacts']:
+                from .i18n import tr
+                self.live.setText(tr('抬起手指后完成按键录入'))
+                return
+        else:
+            events = [event for event in touch['events'] if event in self.available_inputs]
+            if touch['scroll_steps']:
+                direction = 'TP:scroll_up' if touch['scroll_steps'] > 0 else 'TP:scroll_down'
+                if direction in self.available_inputs:
+                    events.append(direction)
+            if events:
+                self.finish_capture(events[-1])
+                return
+            if touch['contacts']:
+                from .i18n import tr
+                self.live.setText(tr('正在识别触摸手势'))
+                return
         if len(current) > len(self.best):
-            self.best = current
+            self.best = set(current)
         if current:
             self.live.setText(trigger_label('+'.join(current), self.family) if len(current) <= 4 else '最多支持 4 个按键')
         elif self.best:
@@ -489,21 +690,17 @@ class BindingDialog(QDialog):
                 self.error.setText('最多支持 4 个按键，请重新录入')
                 self.best.clear()
                 return
-            parts = canonical_trigger('+'.join(self.best)).split('+')
-            for i, combo in enumerate(self.inputs):
-                combo.setCurrentIndex(combo.findData(parts[i] if i < len(parts) else ''))
-            self.capturing = False
-            self.capture_button.setText('重新录入组合键')
+            self.finish_capture('+'.join(self.best))
 
     def trigger(self):
         parts = [c.currentData() for c in self.inputs if c.currentData()]
         if not parts:
-            parts = ['0']
+            raise ValueError('请选择当前手柄支持的输入按键')
         return canonical_trigger('+'.join(parts))
 
     def value(self):
         mapping = {}
-        for g in ('short', 'long'):
+        for g in (('short',) if self.touch_gesture else ('short', 'long')):
             action_code = self.action_combos[g].currentData()
             binding = {'action': action_code}
             if self.mode == 'gamepad':
@@ -522,15 +719,23 @@ class BindingDialog(QDialog):
                 elif action_code == 'launch':
                     binding.update(executable=self.launch_paths[g].text().strip(), arguments=self.launch_args[g].text().strip())
             mapping[g] = binding
-        mapping['long_press'] = self.long_press.value()
+        if self.touch_gesture:
+            mapping['long'] = {'action': 'none'}
+        else:
+            mapping['long_press'] = self.long_press.value()
         return mapping
 
     def validate(self):
         try:
+            if not self.check_device_context():
+                return
             if self.capturing:
-                raise ValueError('请先完成手柄按键录入')
+                from .i18n import tr
+                raise ValueError(tr('请先完成输入来源录入'))
             val = self.value()
             trig = self.trigger()
+            if not set(trig.split('+')) <= set(input_sources(self.owner.snapshot)):
+                raise ValueError('请选择当前手柄支持的输入按键')
             validate_mappings({trig: val})
             if self.new_binding or trig != self.original_trigger:
                 existing = self.owner.config['profiles'].get(self.profile, {}).get(trig, {})

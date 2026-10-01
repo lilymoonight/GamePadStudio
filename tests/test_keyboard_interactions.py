@@ -6,6 +6,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
 
 from gamepadstudio.kbm_mapper import NIKKI_PROFILE_NAME
+from gamepadstudio.i18n import get_language_preference, init_language
 from gamepadstudio.studio_core import ConfigStore
 from gamepadstudio.virtual_kbm_ui import VirtualKbmPage, trigger_tokens
 from tests.mapping_fixtures import MappingOwner
@@ -14,6 +15,8 @@ from tests.mapping_fixtures import MappingOwner
 @pytest.fixture
 def keyboard_view(tmp_path):
     app = QApplication.instance() or QApplication([])
+    previous_language = get_language_preference()
+    init_language('zh')
     owner = MappingOwner(tmp_path)
     owner.config['profiles'][NIKKI_PROFILE_NAME] = {
         '0': {'short': {'action': 'hold', 'value': 'Space'}},
@@ -27,6 +30,7 @@ def keyboard_view(tmp_path):
     yield owner, page
     page.close()
     owner.close()
+    init_language(previous_language)
 
 
 def test_right_click_unbinds_matching_triggers_and_preserves_presets(keyboard_view, monkeypatch):
@@ -122,6 +126,8 @@ def test_keyboard_preselection_waits_for_explicit_activation(keyboard_view):
     ('R3 + L1', ('L1', 'R3')),
     ('A + LB + LT', ('LB', 'LT', 'A')),
     ('左摇杆↑ + R1', ('R1', 'LS↑')),
+    ('×  交叉 + Create', ('Create', '×')),
+    ('A + View', ('View', 'A')),
 ])
 def test_chord_tokens_promote_modifiers_without_merging_members(raw, expected):
     assert trigger_tokens(raw) == expected
@@ -161,10 +167,46 @@ def test_binding_overflow_counts_bindings_not_chord_members(keyboard_view, width
     assert sum(item['width'] for item in plan) + 8 * (len(plan) - 1) <= width
     assert '4 项绑定' in cap.toolTip()
     if width == 23:
-        assert plan == [{'kind': 'count', 'count': 4, 'overflow': False, 'width': 23}]
+        assert len(plan) == 1 and plan[0]['kind'] == 'count'
+        assert plan[0]['count'] == 4 and not plan[0]['overflow']
+        assert cap.binding_count_text(4, False, width) == '4组'
     if width == 250:
         assert len(plan) == 4 and all(item['kind'] == 'binding' for item in plan)
         assert sum(item['long'] for item in plan) == 1
+
+
+def test_multiple_binding_label_uses_words_instead_of_ellipsis(keyboard_view):
+    _, page = keyboard_view
+    cap = page.keycaps['Space']
+    assert cap.binding_count_text(2, False, 28) == '2组'
+    assert cap.binding_count_text(2, False, 100) == '2组绑定'
+    assert cap.binding_count_text(2, True, 100) == '+2组绑定'
+    init_language('en')
+    assert cap.binding_count_text(2, False, 100) == '2 binds'
+
+
+@pytest.mark.parametrize('key', ['9', '10', 'LT', 'RT', '7', '8'])
+def test_small_controller_labels_draw_complete_printed_names(keyboard_view, key):
+    from PySide6.QtGui import QPainter, QPixmap
+    from gamepadstudio.controller_glyphs import button_text, draw_token, token_advance
+
+    class LabelPainter(QPainter):
+        def __init__(self, pixmap):
+            super().__init__(pixmap)
+            self.labels = []
+        def drawText(self, *args):
+            self.labels.append(args[-1])
+            return super().drawText(*args)
+
+    _, page = keyboard_view
+    cap = page.keycaps['1']
+    font = cap._binding_font(14)
+    pixmap = QPixmap(token_advance(key, 'dualsense', font), 22)
+    pixmap.fill(Qt.transparent)
+    painter = LabelPainter(pixmap)
+    draw_token(painter, pixmap.rect(), key, 'dualsense', font, '#7dd3fc')
+    painter.end()
+    assert painter.labels == [button_text(key, 'dualsense')]
 
 
 def test_readable_chord_uses_space_before_shrinking_font(keyboard_view):
@@ -177,6 +219,27 @@ def test_readable_chord_uses_space_before_shrinking_font(keyboard_view):
     assert plan[0]['font'] >= 11
     assert not plan[0]['stacked']
     assert plan[0]['tokens'] == ('L1', '×')
+
+
+@pytest.mark.parametrize('family, input_id, expected', [
+    ('dualsense', '0+4', ('Create', '×')),
+    ('dualshock4', '0+LT', ('L2', '×')),
+    ('xbox', '0+4', ('View', 'A')),
+    ('xbox', '0+15', ('A', 'Share')),
+    ('switch', '0+RT', ('ZR', 'B')),
+])
+def test_keyboard_uses_input_identity_and_device_names_without_parsing_labels(keyboard_view, family, input_id, expected):
+    _, page = keyboard_view
+    cap = page.keycaps['1']
+    # The full description is deliberately identical; it cannot identify the button.
+    cap.set_mapping_info([{'trigger': '完整说明', 'input': input_id, 'family': family, 'gesture': 'short'}])
+
+    item = cap.binding_display_plan(80, 24)[0]
+
+    assert item['tokens'] == expected
+    assert item['family'] == family
+    assert item['font'] >= 12 and not item['stacked']
+    assert '完整说明' in cap.toolTip()
 
 
 def test_keyboard_fits_during_rapid_resize_and_page_switching(tmp_path, monkeypatch):

@@ -102,6 +102,22 @@ def test_feedback_cannot_light_an_inactive_profile(tmp_path):
     assert not deck.long_card.active
 
 
+def test_modifier_appears_first_without_changing_edit_target(tmp_path):
+    app()
+    owner = Owner(tmp_path)
+    owner.config['profiles'][owner.profile]['0+9'] = {
+        'short': {'action': 'gamepad_button', 'value': '0'},
+        'long': {'action': 'none'}}
+    deck = MappingDeck(owner)
+    deck.set_trigger('LB+A')
+    flush()
+    assert deck.selected_trigger == '0+9'
+    assert key_tokens(deck.short_card) == ['9', '0', '0']
+    assert key_tokens(deck.combo_buttons['0+9']) == ['9', '0']
+    deck.short_card.click()
+    assert owner.edits[-1] == ('0+9', {'profile': '主机体验', 'mode': 'gamepad'})
+
+
 def test_four_key_input_and_output_wrap_within_narrow_deck(tmp_path):
     app()
     window = QWidget()
@@ -146,3 +162,34 @@ def test_cards_show_turbo_rate_and_macro_steps_as_widgets(tmp_path):
     assert key_tokens(deck.short_card) == ['0', '0', '1', '2']
     assert any(label.text() == '80 ms' for label in deck.short_card.findChildren(QLabel))
     assert all('{' not in label.text() for label in deck.short_card.findChildren(QLabel))
+
+
+def test_curve_controls_wrap_and_recheck_actual_capabilities(tmp_path):
+    app()
+    owner = Owner(tmp_path)
+    owner.snapshot = {'family': 'dualsense', 'available_axes': list(range(6)),
+                      'rumble': True, 'trigger_rumble': True}
+    owner.curve_calls = []
+    owner.open_curve_editor = lambda kind, channel=None: owner.curve_calls.append((kind, channel))
+    window = QWidget()
+    layout = QVBoxLayout(window)
+    deck = MappingDeck(owner)
+    layout.addWidget(deck)
+    deck.set_trigger('R2')
+    window.resize(350, 650)
+    window.show()
+    flush()
+    try:
+        assert all(not control.isHidden() for control in deck.curve_buttons.values())
+        for control in deck.curve_buttons.values():
+            assert control.geometry().right() < deck.curve_controls.width()
+        deck.curve_buttons['trigger'].click()
+        assert owner.curve_calls == [('trigger', 'right')]
+        owner.snapshot = {'family': 'switch', 'available_axes': list(range(6)), 'rumble': True}
+        deck.refresh()
+        assert deck.curve_buttons['trigger'].isHidden()
+        assert deck.curve_buttons['trigger_rumble'].isHidden()
+        deck.open_curve('trigger')
+        assert owner.curve_calls == [('trigger', 'right')]
+    finally:
+        window.hide()

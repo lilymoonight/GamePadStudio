@@ -8,11 +8,67 @@ import re
 import time
 from pathlib import Path
 from .controller_catalog import CATALOG, controller_defaults, desktop_defaults
+from .response_curves import CURVE_CHANNELS, normalize_curve_channels
+from .touch_gestures import normalize_touch_sensitivity, touch_sources
 
 KEYBOARD_PROFILE_CLEANUP_VERSION = 1
+DEVICE_PROFILE_VERSION = 1
+OFFLINE_PROFILE_SCOPE = 'offline:xinput'
+DEVICE_SETTING_KEYS = ('led', 'rumble', 'touch_mouse', 'long_press', 'deadzone',
+                       'capture_haptics_enabled', 'haptic_intensity', 'haptic_profile',
+                       'haptic_engine_enabled', 'device_cloaking_enabled',
+                       'trigger_curves', 'rumble_curves', 'trigger_rumble_curves',
+                       'trigger_rumble_enabled', 'touch_gestures_enabled', 'touch_scroll',
+                       'touch_gesture_sensitivity')
+DEVICE_SETTING_DEFAULTS = {'led': '#5686ff', 'rumble': .35, 'touch_mouse': False,
+                           'long_press': .65, 'deadzone': .10,
+                           'capture_haptics_enabled': True, 'haptic_intensity': 1.0,
+                           'haptic_profile': 'crisp', 'haptic_engine_enabled': True,
+                           'device_cloaking_enabled': True}
+DEVICE_SETTING_DEFAULTS.update({key: normalize_curve_channels(key) for key in CURVE_CHANNELS})
+DEVICE_SETTING_DEFAULTS['trigger_rumble_enabled'] = False
+DEVICE_SETTING_DEFAULTS.update(touch_gestures_enabled=False, touch_scroll=False,
+                               touch_gesture_sensitivity=.5)
+
+
+def profile_scope(state):
+    """Use physical identity when available; the disconnected preview is public."""
+    if not state:
+        return OFFLINE_PROFILE_SCOPE
+    return str(state.get('device_key') or state.get('profile_key') or state.get('family') or 'generic')
+
+
+def device_config(config, state):
+    """Resolve hardware preferences without borrowing another controller's values."""
+    resolved = dict(config)
+    resolved.update(DEVICE_SETTING_DEFAULTS)
+    settings = config.get('device_settings', {})
+    settings = settings.get(profile_scope(state), {}) if isinstance(settings, dict) else {}
+    if isinstance(settings, dict):
+        resolved.update({key: copy.deepcopy(value) for key, value in settings.items()
+                         if key in DEVICE_SETTING_KEYS})
+    for key in CURVE_CHANNELS:
+        resolved[key] = normalize_curve_channels(key, resolved)
+    resolved['trigger_rumble_enabled'] = resolved.get('trigger_rumble_enabled') is True
+    for key in ('touch_gestures_enabled', 'touch_scroll'):
+        resolved[key] = resolved.get(key) is True
+    resolved['touch_gesture_sensitivity'] = normalize_touch_sensitivity(resolved.get('touch_gesture_sensitivity'))
+    return resolved
+
+
+def is_nikki_profile(config, name):
+    from .kbm_mapper import NIKKI_PROFILE_NAME
+    sources = config.get('profile_sources', {})
+    return name == NIKKI_PROFILE_NAME or (isinstance(sources, dict)
+                                         and sources.get(name) == NIKKI_PROFILE_NAME)
+
 NIKKI_PROFILE_OPTIONS = {'right_stick_mouse': True,
-                         'mouse': {'mode': 'game', 'sensitivity': 28.0, 'deadzone': 0.06,
-                                   'y_ratio': 0.70, 'edge_boost': 1.70}}
+                         'input': {'stick_press': .24, 'stick_release': .17,
+                                   'trigger_press': .30, 'trigger_release': .20,
+                                   'walk_press': .62, 'walk_release': .72,
+                                   'chord_window': .055},
+                         'mouse': {'mode': 'game', 'sensitivity': 24.0, 'deadzone': .09,
+                                   'y_ratio': .70, 'edge_boost': 1.45}}
 
 BUTTONS = {0: '×  交叉', 1: '○  圆圈', 2: '□  方块', 3: '△  三角',
            4: 'Create', 5: 'PS', 6: 'Options', 7: 'L3', 8: 'R3',
@@ -88,7 +144,7 @@ def get_buttons(lang=None):
 
 
 def default_config(root: Path):
-    from .kbm_mapper import NIKKI_PROFILE_NAME, infinity_nikki_defaults
+    from .kbm_mapper import NIKKI_PROFILE_NAME, NIKKI_LAYOUT_VERSION, infinity_nikki_defaults
     base = {'4': {'short': {'action': 'capture'}, 'long': {'action': 'replay_record'}},
             '5': {'short': {'action': 'home'}, 'long': {'action': 'none'}}}
     action_macro = copy.deepcopy(base)
@@ -96,23 +152,33 @@ def default_config(root: Path):
     action_macro['2'] = {'short': {'action': 'none'}, 'long': {'action': 'gamepad_chord', 'value': '2+3'}}
     action_macro['9+10'] = {'short': {'action': 'gamepad_chord', 'value': '9+10+3'}, 'long': {'action': 'none'}}
 
-    nikki = infinity_nikki_defaults('dualsense')
+    nikki = infinity_nikki_defaults('dualsense', touch_inputs=[])
     options = {NIKKI_PROFILE_NAME: copy.deepcopy(NIKKI_PROFILE_OPTIONS)}
     return {'version': 1, 'mapping_version': 2, 'mapping_revision': 0,
             'keyboard_profile_cleanup_version': KEYBOARD_PROFILE_CLEANUP_VERSION,
+            'nikki_layout_version': NIKKI_LAYOUT_VERSION,
+            'nikki_profile_layouts': {NIKKI_PROFILE_NAME: {'version': NIKKI_LAYOUT_VERSION,
+                                                         'touch_inputs': []}},
+            'nikki_touch_settings_initialized': [],
+            'device_profile_version': DEVICE_PROFILE_VERSION,
             'active_profile': '主机体验',
             'profiles': {'主机体验': base, '动作与格斗宏': action_macro, NIKKI_PROFILE_NAME: nikki},
             'profile_modes': {'主机体验': 'gamepad', '动作与格斗宏': 'gamepad', NIKKI_PROFILE_NAME: 'kbm'},
             'profile_options': options,
+            'profile_devices': {NIKKI_PROFILE_NAME: OFFLINE_PROFILE_SCOPE},
+            'profile_sources': {NIKKI_PROFILE_NAME: NIKKI_PROFILE_NAME},
+            'device_settings': {},
             'save_dir': str(root / 'Captures'), 'capture_mode': 'game', 'cooldown': .5,
             'long_press': .65, 'deadzone': .10, 'rumble': .35, 'led': '#5686ff',
             'touch_mouse': False, 'close_to_tray': False, 'mapping_enabled': True, 'controller_profiles':{}, 'controller_favorites':[], 'preferred_controller':'',
             'profile_families':{'主机体验':'dualsense','动作与格斗宏':'dualsense', NIKKI_PROFILE_NAME: 'all'},
             'replay_buffer_enabled': False, 'replay_buffer_minutes': 5, 'replay_codec': 'hevc',
-            'replay_bitrate_mbps': 50, 'replay_fps': 30,
+            'replay_bitrate_mbps': 50, 'replay_fps': 30, 'replay_capture_mode': 'game',
             'capture_sound_enabled': True, 'capture_haptics_enabled': True,
             'haptic_engine_enabled': True, 'haptic_intensity': 1.0, 'haptic_profile': 'crisp',
             'device_cloaking_enabled': True,
+            **{key: copy.deepcopy(DEVICE_SETTING_DEFAULTS[key])
+               for key in (*CURVE_CHANNELS, 'trigger_rumble_enabled')},
             'gamebar_shield_enabled': False, 'gamebar_shield_backup': {}}
 
 
@@ -123,6 +189,7 @@ class ConfigStore:
         self.path = root / 'studio.json'
         self.data = default_config(root)
         self.warning = ''
+        needs_recording_mode = False
         if self.path.exists():
             try:
                 saved = json.loads(self.path.read_text(encoding='utf-8'))
@@ -145,6 +212,26 @@ class ConfigStore:
                 # identify old configurations that need a one-time migration.
                 self.data['mapping_version'] = saved.get('mapping_version', 0)
                 self.data['keyboard_profile_cleanup_version'] = saved.get('keyboard_profile_cleanup_version', 0)
+                self.data['device_profile_version'] = saved.get('device_profile_version', 0)
+                for field in ('profile_devices', 'profile_sources', 'device_settings', 'nikki_profile_layouts'):
+                    value = saved.get(field, {})
+                    self.data[field] = value if isinstance(value, dict) else {}
+                self.data['profile_devices'] = {name: owner for name, owner in self.data['profile_devices'].items()
+                                                 if name in self.data['profiles'] and isinstance(owner, str)}
+                self.data['profile_sources'] = {name: source for name, source in self.data['profile_sources'].items()
+                                                 if name in self.data['profiles'] and isinstance(source, str)}
+                self.data['device_settings'] = {scope: options for scope, options in self.data['device_settings'].items()
+                                               if isinstance(scope, str) and isinstance(options, dict)}
+                self.data['nikki_profile_layouts'] = {
+                    name: value for name, value in self.data['nikki_profile_layouts'].items()
+                    if name in self.data['profiles'] and isinstance(value, dict)}
+                initialized = saved.get('nikki_touch_settings_initialized', [])
+                self.data['nikki_touch_settings_initialized'] = [scope for scope in initialized
+                    if isinstance(scope, str)] if isinstance(initialized, list) else []
+                try:
+                    self.data['nikki_layout_version'] = int(saved.get('nikki_layout_version', 0))
+                except (TypeError, ValueError, OverflowError):
+                    self.data['nikki_layout_version'] = 0
                 if not isinstance(self.data['controller_profiles'],dict):self.data['controller_profiles']={}
                 self.data['controller_profiles']={key:value for key,value in self.data['controller_profiles'].items() if isinstance(value,str) and value in self.data['profiles']}
                 if not isinstance(self.data['profile_families'],dict):self.data['profile_families']={}
@@ -158,6 +245,10 @@ class ConfigStore:
                     self.data[key] = max(lo, min(hi, float(self.data[key])))
                 if self.data.get('capture_mode') == 'monitor':
                     self.data['capture_mode'] = 'game'
+                self.data['replay_capture_mode'] = saved.get('replay_capture_mode') or self.data.get('capture_mode', 'game')
+                needs_recording_mode = not saved.get('replay_capture_mode')
+                if self.data['replay_capture_mode'] == 'monitor':
+                    self.data['replay_capture_mode'] = 'game'
                 self.data.setdefault('replay_buffer_enabled', False)
                 self.data.setdefault('replay_buffer_minutes', 5)
                 self.data.setdefault('replay_codec', 'hevc')
@@ -174,7 +265,7 @@ class ConfigStore:
                 from .kbm_mapper import NIKKI_PROFILE_NAME, LEGACY_NIKKI_PROFILE_NAME, infinity_nikki_defaults
                 if NIKKI_PROFILE_NAME not in self.data['profiles']:
                     self.data['profiles'][NIKKI_PROFILE_NAME] = copy.deepcopy(
-                        self.data['profiles'].get(LEGACY_NIKKI_PROFILE_NAME, infinity_nikki_defaults('dualsense')))
+                        self.data['profiles'].get(LEGACY_NIKKI_PROFILE_NAME, infinity_nikki_defaults('dualsense', touch_inputs=[])))
                     old_options = self.data.get('profile_options', {}).get(LEGACY_NIKKI_PROFILE_NAME)
                     if old_options is not None:
                         self.data['profile_options'][NIKKI_PROFILE_NAME] = copy.deepcopy(old_options)
@@ -195,8 +286,17 @@ class ConfigStore:
             self._migrate_mappings()
         if needs_cleanup:
             self._cleanup_keyboard_profiles()
-        if needs_mapping_migration or needs_cleanup:
+        from .kbm_mapper import NIKKI_LAYOUT_VERSION
+        needs_nikki_layout = self.data.get('nikki_layout_version', 0) < NIKKI_LAYOUT_VERSION
+        if needs_nikki_layout:
+            self._update_nikki_layout()
+        needs_device_profiles = self.data.get('device_profile_version', 0) < DEVICE_PROFILE_VERSION
+        if needs_device_profiles:
+            self._migrate_device_profiles()
+        if needs_mapping_migration or needs_cleanup or needs_nikki_layout or needs_device_profiles:
             self.data['mapping_revision'] = self.data.get('mapping_revision', 0) + 1
+            self.save(merge=False)
+        elif needs_recording_mode:
             self.save(merge=False)
         self._baseline = copy.deepcopy(self.data)
 
@@ -225,96 +325,382 @@ class ConfigStore:
         self.data['keyboard_profile_cleanup_version'] = KEYBOARD_PROFILE_CLEANUP_VERSION
         return removed
 
+    def _update_nikki_layout(self):
+        """Upgrade the offline template; real device capabilities complete clones."""
+        from .kbm_mapper import NIKKI_PROFILE_NAME, NIKKI_LAYOUT_VERSION, infinity_nikki_defaults
+        if self.path.exists():
+            backup = self.path.with_name(f'studio.before-nikki-layout-v{NIKKI_LAYOUT_VERSION}.json')
+            if not backup.exists():
+                backup.write_bytes(self.path.read_bytes())
+        old_version = self.data.get('nikki_layout_version', 0)
+        markers = self.data.setdefault('nikki_profile_layouts', {})
+        for name in self.data['profiles']:
+            if is_nikki_profile(self.data, name):
+                markers.setdefault(name, {'version': 2, 'touch_inputs': []})
+        fresh = infinity_nikki_defaults('dualsense', touch_inputs=[])
+        if old_version < 2:
+            # The historical, pre-2.0 preset used different game controls.
+            self.data['profiles'][NIKKI_PROFILE_NAME] = fresh
+            self.data['profile_options'][NIKKI_PROFILE_NAME] = copy.deepcopy(NIKKI_PROFILE_OPTIONS)
+        else:
+            previous = infinity_nikki_defaults('dualsense', touch_inputs=[], layout_version=2)
+            self._merge_nikki_defaults(NIKKI_PROFILE_NAME, previous, fresh)
+        markers[NIKKI_PROFILE_NAME] = {'version': NIKKI_LAYOUT_VERSION, 'touch_inputs': []}
+        self.data.setdefault('profile_modes', {})[NIKKI_PROFILE_NAME] = 'kbm'
+        self.data['profile_families'][NIKKI_PROFILE_NAME] = 'all'
+        self.data['nikki_layout_version'] = NIKKI_LAYOUT_VERSION
+
+    def _merge_nikki_defaults(self, name, previous, current, new_touch_inputs=()):
+        """Replace only fields still equal to their earlier shipped defaults."""
+        mappings = self.data['profiles'][name]
+        self._preserve_nikki_menu_fallbacks(mappings, previous, current, new_touch_inputs)
+        installed = False
+        for trigger in set(previous) | set(current):
+            old, new = previous.get(trigger, {}), current.get(trigger, {})
+            if trigger not in mappings:
+                if trigger in new_touch_inputs and trigger in current:
+                    mappings[trigger] = copy.deepcopy(new)
+                    installed = True
+                continue
+            existing = mappings[trigger]
+            # Previously configured gestures, including explicit "none", are
+            # authoritative; new default gestures only fill absent sources.
+            if trigger.startswith('TP:') and trigger in new_touch_inputs:
+                continue
+            for field in ('short', 'long', 'long_press'):
+                if field in old and existing.get(field) == old[field]:
+                    if field in new:
+                        existing[field] = copy.deepcopy(new[field])
+                    else:
+                        existing.pop(field, None)
+        return installed
+
+    @staticmethod
+    def _preserve_nikki_menu_fallbacks(mappings, previous, current, new_touch_inputs):
+        # A custom or disabled gesture must not silently consume the only
+        # physical shortcut to that game menu during an upgrade.
+        for gesture, chord in (('TP:swipe_left', '0+4'), ('TP:swipe_right', '2+4'),
+                               ('TP:swipe_up', '3+4')):
+            old = previous.get(chord, {}).get('short', {})
+            new = current.get(chord, {}).get('short', {})
+            if old.get('action') != 'shortcut' or new.get('action') != 'none':
+                continue
+            final = mappings.get(gesture)
+            if final is None and gesture in new_touch_inputs:
+                final = current.get(gesture)
+            expected = {'action': 'shortcut', 'value': old.get('value')}
+            if not final or final.get('short', {}) != expected:
+                current[chord]['short'] = copy.deepcopy(old)
+
+    def _upgrade_nikki_profile(self, name, state):
+        from .kbm_mapper import NIKKI_LAYOUT_VERSION, infinity_nikki_defaults
+        if not state or not is_nikki_profile(self.data, name):
+            return
+        markers = self.data.setdefault('nikki_profile_layouts', {})
+        marker = markers.get(name, {})
+        version = marker.get('version', min(2, self.data.get('nikki_layout_version', 2)))
+        version = version if type(version) is int else 2
+        installed_sources = marker.get('touch_inputs', [])
+        installed_sources = set(installed_sources) if isinstance(installed_sources, list) else set()
+        available_sources = set(touch_sources(state))
+        new_sources = available_sources - installed_sources
+        if version >= NIKKI_LAYOUT_VERSION and not new_sources:
+            return
+        family = state.get('family', 'generic')
+        buttons = state.get('available_buttons')
+        previous = infinity_nikki_defaults(family, buttons, touch_inputs=installed_sources,
+                                           layout_version=2 if version < 3 else NIKKI_LAYOUT_VERSION)
+        current = infinity_nikki_defaults(family, buttons,
+                                          touch_inputs=installed_sources | available_sources)
+        installed = self._merge_nikki_defaults(name, previous, current, new_sources)
+        markers[name] = {'version': NIKKI_LAYOUT_VERSION,
+                         'touch_inputs': sorted(installed_sources | available_sources),
+                         'touch_defaults': bool(marker.get('touch_defaults') or installed)}
+
+    def _initialize_nikki_touch_settings(self, state, force=False):
+        from .kbm_mapper import NIKKI_TOUCH_SETTINGS
+        if not touch_sources(state):
+            return
+        scope = profile_scope(state)
+        initialized = self.data.setdefault('nikki_touch_settings_initialized', [])
+        if scope in initialized and not force:
+            return
+        settings = self.data.setdefault('device_settings', {}).setdefault(scope, {})
+        for key, value in NIKKI_TOUCH_SETTINGS.items():
+            if force or settings.get(key, DEVICE_SETTING_DEFAULTS[key]) == DEVICE_SETTING_DEFAULTS[key]:
+                settings[key] = value
+        if scope not in initialized:
+            initialized.append(scope)
+
+    def _migrate_device_profiles(self):
+        """Keep old names and edits, then assign each profile one physical owner."""
+        from .kbm_mapper import NIKKI_PROFILE_NAME
+        if self.path.exists():
+            backup = self.path.with_name('studio.before-device-profiles-v1.json')
+            if not backup.exists():
+                backup.write_bytes(self.path.read_bytes())
+        owners = self.data.setdefault('profile_devices', {})
+        self.data.setdefault('profile_sources', {})[NIKKI_PROFILE_NAME] = NIKKI_PROFILE_NAME
+        owners[NIKKI_PROFILE_NAME] = OFFLINE_PROFILE_SCOPE
+        for scope, name in self.data.get('controller_profiles', {}).items():
+            if name != NIKKI_PROFILE_NAME:
+                owners.setdefault(name, scope)
+        active = self.data['active_profile']
+        legacy = {key: copy.deepcopy(self.data.get(key, DEVICE_SETTING_DEFAULTS[key]))
+                  for key in DEVICE_SETTING_KEYS}
+        owner = owners.get(active)
+        if owner and owner != OFFLINE_PROFILE_SCOPE:
+            self.data.setdefault('device_settings', {}).setdefault(owner, copy.deepcopy(legacy))
+        self.data['legacy_device_settings'] = {'profile': active,
+                                                'family': self.data['profile_families'].get(active, 'dualsense'),
+                                                'values': legacy}
+        self.data['device_profile_version'] = DEVICE_PROFILE_VERSION
+
     @property
     def mappings(self):
         return self.data['profiles'][self.data['active_profile']]
 
-    def activate_controller(self,state):
-        family=state.get('family','dualsense')
-        key=state.get('profile_key',family)
-        # Moving the same Xbox from XInput to Raw Input changes SDL's GUID.
-        # Keep the user's active profile instead of resurrecting an old one.
-        prefix = ':'.join(key.split(':')[:3])
-        migrated = self.data.setdefault('xbox_rawinput_profiles', [])
-        if family == 'xbox' and key.endswith('7200') and prefix not in migrated:
-            active = self.data['active_profile']
-            previous = [k for k, p in self.data['controller_profiles'].items()
-                        if k.startswith(prefix + ':') and k.endswith('7801') and p == active]
-            if previous:
-                self.data['controller_profiles'][key] = active
-                if self.data.get('preferred_controller') in previous:
-                    self.data['preferred_controller'] = key
-            migrated.append(prefix)
-        saved=self.data['controller_profiles'].get(key)
-        if saved not in self.data['profiles']:
-            if family=='dualsense':saved=self.data.get('legacy_dualsense_profile','主机体验')
+    def _unique_profile_name(self, base):
+        name, number = base, 2
+        while name in self.data['profiles']:
+            name, number = f'{base} {number}', number + 1
+        return name
+
+    def _clone_profile(self, source, scope, family, available=None, state=None):
+        from .kbm_mapper import NIKKI_PROFILE_NAME, NIKKI_LAYOUT_VERSION, infinity_nikki_defaults
+        base = f'{source} · {CATALOG.get(family, CATALOG["generic"])["name"]}'
+        name = self._unique_profile_name(base)
+        mappings = copy.deepcopy(self.data['profiles'][source])
+        if is_nikki_profile(self.data, source):
+            # Re-target untouched hardware-only defaults, preserving every
+            # edited game binding and the template itself.
+            source_marker = self.data.get('nikki_profile_layouts', {}).get(source, {})
+            previous_defaults = infinity_nikki_defaults(
+                'dualsense' if source == NIKKI_PROFILE_NAME else self.data.get('profile_families', {}).get(source, 'dualsense'),
+                touch_inputs=[] if source == NIKKI_PROFILE_NAME else source_marker.get('touch_inputs', []),
+                layout_version=source_marker.get('version', 2))
+            sources = touch_sources(state)
+            hardware_defaults = infinity_nikki_defaults(family, available, touch_inputs=sources)
+            self._preserve_nikki_menu_fallbacks(mappings, previous_defaults, hardware_defaults, sources)
+            for trigger in set(previous_defaults) | set(hardware_defaults):
+                if trigger not in mappings or mappings.get(trigger) == previous_defaults.get(trigger):
+                    if trigger in hardware_defaults:
+                        mappings[trigger] = copy.deepcopy(hardware_defaults[trigger])
+                    else:
+                        mappings.pop(trigger, None)
+            self.data['profile_sources'][name] = NIKKI_PROFILE_NAME
+            self.data.setdefault('nikki_profile_layouts', {})[name] = {
+                'version': NIKKI_LAYOUT_VERSION, 'touch_inputs': list(sources),
+                'touch_defaults': any(trigger.startswith('TP:') and mappings.get(trigger) == entry
+                                      for trigger, entry in hardware_defaults.items())}
+        elif source in self.data.get('profile_sources', {}):
+            self.data['profile_sources'][name] = self.data['profile_sources'][source]
+        self.data['profiles'][name] = mappings
+        self.data['profile_options'][name] = copy.deepcopy(self.data['profile_options'].get(source, {}))
+        self.data.setdefault('profile_modes', {})[name] = profile_mode(self.data, source)
+        self.data['profile_families'][name] = family
+        self.data['profile_devices'][name] = scope
+        return name
+
+    def _own_legacy_profile(self, name, scope, family, legacy_scope=None, available=None, state=None):
+        owner = self.data['profile_devices'].get(name)
+        if owner == scope:
+            return name
+        if owner and owner != legacy_scope:
+            return self._clone_profile(name, scope, family, available, state)
+        # A pre-identity model key can be adopted once. Once ownership has
+        # moved to a physical key, another controller receives its own copy.
+        if owner and legacy_scope and owner == legacy_scope:
+            for profile, existing in list(self.data['profile_devices'].items()):
+                if existing == legacy_scope:
+                    self.data['profile_devices'][profile] = scope
+            old_settings = self.data['device_settings'].get(legacy_scope)
+            if isinstance(old_settings, dict):
+                self.data['device_settings'].setdefault(scope, copy.deepcopy(old_settings))
+        self.data['profile_devices'][name] = scope
+        self.data['profile_families'][name] = family
+        return name
+
+    def _ensure_profile_scope(self, state):
+        from .kbm_mapper import NIKKI_PROFILE_NAME, infinity_nikki_defaults
+        scope = profile_scope(state)
+        family = (state or {}).get('family', 'generic')
+        available = (state or {}).get('available_buttons', list(range(15)) if not state else None)
+        owners = self.data.setdefault('profile_devices', {})
+        initialized = self.data.setdefault('device_profile_initialized', [])
+        if not isinstance(initialized, list):
+            initialized = self.data['device_profile_initialized'] = []
+        first_activation = scope not in initialized
+        if state and first_activation and NIKKI_PROFILE_NAME not in self.data['profiles']:
+            self.data['profiles'][NIKKI_PROFILE_NAME] = infinity_nikki_defaults('xbox', range(15), touch_inputs=[])
+            self.data['profile_options'][NIKKI_PROFILE_NAME] = copy.deepcopy(NIKKI_PROFILE_OPTIONS)
+            self.data.setdefault('profile_modes', {})[NIKKI_PROFILE_NAME] = 'kbm'
+        if NIKKI_PROFILE_NAME in self.data['profiles']:
+            self.data.setdefault('profile_sources', {})[NIKKI_PROFILE_NAME] = NIKKI_PROFILE_NAME
+            owners[NIKKI_PROFILE_NAME] = OFFLINE_PROFILE_SCOPE
+        self.data.setdefault('device_settings', {})
+        remembered = self.data['controller_profiles'].get(scope)
+        legacy_scope = None
+        if state:
+            model = str(state.get('model_key') or state.get('profile_key') or scope)
+            if remembered not in self.data['profiles']:
+                legacy_scope = model if model != scope else None
+                remembered = self.data['controller_profiles'].get(model)
+                if legacy_scope and self.data['profile_devices'].get(remembered) not in (None, legacy_scope):
+                    # This model alias was already claimed by another physical
+                    # controller. It is not a selection for the new device.
+                    remembered = None
+            prefix = ':'.join(model.split(':')[:3])
+            migrated = self.data.setdefault('xbox_rawinput_profiles', [])
+            if family == 'xbox' and model.endswith('7200') and prefix not in migrated:
+                active = self.data['active_profile']
+                previous = [key for key, profile in self.data['controller_profiles'].items()
+                            if key.startswith(prefix + ':') and key.endswith('7801') and profile == active]
+                if previous:
+                    remembered, legacy_scope = active, previous[0]
+                    if self.data.get('preferred_controller') in previous:
+                        self.data['preferred_controller'] = scope
+                migrated.append(prefix)
+        if remembered in self.data['profiles'] and owners.get(remembered) != scope:
+            if remembered == NIKKI_PROFILE_NAME:
+                candidates = [name for name, owner in owners.items() if owner == scope
+                              and is_nikki_profile(self.data, name)]
+                remembered = candidates[0] if candidates else self._clone_profile(
+                    remembered, scope, family, available, state)
             else:
-                base=CATALOG.get(family,CATALOG['generic'])['name']+' · 默认'
-                claimed=[k for k,p in self.data['controller_profiles'].items() if p==base and k!=key]
-                if base in self.data['profiles'] and not claimed:
-                    saved=base
-                elif base not in self.data['profiles']:
-                    saved=base
-                    self.data['profiles'][saved]=controller_defaults(family,state.get('available_buttons'))
+                remembered = self._own_legacy_profile(remembered, scope, family, legacy_scope, available, state)
+        # Unclaimed presets from the old family model belong to the first
+        # matching device; later devices never see or edit those objects.
+        for name in list(self.data['profiles']):
+            profile_family = self.data['profile_families'].get(name)
+            if name not in owners and (profile_family == family or (not state and profile_family == 'generic')):
+                owners[name] = scope
+        if remembered not in self.data['profiles'] and owners.get(self.data['active_profile']) == scope:
+            remembered = self.data['active_profile']
+        if not remembered or remembered not in self.data['profiles']:
+            legacy = self.data.get('legacy_dualsense_profile', '主机体验') if family == 'dualsense' and state else None
+            if legacy in self.data['profiles'] and owners.get(legacy) in (None, scope):
+                remembered = self._own_legacy_profile(legacy, scope, family, available=available, state=state)
+            else:
+                own_native = [name for name in self.data['profiles'] if owners.get(name) == scope
+                              and profile_mode(self.data, name) == 'gamepad']
+                if own_native:
+                    remembered = own_native[0]
                 else:
-                    saved=base;number=2
-                    while saved in self.data['profiles']:saved=f'{base} {number}';number+=1
-                    self.data['profiles'][saved]=controller_defaults(family,state.get('available_buttons'))
-            if saved not in self.data['profiles']:saved=next(iter(self.data['profiles']))
-            self.data['controller_profiles'][key]=saved
-        elif re.fullmatch(r'.+ · 默认 \d+', str(saved)):
-            base = saved.rsplit(' ', 1)[0]
-            claimed = [k for k, p in self.data['controller_profiles'].items() if p == base and k != key]
-            if base in self.data['profiles'] and not claimed:
-                if self.data['profiles'].get(saved) == self.data['profiles'].get(base) or self.data['profiles'].get(saved) == controller_defaults(family, state.get('available_buttons')):
-                    self.data['profiles'].pop(saved, None)
-                    saved = base
-                    self.data['controller_profiles'][key] = saved
-        self.data['profile_families'].setdefault(saved,family)
-        if family=='xbox':
-            # Migrate only untouched auto-generated Xbox presets. Preserve all
-            # user edits, including deliberate View or Guide assignments.
-            legacy=[]
-            for capture in ('4','15'):
-                for act in ('gallery','replay_record'):
-                    legacy.append({capture:{'short':{'action':'capture'},'long':{'action':act}},
-                                   '5':{'short':{'action':'home'},'long':{'action':'none'}}})
-            if re.fullmatch(r'Xbox · 默认(?: \d+)?',saved) and self.data['profiles'][saved] in legacy:
-                self.data['profiles'][saved]=controller_defaults('xbox',state.get('available_buttons'))
-                self.data['profile_families'][saved]='xbox'
-        changed=self.data['active_profile']!=saved
-        self.data['active_profile']=saved
+                    base = 'XInput · 默认' if not state else CATALOG.get(family, CATALOG['generic'])['name'] + ' · 默认'
+                    remembered = self._unique_profile_name(base)
+                    self.data['profiles'][remembered] = controller_defaults('xbox' if not state else family, available)
+                    self.data['profile_options'][remembered] = {}
+                    self.data.setdefault('profile_modes', {})[remembered] = 'gamepad'
+                    self.data['profile_families'][remembered] = family
+                    owners[remembered] = scope
+        if state and first_activation and not any(owner == scope and is_nikki_profile(self.data, name)
+                             for name, owner in owners.items()):
+            self._clone_profile(NIKKI_PROFILE_NAME, scope, family, available, state)
+        if state and family == 'xbox':
+            old_defaults = [{capture: {'short': {'action': 'capture'}, 'long': {'action': action}},
+                             '5': {'short': {'action': 'home'}, 'long': {'action': 'none'}}}
+                            for capture in ('4', '15') for action in ('gallery', 'replay_record')]
+            if re.fullmatch(r'Xbox · 默认(?: \d+)?', remembered) and self.data['profiles'][remembered] in old_defaults:
+                self.data['profiles'][remembered] = controller_defaults('xbox', available)
+        self.data['controller_profiles'][scope] = remembered
+        legacy_settings = self.data.get('legacy_device_settings', {})
+        if scope in self.data['device_settings'] and owners.get(legacy_settings.get('profile')) == scope:
+            # The original active controller has consumed its one-time values,
+            # including when a model identity was upgraded to a physical key.
+            self.data.pop('legacy_device_settings', None)
+        if scope not in self.data['device_settings']:
+            legacy = self.data.get('legacy_device_settings', {})
+            if state and (legacy.get('profile') == remembered or
+                          (legacy.get('profile') == NIKKI_PROFILE_NAME and is_nikki_profile(self.data, remembered)) or
+                          (legacy.get('profile') == self.data.get('legacy_dualsense_profile')
+                           and legacy.get('family') == family)):
+                self.data['device_settings'][scope] = copy.deepcopy(legacy.get('values', DEVICE_SETTING_DEFAULTS))
+                self.data.pop('legacy_device_settings', None)
+            else:
+                self.data['device_settings'][scope] = copy.deepcopy(DEVICE_SETTING_DEFAULTS)
+        if state:
+            for name, owner in list(owners.items()):
+                if owner == scope and is_nikki_profile(self.data, name):
+                    self._upgrade_nikki_profile(name, state)
+            if any(owner == scope and self.data.get('nikki_profile_layouts', {}).get(name, {}).get('touch_defaults')
+                   for name, owner in owners.items()):
+                self._initialize_nikki_touch_settings(state)
+        if first_activation:
+            initialized.append(scope)
+        return remembered
+
+    def activate_controller(self, state):
+        saved = self._ensure_profile_scope(state)
+        changed = self.data['active_profile'] != saved
+        self.data['active_profile'] = saved
         return changed
 
-    def remember_profile(self,state,name):
-        self.data['active_profile']=name
-        if state:self.data['controller_profiles'][state.get('profile_key',state.get('family','dualsense'))]=name
+    def remember_profile(self, state, name):
+        if name not in self.data['profiles']:
+            raise ValueError('预设已删除，请重新选择')
+        scope = profile_scope(state)
+        owner = self.data['profile_devices'].get(name)
+        if owner is None:
+            family = (state or {}).get('family', 'generic')
+            if self.data['profile_families'].get(name, family) not in (family, 'all'):
+                raise ValueError('该预设不属于当前输入设备')
+            self.data['profile_devices'][name] = scope
+            self.data['profile_families'][name] = family
+        elif owner != scope:
+            raise ValueError('该预设不属于当前输入设备')
+        self.data['active_profile'] = name
+        self.data['controller_profiles'][scope] = name
 
     def profiles_for(self, state, mode=None):
-        if not state:
-            profiles = list(self.data['profiles'])
-        else:
-            family = state.get('family', 'generic')
-            profiles = [name for name in self.data['profiles'] if self.data['profile_families'].get(name, family) in (family, 'all') or name == self.data['active_profile']]
+        self._ensure_profile_scope(state)
+        scope = profile_scope(state)
+        profiles = [name for name in self.data['profiles'] if self.data['profile_devices'].get(name) == scope]
         if mode:
             profiles = [name for name in profiles if profile_mode(self.data, name) == mode]
         return profiles
+
+    def settings_for(self, state):
+        resolved = device_config(self.data, state)
+        return {key: copy.deepcopy(resolved[key]) for key in DEVICE_SETTING_KEYS}
+
+    def set_setting(self, key, value, state=None):
+        if key in CURVE_CHANNELS:
+            value = normalize_curve_channels(key, {key: value})
+        elif key in ('trigger_rumble_enabled', 'touch_gestures_enabled', 'touch_scroll'):
+            value = value is True
+        elif key == 'touch_gesture_sensitivity':
+            value = normalize_touch_sensitivity(value)
+        if key in DEVICE_SETTING_KEYS:
+            scope = profile_scope(state)
+            self.data.setdefault('device_settings', {}).setdefault(scope, {}).update({key: copy.deepcopy(value)})
+        else:
+            self.data[key] = copy.deepcopy(value)
 
     def delete_profile(self, name, state=None):
         if name not in self.data['profiles']:
             return None
         family_profiles = self.profiles_for(state)
+        if name not in family_profiles:
+            raise ValueError('该预设不属于当前输入设备')
         if len(family_profiles) <= 1 and name in family_profiles:
             return None
         self.data['profiles'].pop(name, None)
         self.data['profile_families'].pop(name, None)
         self.data.get('profile_modes', {}).pop(name, None)
         self.data.get('profile_options', {}).pop(name, None)
+        self.data.get('profile_devices', {}).pop(name, None)
+        self.data.get('profile_sources', {}).pop(name, None)
         remaining = self.profiles_for(state)
         fallback = remaining[0] if remaining else (next(iter(self.data['profiles'])) if self.data['profiles'] else '主机体验')
         for k, p in list(self.data['controller_profiles'].items()):
             if p == name:
-                self.data['controller_profiles'][k] = fallback
+                if k == profile_scope(state):
+                    self.data['controller_profiles'][k] = fallback
+                else:
+                    # Another pre-migration reference receives its own default
+                    # on activation; it must not inherit this device's fallback.
+                    self.data['controller_profiles'].pop(k, None)
         if self.data['active_profile'] == name:
             self.data['active_profile'] = fallback
         self.save()
@@ -329,6 +715,22 @@ class ConfigStore:
         if merge and self.path.exists() and hasattr(self, '_baseline'):
             try:
                 latest = json.loads(self.path.read_text(encoding='utf-8'))
+                if latest.get('device_profile_version', 0) > self._baseline.get('device_profile_version', 0):
+                    # An old panel cannot overwrite an ambiguously shared
+                    # preset after it has acquired a physical owner.
+                    for name, owner in latest.get('profile_devices', {}).items():
+                        if owner != OFFLINE_PROFILE_SCOPE:
+                            for field in ('profiles', 'profile_options', 'profile_modes', 'profile_families'):
+                                if name in latest.get(field, {}):
+                                    value = latest[field][name]
+                                    self.data.setdefault(field, {})[name] = copy.deepcopy(value)
+                                    self._baseline.setdefault(field, {})[name] = copy.deepcopy(value)
+                    for field in ('profile_devices', 'profile_sources', 'device_settings',
+                                  'device_profile_initialized', 'device_profile_version'):
+                        if field in latest:
+                            self.data[field] = copy.deepcopy(latest[field])
+                            self._baseline[field] = copy.deepcopy(latest[field])
+                self._preserve_newer_nikki_layouts(latest)
                 if latest.get('keyboard_profile_cleanup_version', 0) > self._baseline.get('keyboard_profile_cleanup_version', 0):
                     # A settings window opened before cleanup may still have
                     # edited a removed preset. Do not resurrect it on save.
@@ -359,19 +761,62 @@ class ConfigStore:
         os.replace(temp, self.path)
         self._baseline = copy.deepcopy(self.data)
 
+    def _preserve_newer_nikki_layouts(self, latest):
+        """A stale panel cannot undo a template or device capability upgrade."""
+        from .kbm_mapper import NIKKI_TOUCH_SETTINGS
+        global_upgrade = latest.get('nikki_layout_version', 0) > self._baseline.get('nikki_layout_version', 0)
+        protected = set()
+        for name in latest.get('profiles', {}):
+            if not is_nikki_profile(latest, name):
+                continue
+            current = latest.get('nikki_profile_layouts', {}).get(name, {})
+            previous = self._baseline.get('nikki_profile_layouts', {}).get(name, {})
+            if (global_upgrade or current.get('version', 0) > previous.get('version', 0)
+                    or set(current.get('touch_inputs', [])) - set(previous.get('touch_inputs', []))):
+                protected.add(name)
+        for name in protected:
+            for field in ('profiles', 'profile_options', 'profile_modes', 'profile_families',
+                          'profile_sources', 'profile_devices', 'nikki_profile_layouts'):
+                if name in latest.get(field, {}):
+                    value = latest[field][name]
+                    self.data.setdefault(field, {})[name] = copy.deepcopy(value)
+                    self._baseline.setdefault(field, {})[name] = copy.deepcopy(value)
+            scope = latest.get('profile_devices', {}).get(name)
+            if scope in latest.get('device_settings', {}):
+                for key in NIKKI_TOUCH_SETTINGS:
+                    if key in latest['device_settings'][scope]:
+                        value = latest['device_settings'][scope][key]
+                        self.data.setdefault('device_settings', {}).setdefault(scope, {})[key] = copy.deepcopy(value)
+                        self._baseline.setdefault('device_settings', {}).setdefault(scope, {})[key] = copy.deepcopy(value)
+        if protected:
+            initialized = latest.get('nikki_touch_settings_initialized', [])
+            self.data['nikki_touch_settings_initialized'] = sorted(set(
+                self.data.get('nikki_touch_settings_initialized', [])) | set(initialized))
+            self._baseline['nikki_touch_settings_initialized'] = copy.deepcopy(initialized)
+        if global_upgrade:
+            self.data['nikki_layout_version'] = latest['nikki_layout_version']
+            self._baseline['nikki_layout_version'] = latest['nikki_layout_version']
+
     def apply_mapping_change(self, change, state=None):
-        from .mapping_engine import canonical_trigger, validate_mappings
+        from .mapping_engine import canonical_trigger, input_sources, validate_mappings
         op = change['op']
         name = change.get('profile', self.data['active_profile'])
         if op != 'create' and name not in self.data['profiles']:
             raise ValueError('预设已删除，请重新选择')
+        scope = profile_scope(state)
+        if op != 'create' and self.data.get('profile_devices', {}).get(name) != scope:
+            raise ValueError('该预设不属于当前输入设备')
         if op == 'binding':
             key = canonical_trigger(change['trigger'])
+            if not set(key.split('+')) <= set(input_sources(state)):
+                raise ValueError('请选择当前手柄支持的输入按键')
             mapping = validate_mappings({key: change['mapping']})[key]
             previous = change.get('previous_trigger')
             if previous and canonical_trigger(previous) != key:
                 self.data['profiles'][name][canonical_trigger(previous)] = {g: {'action': 'none'} for g in ('short','long')}
             self.data['profiles'][name][key] = mapping
+            if key.startswith('TP:') and mapping['short'].get('action', 'none') != 'none':
+                self.set_setting('touch_gestures_enabled', True, state)
         elif op == 'unbind':
             self.data['profiles'][name][canonical_trigger(change['trigger'])] = {g: {'action': 'none'} for g in ('short', 'long')}
         elif op == 'select':
@@ -382,6 +827,8 @@ class ConfigStore:
             source = change.get('source') or self.data['active_profile']
             mode = change.get('mode') or profile_mode(self.data, source)
             family = (state or {}).get('family', 'generic')
+            if source not in self.data['profiles'] or self.data.get('profile_devices', {}).get(source) != scope:
+                raise ValueError('该预设不属于当前输入设备')
             source_mode = profile_mode(self.data, source)
             if mode == source_mode and source in self.data['profiles']:
                 self.data['profiles'][name] = copy.deepcopy(self.data['profiles'][source])
@@ -392,13 +839,22 @@ class ConfigStore:
             else:
                 self.data['profiles'][name] = desktop_defaults(family, (state or {}).get('available_buttons'))
                 self.data['profile_options'][name] = {'right_stick_mouse': True}
-            self.data['profile_families'][name] = self.data['profile_families'].get(source, family)
+            self.data['profile_families'][name] = family
+            self.data['profile_devices'][name] = scope
+            if mode == source_mode and is_nikki_profile(self.data, source):
+                from .kbm_mapper import NIKKI_PROFILE_NAME
+                self.data['profile_sources'][name] = NIKKI_PROFILE_NAME
+                self.data.setdefault('nikki_profile_layouts', {})[name] = copy.deepcopy(
+                    self.data.get('nikki_profile_layouts', {}).get(source, {'version': 2, 'touch_inputs': []}))
+                self._upgrade_nikki_profile(name, state)
             self.data.setdefault('profile_modes', {})[name] = mode
             self.remember_profile(state, name)
         elif op == 'options':
-            allowed = {'right_stick_mouse', 'mouse'}
+            allowed = {'right_stick_mouse', 'mouse', 'input'}
             if set(change['options']) - allowed:
                 raise ValueError('未知预设选项')
+            if 'input' in change['options'] and not isinstance(change['options']['input'], dict):
+                raise ValueError('输入手感设置格式错误')
             self.data['profile_options'].setdefault(name, {}).update(copy.deepcopy(change['options']))
         elif op == 'delete':
             if self.delete_profile(name, state) is None:
@@ -406,20 +862,24 @@ class ConfigStore:
             self.data['profile_options'].pop(name, None)
             self.data.get('profile_modes', {}).pop(name, None)
         elif op == 'reset':
-            from .kbm_mapper import NIKKI_PROFILE_NAME, infinity_nikki_defaults
+            from .kbm_mapper import NIKKI_LAYOUT_VERSION, infinity_nikki_defaults
             if profile_mode(self.data, name) == 'kbm':
-                family = (state or {}).get('family', 'dualsense')
-                available = (state or {}).get('available_buttons')
-                if name == NIKKI_PROFILE_NAME:
-                    self.data['profiles'][name] = infinity_nikki_defaults(family, available)
+                family = (state or {}).get('family', 'xbox')
+                available = (state or {}).get('available_buttons', list(range(15)) if not state else None)
+                if is_nikki_profile(self.data, name):
+                    sources = touch_sources(state)
+                    self.data['profiles'][name] = infinity_nikki_defaults(family, available, touch_inputs=sources)
                     self.data['profile_options'][name] = copy.deepcopy(NIKKI_PROFILE_OPTIONS)
+                    self.data.setdefault('nikki_profile_layouts', {})[name] = {
+                        'version': NIKKI_LAYOUT_VERSION, 'touch_inputs': list(sources),
+                        'touch_defaults': bool(sources)}
+                    self._initialize_nikki_touch_settings(state, force=True)
                 else:
                     self.data['profiles'][name] = desktop_defaults(family, available)
                     self.data['profile_options'][name] = {'right_stick_mouse': True}
             else:
-                if not state:
-                    raise ValueError('请先连接手柄')
-                self.data['profiles'][name] = controller_defaults(state['family'], state.get('available_buttons'))
+                self.data['profiles'][name] = controller_defaults((state or {}).get('family', 'xbox'),
+                                                                 (state or {}).get('available_buttons', list(range(15))))
                 self.data['profile_options'][name] = {}
         else:
             raise ValueError('未知映射修改')
@@ -434,7 +894,7 @@ def remove_profiles(config, removed):
     profiles = config['profiles']
     for name in removed:
         profiles.pop(name, None)
-    for field in ('profile_modes', 'profile_families', 'profile_options'):
+    for field in ('profile_modes', 'profile_families', 'profile_options', 'profile_devices', 'profile_sources', 'nikki_profile_layouts'):
         metadata = config.get(field)
         if isinstance(metadata, dict):
             config[field] = {name: value for name, value in metadata.items() if name in profiles}

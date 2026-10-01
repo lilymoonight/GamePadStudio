@@ -7,9 +7,13 @@ The clock is injectable so arbitration and releases can be tested without I/O.
 from __future__ import annotations
 
 import copy
+import math
 import time
 from collections import Counter
 from .actions import parse_keys
+from .response_curves import curve_capabilities, evaluate_curve, normalize_curve_channels
+from .touch_gestures import (TOUCH_INPUTS, TouchGestureRecognizer, normalize_touch_settings,
+                             touch_sources)
 
 ALIASES = {'A': '0', 'B': '1', 'X': '2', 'Y': '3', 'BACK': '4',
            'VIEW': '4', 'CREATE': '4', 'GUIDE': '5', 'HOME': '5', 'PS': '5', 'XBOX': '5',
@@ -17,7 +21,7 @@ ALIASES = {'A': '0', 'B': '1', 'X': '2', 'Y': '3', 'BACK': '4',
            'RB': '10', 'R1': '10', 'UP': '11', 'DOWN': '12', 'LEFT': '13', 'RIGHT': '14',
            'SHARE': '15', 'CAPTURE': '15', 'L2': 'LT', 'R2': 'RT',
            'LS_UP': 'LS:up', 'LS_DOWN': 'LS:down', 'LS_LEFT': 'LS:left', 'LS_RIGHT': 'LS:right'}
-INPUTS = [str(i) for i in range(21)] + ['LT', 'RT'] + [f'{s}:{d}' for s in ('LS', 'RS') for d in ('up', 'down', 'left', 'right')] + ['LS:outer']
+INPUTS = [str(i) for i in range(64)] + ['LT', 'RT'] + [f'{s}:{d}' for s in ('LS', 'RS') for d in ('up', 'down', 'left', 'right')] + ['LS:outer', 'LS:inner'] + list(TOUCH_INPUTS)
 GESTURES = ('short', 'long')
 GAMEPAD_TARGETS = ['0', '1', '2', '3', '9', '10', 'LT', 'RT', '11', '12', '13', '14', '7', '8', '4', '6', '5', '15']
 GAMEPAD_ACTIONS = {'gamepad_button', 'gamepad_chord', 'gamepad_turbo', 'gamepad_macro'}
@@ -36,6 +40,8 @@ def canonical_trigger(value):
         raise ValueError(f'未知手柄输入：{value}')
     if len(set(parts)) != len(parts) or len(parts) > 4:
         raise ValueError('组合键需要 1 至 4 个不同按键')
+    if any(p.startswith('TP:') for p in parts) and len(parts) != 1:
+        raise ValueError('触摸板手势作为独立动作使用，不能与按键组成组合键')
     return '+'.join(sorted(parts, key=INPUTS.index))
 
 
@@ -69,6 +75,8 @@ def validate_mappings(mappings):
         if key in result:
             raise ValueError(f'重复的组合键：{trigger}')
         result[key] = {g: validate_binding(entry.get(g, {'action': 'none'})) for g in GESTURES}
+        if key.startswith('TP:') and result[key]['long'].get('action') not in ('none', 'suppress'):
+            raise ValueError('触摸板手势只设置一次触发动作')
         if 'long_press' in entry:
             threshold = float(entry['long_press'])
             if not .15 <= threshold <= 3:
@@ -120,14 +128,50 @@ def convert_scheme(scheme):
     return mappings
 
 
+def input_sources(state=None):
+    """Expose reported hardware inputs, or standard XInput when disconnected."""
+    if state is None:
+        buttons, axes = set(range(15)), set(range(6))
+    else:
+        buttons = {int(value) for value in state.get('available_buttons', range(15))
+                   if isinstance(value, (int, str)) and str(value).isdigit() and 0 <= int(value) < 64}
+        if state.get('is_gamecontroller') is False and state.get('num_hats', 0):
+            buttons.update(range(11, 15))
+        if 'available_axes' in state:
+            axes = set(state['available_axes'])
+        elif state.get('is_gamecontroller') is False:
+            axes = set(range(min(6, state.get('num_axes', len(state.get('axes', []))))))
+        else:
+            axes = set(range(min(6, len(state['axes'])))) if 'axes' in state else set(range(6))
+    result = {str(key) for key in buttons}
+    for axis, names in {0: ('LS:left', 'LS:right'), 1: ('LS:up', 'LS:down'),
+                        2: ('RS:left', 'RS:right'), 3: ('RS:up', 'RS:down'),
+                        4: ('LT',), 5: ('RT',)}.items():
+        if axis in axes:
+            result.update(names)
+    if {0, 1} <= axes:
+        result.update(('LS:inner', 'LS:outer'))
+    result.update(touch_sources(state))
+    return [key for key in INPUTS if key in result]
+
+
 def effective_mappings(config, state=None, profile_name=None):
     target = profile_name or config.get('active_profile')
     if target not in config.get('profiles', {}):
         target = config.get('active_profile')
-    mappings = copy.deepcopy(config['profiles'][target])
-    family = (state or {}).get('family', config.get('profile_families', {}).get(target, 'generic'))
+    if target not in config.get('profiles', {}):
+        return {}
+    from .studio_core import profile_scope
+    owners = config.get('profile_devices', {})
+    owners = owners if isinstance(owners, dict) else {}
+    if target in owners and owners[target] != profile_scope(state):
+        return {}
+    available_inputs = set(input_sources(state))
+    mappings = {trigger: copy.deepcopy(entry) for trigger, entry in config['profiles'][target].items()
+                if set(trigger.split('+')) <= available_inputs}
+    family = profile_family(config, state, target)
     if family == 'xbox' and config.get('gamebar_shield_enabled'):
-        available = (state or {}).get('available_buttons', [5, 15])
+        available = (state or {}).get('available_buttons', list(range(15)))
         if 5 in available:
             mappings.setdefault('5', {'short': {'action': 'home'}, 'long': {'action': 'none'}})
         if 15 in available:
@@ -137,22 +181,29 @@ def effective_mappings(config, state=None, profile_name=None):
 
 def profile_family(config, state=None, profile_name=None):
     from .controller_catalog import CATALOG
-    target = profile_name or config.get('active_profile')
-    family = (state or {}).get('family', config.get('profile_families', {}).get(target, 'dualsense'))
-    return family if family in CATALOG else 'dualsense'
+    family = (state or {}).get('family', 'generic')
+    return family if family in CATALOG else 'generic'
 
 
-def trigger_label(trigger, family='dualsense'):
+def trigger_label(trigger, family='generic'):
     from .controller_catalog import button_labels
     names = button_labels(family)
-    extra = {'LT': 'L2' if family in ('dualsense', 'dualshock') else 'LT',
-             'RT': 'R2' if family in ('dualsense', 'dualshock') else 'RT', 'LS:outer': '左摇杆推满'}
+    extra = {'LT': 'L2' if family in ('dualsense', 'dualshock4') else 'ZL' if family == 'switch' else 'LT',
+             'RT': 'R2' if family in ('dualsense', 'dualshock4') else 'ZR' if family == 'switch' else 'RT',
+             'LS:outer': '左摇杆推满', 'LS:inner': '左摇杆轻推'}
+    from .i18n import tr
+    extra.update({key: tr(title) for key, title in {
+                  'TP:tap': '触摸轻点', 'TP:double_tap': '触摸双击', 'TP:hold': '触摸长按',
+                  'TP:swipe_up': '触摸上滑', 'TP:swipe_down': '触摸下滑',
+                  'TP:swipe_left': '触摸左滑', 'TP:swipe_right': '触摸右滑',
+                  'TP:two_tap': '双指轻点', 'TP:scroll_up': '双指向上滚动',
+                  'TP:scroll_down': '双指向下滚动'}.items()})
     for s, title in [('LS', '左摇杆'), ('RS', '右摇杆')]:
         extra.update({f'{s}:{d}': title + a for d, a in [('up', '↑'), ('down', '↓'), ('left', '←'), ('right', '→')]})
     return ' + '.join(names.get(int(p), p) if p.isdigit() else extra.get(p, p) for p in canonical_trigger(trigger).split('+'))
 
 
-def binding_label(binding, family='dualsense'):
+def binding_label(binding, family='generic'):
     from .studio_core import ACTION_NAMES
     action = binding.get('action', 'none')
     value = binding.get('value', '')
@@ -191,24 +242,86 @@ def output_tokens(binding):
     return [] if action in ('none', 'suppress') else ['action:' + action]
 
 
+INPUT_THRESHOLD_DEFAULTS = {'trigger_press': .55, 'trigger_release': .35,
+                            'stick_press': .50, 'stick_release': .35,
+                            'outer_press': .85, 'outer_release': .75, 'chord_window': .08}
+
+
+def input_thresholds(settings=None):
+    """Invalid pairs fall back together; neutral input must always release."""
+    settings = settings if isinstance(settings, dict) else {}
+    result = dict(INPUT_THRESHOLD_DEFAULTS)
+    for group in ('trigger', 'stick', 'outer'):
+        press_key, release_key = group + '_press', group + '_release'
+        try:
+            raw_press = settings.get(press_key, result[press_key])
+            raw_release = settings.get(release_key, result[release_key])
+            if isinstance(raw_press, bool) or isinstance(raw_release, bool):
+                continue
+            press, release = float(raw_press), float(raw_release)
+            if math.isfinite(press) and math.isfinite(release) and 0 < release < press <= 1:
+                result.update({press_key: press, release_key: release})
+        except (TypeError, ValueError, OverflowError):
+            pass
+    # Walking is opt-in and uses reversed hysteresis: enter at a light push,
+    # remain active through the transition band, leave at a stronger push.
+    if 'walk_press' in settings and 'walk_release' in settings:
+        try:
+            raw_press, raw_release = settings['walk_press'], settings['walk_release']
+            if not isinstance(raw_press, bool) and not isinstance(raw_release, bool):
+                press, release = float(raw_press), float(raw_release)
+                if math.isfinite(press) and math.isfinite(release) and 0 < press < release <= 1:
+                    result.update({'walk_press': press, 'walk_release': release})
+        except (TypeError, ValueError, OverflowError):
+            pass
+    window = settings.get('chord_window', result['chord_window'])
+    if isinstance(window, (int, float)) and not isinstance(window, bool):
+        try:
+            window = float(window)
+            if math.isfinite(window) and .02 <= window <= .20:
+                result['chord_window'] = window
+        except (ValueError, OverflowError):
+            pass
+    return result
+
+
 class InputNormalizer:
     """One hysteresis rule for execution, capture and input feedback."""
     def __init__(self):
         self.active = set()
+        self.thresholds = input_thresholds()
+        self.trigger_curves = normalize_curve_channels('trigger_curves')
 
-    def update(self, state):
+    def update(self, state, settings=None):
+        thresholds = input_thresholds(settings)
+        self.thresholds = thresholds
+        self.trigger_curves = normalize_curve_channels('trigger_curves', settings)
+        supported_axes = curve_capabilities(state)['trigger_axes']
+        for axis, channel in ((4, 'left'), (5, 'right')):
+            if axis not in supported_axes:
+                self.trigger_curves[channel] = normalize_curve_channels('trigger_curves')[channel]
         current = {str(b) for b in (state or {}).get('buttons', [])}
         axes = (state or {}).get('axes', [0.] * 6)
         axes = list(axes) + [0.] * (6 - len(axes))
-        values = {'LT': axes[4], 'RT': axes[5], 'LS:up': -axes[1], 'LS:down': axes[1],
+        values = {'LT': evaluate_curve(axes[4], self.trigger_curves['left']),
+                  'RT': evaluate_curve(axes[5], self.trigger_curves['right']),
+                  'LS:up': -axes[1], 'LS:down': axes[1],
                   'LS:left': -axes[0], 'LS:right': axes[0], 'RS:up': -axes[3],
                   'RS:down': axes[3], 'RS:left': -axes[2], 'RS:right': axes[2]}
         for key, value in values.items():
-            threshold = (.35 if key in self.active else .5) if ':' in key else (.35 if key in self.active else .55)
+            group = 'stick' if ':' in key else 'trigger'
+            threshold = thresholds[group + ('_release' if key in self.active else '_press')]
             if value >= threshold:
                 current.add(key)
-        if (axes[0] ** 2 + axes[1] ** 2) ** .5 >= (.75 if 'LS:outer' in self.active else .85):
+        outer_threshold = thresholds['outer_release' if 'LS:outer' in self.active else 'outer_press']
+        left_magnitude = math.hypot(axes[0], axes[1])
+        if left_magnitude >= outer_threshold:
             current.add('LS:outer')
+        if 'walk_press' in thresholds and current.intersection({'LS:up', 'LS:down', 'LS:left', 'LS:right'}):
+            walk_threshold = thresholds['walk_release' if 'LS:inner' in self.active else 'walk_press']
+            if left_magnitude <= walk_threshold:
+                current.add('LS:inner')
+        current.intersection_update(input_sources(state))
         self.active = current
         return set(current)
 
@@ -247,6 +360,14 @@ class GestureEngine:
                 # A quick tap still needs a nonzero key-down interval for games (65ms ensures crossing 30/60Hz frame boundaries).
                 self.pending_releases.append((now + .065, key, 'short', action))
 
+    def pulse(self, trigger, binding, now, gesture='short'):
+        """Dispatch a completed gesture once, with a bounded key/button pulse."""
+        if binding.get('action', 'none') in ('none', 'suppress'):
+            return
+        self._emit(trigger, gesture, binding, True)
+        if binding.get('action') in HOLD_ACTIONS:
+            self.pending_releases.append((now + .065, trigger, gesture, binding))
+
     def update(self, buttons, mappings, now=None):
         now = time.monotonic() if now is None else now
         current = {str(b) for b in buttons}
@@ -283,7 +404,11 @@ class GestureEngine:
         for key, state in list(self.pressed.items()):
             if key not in chosen:
                 parts = set(key.split('+'))
-                cancel = bool(parts & occupied) or bool(parts & locked_buttons)  # upgraded to a chord or locked
+                # Losing a member normally completes a chord. Its surviving
+                # modifier stays locked, but must not swallow an undecided tap.
+                # Only a still-held trigger upgraded/occupied by another wins
+                # without emitting its short gesture.
+                cancel = parts <= current and (bool(parts & occupied) or bool(parts & locked_buttons))
                 self._finish(key, state, now, cancel)
                 if len(parts) > 1 or cancel:
                     self.consumed.update(parts & current)
@@ -350,8 +475,11 @@ class MappingRuntime:
         self.now = 0.
         self.inputs = set()
         self.last_touch = None
+        self.touch_recognizer = TouchGestureRecognizer()
+        self.touch_activity = {'contacts': 0, 'mode': 'idle'}
         self.preview = False
         self.blocked = set()
+        self.curve_blocked = set()
         self.mouse_thread = None
         self.config_signature = None
         if start_mouse:
@@ -373,6 +501,8 @@ class MappingRuntime:
             pass
         elif binding['action'] == 'hold':
             self.actions.hold(binding['value'], down)
+        elif binding['action'] in GAMEPAD_ACTIONS:
+            self.dispatch(binding, down)
         else:
             token = tokens[0]
             if (down and self.output_counts[token] == 0) or (not down and self.output_counts[token] == 1):
@@ -407,23 +537,55 @@ class MappingRuntime:
             self.events = self.events[-8:]
 
     def update(self, state, config, enabled=True, now=None, preview=False):
+        from .studio_core import device_config, profile_scope, profile_mode
+        config = device_config(config, state)
         self.now = time.monotonic() if now is None else now
         previous_inputs = set(self.inputs)
         if self.preview != preview:
             self.reset(blocked=previous_inputs)
             self.preview = preview
-        self.inputs = self.normalizer.update(state)
+        profile_options = config.get('profile_options')
+        profile_options = profile_options if isinstance(profile_options, dict) else {}
+        owners = config.get('profile_devices', {})
+        owners = owners if isinstance(owners, dict) else {}
+        owns_profile = owners.get(config['active_profile'], profile_scope(state)) == profile_scope(state)
+        options = profile_options.get(config['active_profile']) if owns_profile else {}
+        options = options if isinstance(options, dict) else {}
+        input_settings = options.get('input')
+        input_settings = copy.deepcopy(input_settings) if isinstance(input_settings, dict) else {}
+        supported_axes = curve_capabilities(state)['trigger_axes']
+        input_settings['trigger_curves'] = {
+            channel: config.get('trigger_curves', {}).get(channel)
+            for axis, channel in ((4, 'left'), (5, 'right')) if axis in supported_axes}
+        previous_thresholds = self.normalizer.thresholds
+        previous_curves = self.normalizer.trigger_curves
+        self.inputs = self.normalizer.update(state, input_settings)
+        raw_axes = list((state or {}).get('axes', [])) + [0.] * 6
+        raw_triggers = {name for axis, name in ((4, 'LT'), (5, 'RT'))
+                        if isinstance(raw_axes[axis], (int, float)) and raw_axes[axis] > .02}
+        self.curve_blocked.intersection_update(raw_triggers)
         self.blocked.intersection_update(self.inputs)
-        options = config.get('profile_options', {}).get(config['active_profile'], {})
         mappings = effective_mappings(config, state)
-        signature = (config['active_profile'], repr(mappings), repr(options), config.get('long_press', .65), config.get('touch_mouse', False))
+        signature = (profile_scope(state), (state or {}).get('instance_id'), config['active_profile'], repr(mappings), repr(options),
+                     repr(self.normalizer.trigger_curves), config.get('long_press', .65),
+                     config.get('touch_mouse', False), config.get('touch_gestures_enabled', False),
+                     config.get('touch_scroll', False), repr(normalize_touch_settings(config)))
         if signature != self.config_signature:
             if self.config_signature is not None:
-                self.reset(blocked=previous_inputs)
+                # Lowering an input threshold must not turn existing deflection
+                # into a new press. A binding-only edit still permits a genuinely
+                # new button pressed this frame, while releasing older holds.
+                blocked = previous_inputs | self.inputs if previous_thresholds != self.normalizer.thresholds else previous_inputs
+                if previous_curves != self.normalizer.trigger_curves:
+                    self.curve_blocked.update(raw_triggers)
+                    blocked.update(self.inputs)
+                self.reset(blocked=blocked)
             self.config_signature = signature
+            self.touch_recognizer.reset(block_until_release=True)
             if self.mouse_thread:
                 self.mouse_thread.configure(options.get('mouse', {}))
         self.engine.threshold = config.get('long_press', .65)
+        self.engine.chord_window = self.normalizer.thresholds['chord_window']
         if not enabled or not state:
             self.reset()
             return
@@ -431,16 +593,39 @@ class MappingRuntime:
             if self.now >= when:
                 self._hold(binding, False)
                 self.pulses.remove((when, binding))
-        self.engine.update(self.inputs - self.blocked, mappings, self.now)
-        touch = state.get('touch')
-        if config.get('touch_mouse') and touch and self.last_touch:
-            dx, dy = (touch[0] - self.last_touch[0]) * 1600, (touch[1] - self.last_touch[1]) * 900
-            if abs(dx) < 250 and abs(dy) < 250:
+        regular_mappings = {key: entry for key, entry in mappings.items() if not key.startswith('TP:')}
+        self.engine.update(self.inputs - self.blocked - self.curve_blocked, regular_mappings, self.now)
+        touch = self.touch_recognizer.update(state, self.now, config)
+        self.touch_activity = {'contacts': touch['contacts'], 'mode': touch['mode']}
+        if config.get('touch_gestures_enabled'):
+            for event in touch['events']:
+                if event in touch_sources(state):
+                    self.inputs.add(event)
+                    self.engine.pulse(event, mappings.get(event, {}).get('short', {}), self.now)
+        if touch['scroll_steps']:
+            steps = touch['scroll_steps']
+            event = 'TP:scroll_up' if steps > 0 else 'TP:scroll_down'
+            binding = mappings.get(event, {}).get('short', {})
+            custom = (config.get('touch_gestures_enabled')
+                      and binding.get('action', 'none') != 'none')
+            if not custom:
+                binding = ({'action': 'wheel', 'value': 'up' if steps > 0 else 'down'}
+                           if config.get('touch_scroll') else None)
+            if binding is not None and event in touch_sources(state):
+                self.inputs.add(event)
+                for _ in range(abs(steps)):
+                    self.engine.pulse(event, binding, self.now, gesture='scroll')
+        if config.get('touch_mouse') and not self.preview:
+            dx, dy = touch['pointer_delta']
+            dx, dy = dx * 1600, dy * 900
+            if (dx or dy) and abs(dx) < 250 and abs(dy) < 250:
                 self.actions.move_mouse(dx, dy)
-        self.last_touch = touch
+        self.last_touch = state.get('touch')
         if self.mouse_thread:
-            axes = state.get('axes', [0.] * 6)
-            move = options.get('right_stick_mouse', True) and not self.blocked.intersection({'RS:up', 'RS:down', 'RS:left', 'RS:right'})
+            axes = list(state.get('axes', [])) + [0.] * 6
+            move = (owns_profile and options.get('right_stick_mouse', profile_mode(config, config['active_profile']) == 'kbm')
+                    and {'RS:left', 'RS:up'} <= set(input_sources(state))
+                    and not self.blocked.intersection({'RS:up', 'RS:down', 'RS:left', 'RS:right'}))
             desktop = options.get('mouse', {}).get('mode', 'game') == 'desktop' or (hasattr(self.actions, 'is_nikki_game_focused') and not self.actions.is_nikki_game_focused())
             self.mouse_thread.update_stick(axes[2] if move else 0., axes[3] if move else 0., is_desktop=desktop)
             self.mouse_thread.set_click_lock(any(n for k, n in self.output_counts.items() if k.startswith('mouse:')))
@@ -449,7 +634,7 @@ class MappingRuntime:
         return {'preview': self.preview, 'inputs': sorted(self.inputs), 'active': list(self.engine.pressed),
                 'outputs': sorted(k for k, n in self.output_counts.items() if n),
                 'recent_outputs': sorted(k for k, until in self.recent.items() if until > self.now),
-                'events': list(self.events), 'sequence': self.seq}
+                'events': list(self.events), 'sequence': self.seq, 'touch': dict(self.touch_activity)}
 
     def reset(self, blocked=None):
         # Stop continuous motion even if a following key-up is rejected.
@@ -462,6 +647,8 @@ class MappingRuntime:
         self.output_counts.clear()
         self.recent.clear()
         self.last_touch = None
+        self.touch_recognizer.reset(block_until_release=True)
+        self.touch_activity = {'contacts': 0, 'mode': 'idle'}
         self.blocked.update(self.inputs if blocked is None else blocked)
         if self.mouse_thread:
             self.mouse_thread.update_stick(0., 0.)
