@@ -1,4 +1,4 @@
-# -*- mode: python ; coding: utf-8 -*-
+import os
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
@@ -6,6 +6,10 @@ block_cipher = None
 added_files = [
     ('gamepadstudio/assets', 'gamepadstudio/assets'),
 ]
+
+added_binaries = [
+    ('bin/ffmpeg.exe', 'bin'),
+] if os.path.exists('bin/ffmpeg.exe') else []
 
 hidden_imports = [
     'gamepadstudio',
@@ -51,7 +55,7 @@ hidden_imports = [
 a = Analysis(
     ['main.py'],
     pathex=['.'],
-    binaries=[],
+    binaries=added_binaries,
     datas=added_files,
     hiddenimports=hidden_imports,
     hookspath=[],
