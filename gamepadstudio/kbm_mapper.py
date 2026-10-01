@@ -7,7 +7,8 @@ GamePad Studio · 无限暖暖 专属全盘键鼠与前缀换挡映射引擎
 import math
 import time
 
-NIKKI_PROFILE_NAME = "无限暖暖 · 键鼠全盘接管"
+NIKKI_PROFILE_NAME = "《无限暖暖》专属预设"
+LEGACY_NIKKI_PROFILE_NAME = "无限暖暖 · 键鼠全盘接管"
 
 # 4大前缀换挡组合键定义：
 # 前缀键:

@@ -43,6 +43,7 @@ hidden_imports = [
     'gamepadstudio.i18n',
     'gamepadstudio.mapping_engine',
     'gamepadstudio.mapping_ui',
+    'gamepadstudio.mapping_deck',
     'gamepadstudio.replay_capture',
     'pygame',
     'mss',

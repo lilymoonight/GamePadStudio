@@ -1,11 +1,12 @@
 """GamepadTester Controller Catalog — Clean product cards with live status."""
-from PySide6.QtCore import Qt, QTimer, QUrl, QVariantAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QTimer, QUrl, QVariantAnimation, QEasingCurve, QSize
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout,
-                               QLineEdit, QComboBox, QScrollArea, QDialog, QSizePolicy)
+                               QLineEdit, QComboBox, QScrollArea, QDialog, QSizePolicy,
+                               QPushButton)
 from .controller_photo import ControllerPhoto, PHOTOS
 from .controller_catalog import CATALOG, get_catalog_entry
-from .glass import GlassPanel, IconButton, Indicator, glyph, TOKENS, token_color, tag_style
+from .glass import GlassPanel, IconButton, Indicator, glyph, TOKENS, tag_style
 from .i18n import tr, get_language
 
 
@@ -14,6 +15,24 @@ def text(value, kind=None):
     if kind:
         widget.setObjectName(kind)
     return widget
+
+
+def copy(zh, en):
+    return en if get_language() == 'en' else zh
+
+
+def action(value, callback, symbol=None, primary=False):
+    button = QPushButton(value)
+    button.setCursor(Qt.PointingHandCursor)
+    button.setMinimumHeight(36)
+    button.setAccessibleName(value)
+    if primary:
+        button.setObjectName('primary')
+    if symbol:
+        button.setIcon(glyph(symbol, TOKENS['ink']))
+        button.setIconSize(QSize(17, 17))
+    button.clicked.connect(callback)
+    return button
 
 
 def clear(layout):
@@ -78,64 +97,92 @@ class ControllerGallery(QWidget):
         super().__init__(parent)
         self.on_select = on_select
         self.on_favorite = on_favorite
+        self.on_scan = on_scan
         self.on_manage = on_manage
         self.favorites = set(favorites)
         self.devices = []
         self.active = None
         self.signature = None
         self.columns = 0
+        self.empty_state = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(16)
+        layout.setSpacing(18)
 
-        # ── GamepadTester Top Filter Bar ──────────────────────────────────
-        bar = QHBoxLayout()
-        bar.setSpacing(10)
+        # Connection state and its next action stay together above the catalog.
+        self.connections = GlassPanel()
+        self.connection_rows = QVBoxLayout(self.connections)
+        self.connection_rows.setContentsMargins(20, 16, 20, 16)
+        self.connection_rows.setSpacing(12)
+        layout.addWidget(self.connections)
 
+        self.toolbar = GlassPanel()
+        bar = QGridLayout(self.toolbar)
+        self.toolbar_layout = bar
+        bar.setContentsMargins(12, 10, 16, 10)
+        bar.setSpacing(20)
+
+        # Keep the selection model available to integrations and keyboard users.
         self.filter = QComboBox(self)
         self.filter.addItems([tr('全部手柄'), tr('已连接'), tr('我的收藏')])
-        self.filter.setFixedHeight(32)
-        self.filter.setMinimumWidth(110)
-        self.filter.setMaximumWidth(130)
-        bar.addWidget(self.filter)
+        self.filter.hide()
+        self.filter_group = QWidget()
+        filters = QHBoxLayout(self.filter_group)
+        filters.setContentsMargins(0, 0, 0, 0)
+        filters.setSpacing(4)
         self.filter_buttons = []
-        bar.addStretch()
+        for index in range(self.filter.count()):
+            button = QPushButton(self.filter.itemText(index))
+            button.setObjectName('filter')
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+            button.setFixedHeight(36)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setAccessibleName(self.filter.itemText(index))
+            button.clicked.connect(lambda checked=False, i=index: self.filter.setCurrentIndex(i))
+            filters.addWidget(button)
+            self.filter_buttons.append(button)
+        bar.addWidget(self.filter_group, 0, 0)
+        bar.setColumnStretch(1, 1)
 
-        # Search Bar
         self.search = QLineEdit()
         self.search.setPlaceholderText(tr('搜索手柄型号...'))
-        self.search.setFixedWidth(240)
-        self.search.setFixedHeight(32)
+        self.search.setAccessibleName(tr('搜索手柄型号...'))
+        self.search.setMinimumWidth(190)
+        self.search.setMaximumWidth(320)
+        self.search.setFixedHeight(36)
         self.search.setClearButtonEnabled(True)
         self.search.setStyleSheet(
             f'background: {TOKENS["elevated"]}; border: 1px solid {TOKENS["border_hi"]}; '
-            f'border-radius: {TOKENS["r_sm"]}px; padding: 0 12px; font-size: 12px;'
+            f'border-radius: {TOKENS["r_sm"]}px; padding: 0 10px; font-size: 12px;'
         )
         self.search.addAction(glyph('search', TOKENS['ink_3']), QLineEdit.LeadingPosition)
-        bar.addWidget(self.search)
+        bar.addWidget(self.search, 0, 1, Qt.AlignRight)
+        layout.addWidget(self.toolbar)
 
-        refresh_btn = IconButton('refresh', tr('重新扫描设备'), on_scan, 32)
-        refresh_btn.setStyleSheet(
-            f'border-radius: {TOKENS["r_sm"]}px; background: {TOKENS["elevated"]}; border: 1px solid {TOKENS["border_hi"]};'
-        )
-        bar.addWidget(refresh_btn)
-        layout.addLayout(bar)
-
-        # Active Multi-Device switcher (if multiple plugged in)
-        self.connections = GlassPanel()
-        self.connection_rows = QVBoxLayout(self.connections)
-        self.connection_rows.setContentsMargins(16, 8, 16, 8)
-        layout.addWidget(self.connections)
+        catalog_head = QHBoxLayout()
+        catalog_head.setContentsMargins(2, 0, 2, 0)
+        catalog_title = text(copy('型号与兼容性', 'Models & compatibility'), 'section')
+        catalog_title.setMinimumHeight(24)
+        catalog_head.addWidget(catalog_title)
+        catalog_head.addStretch()
+        self.result_count = text('', 'caption')
+        self.result_count.setMinimumHeight(24)
+        catalog_head.addWidget(self.result_count)
+        layout.addLayout(catalog_head)
 
         # Grid Content
         self.content = QWidget()
         self.grid = QGridLayout(self.content)
-        self.grid.setContentsMargins(0, 4, 4, 0)
-        self.grid.setSpacing(16)
+        self.grid.setContentsMargins(0, 0, 6, 8)
+        self.grid.setHorizontalSpacing(18)
+        self.grid.setVerticalSpacing(18)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QScrollArea.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll.setWidget(self.content)
         layout.addWidget(self.scroll, 1)
 
@@ -144,35 +191,76 @@ class ControllerGallery(QWidget):
         self.set_devices([], None)
 
     def set_devices(self, devices, active):
-        signature = (tuple((d['instance_id'], d['name'], d['family'], d['supported']) for d in devices), active)
+        signature = (tuple((d.get('instance_id'), d.get('name'), d.get('family'), d.get('supported', True)) for d in devices), active)
         if signature == self.signature:
             return
         self.signature = signature
         self.devices = devices
         self.active = active
         clear(self.connection_rows)
-        self.connections.setVisible(len(devices) > 1 or any(not d['supported'] for d in devices))
+
+        header = QWidget()
+        top = QHBoxLayout(header)
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(10)
+        top.addWidget(text(copy('连接设备', 'Connected devices'), 'section'))
+        if devices:
+            count = text(str(len(devices)))
+            count.setStyleSheet(tag_style(TOKENS['ink_3'], 0.14, 0.25))
+            count.setAlignment(Qt.AlignCenter)
+            count.setMinimumWidth(24)
+            top.addWidget(count)
+        top.addStretch()
+        top.addWidget(action(tr('重新扫描设备'), self.on_scan, 'refresh'))
+        self.connection_rows.addWidget(header)
+
+        if not devices:
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(12)
+            indicator = Indicator()
+            indicator.setText(tr('未连接'))
+            line.addWidget(indicator)
+            guidance = QVBoxLayout()
+            guidance.setSpacing(4)
+            guidance.addWidget(text(copy('连接手柄，开始配置', 'Connect a controller to get started'), 'section'))
+            hint = text(copy('通过 USB 或蓝牙连接；也可以先浏览下方支持的型号。',
+                             'Connect with USB or Bluetooth, or browse supported models below.'), 'muted')
+            hint.setWordWrap(True)
+            guidance.addWidget(hint)
+            line.addLayout(guidance, 1)
+            self.connection_rows.addWidget(row)
+
         for device in devices:
             row = QWidget()
             line = QHBoxLayout(row)
             line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(12)
             current = device['instance_id'] == active
             indicator = Indicator()
-            indicator.setText(tr('已连接') if current else tr('可切换'))
+            indicator.setText(tr('已连接'))
             line.addWidget(indicator)
-            name = text(device['name'])
-            name.setStyleSheet(f'font-weight: 600; color: {TOKENS["ink"]}; font-size: 13px;')
+            name = text(device['name'], 'section')
             name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             name.setToolTip(device['name'])
             line.addWidget(name, 1)
-            if not device['supported']:
-                hint = IconButton('info', tr('未识别，尝试 XInput 模式'))
+            if not device.get('supported', True):
+                hint = text(tr('未识别，尝试 XInput 模式'), 'caption')
+                hint.setStyleSheet(f'color: {TOKENS["amber"]}; font-size: 12px;')
+                hint.setWordWrap(True)
                 line.addWidget(hint)
             else:
-                choose = IconButton(
-                    'arrow', tr('管理') if current else tr('切换到此手柄'),
-                    lambda checked=False, i=device['instance_id'], c=current: self.on_manage() if c else self.on_select(i)
+                if current:
+                    badge = text(copy('当前设备', 'Active device'))
+                    badge.setStyleSheet(tag_style(TOKENS['green'], 0.14, 0.28))
+                    line.addWidget(badge)
+                choose = action(
+                    tr('管理') if current else copy('切换', 'Switch'),
+                    lambda checked=False, i=device['instance_id'], c=current: self.on_manage() if c else self.on_select(i),
+                    'arrow', primary=current
                 )
+                choose.setToolTip(tr('管理') if current else tr('切换到此手柄'))
                 line.addWidget(choose)
             self.connection_rows.addWidget(row)
         self.refresh()
@@ -186,7 +274,7 @@ class ControllerGallery(QWidget):
         self.refresh()
 
     def open_family(self, family):
-        connected = [d for d in self.devices if d['family'] == family and d['supported']]
+        connected = [d for d in self.devices if d['family'] == family and d.get('supported', True)]
         if len(connected) == 1:
             if connected[0]['instance_id'] != self.active:
                 self.on_select(connected[0]['instance_id'])
@@ -195,7 +283,7 @@ class ControllerGallery(QWidget):
             self.details(family)
 
     def refresh(self, *args):
-        self.columns = 3 if self.width() >= 940 else 2
+        self.columns = self.column_count()
         clear(self.grid)
         for i in range(self.grid.rowCount()):
             self.grid.setRowStretch(i, 0)
@@ -204,21 +292,26 @@ class ControllerGallery(QWidget):
         for i, b in enumerate(self.filter_buttons):
             b.setChecked(i == self.filter.currentIndex())
 
-        query = self.search.text().casefold()
-        connected = {d['family'] for d in self.devices if d['supported']}
+        query = self.search.text().strip().casefold()
+        connected = {d['family'] for d in self.devices if d.get('supported', True)}
         families = [
             key for key, item in CATALOG.items()
-            if query in (item['name'] + ' ' + item['brand'] + ' ' + item['subtitle']).casefold()
+            if query in (' '.join((item['name'], item['brand'], item['subtitle'],
+                                  get_catalog_entry(key)['name'], get_catalog_entry(key)['subtitle']))).casefold()
             and (self.filter.currentIndex() != 1 or key in connected)
             and (self.filter.currentIndex() != 2 or key in self.favorites)
         ]
+        self.empty_state = not families
+        self.result_count.setText(copy(f'{len(families)} 个型号', f'{len(families)} models'))
 
         for index, family in enumerate(families):
             info = get_catalog_entry(family)
             box = ProductCard(lambda k=family: self.open_family(k))
             box.setAccessibleName(info['name'])
+            box.setMinimumHeight(312)
+            box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             body = QVBoxLayout(box)
-            body.setContentsMargins(22, 18, 22, 18)
+            body.setContentsMargins(20, 18, 20, 18)
             body.setSpacing(10)
 
             # Top: Eyebrow Brand + Connected Pill + Favorite Heart
@@ -245,8 +338,8 @@ class ControllerGallery(QWidget):
 
             # Center: GamepadTester Vector Controller Graphic
             art = ControllerPhoto(family)
-            art.setMinimumWidth(180)
-            art.setFixedHeight(165)
+            art.setMinimumWidth(160)
+            art.setFixedHeight(160)
             body.addWidget(art)
 
             # Bottom: Title + Arrow Action
@@ -254,71 +347,132 @@ class ControllerGallery(QWidget):
             title_v = QVBoxLayout()
             title_v.setSpacing(2)
             title_lbl = text(info['name'], 'section')
-            title_lbl.setStyleSheet(f'font-size: 15px; font-weight: 800; color: {TOKENS["ink"]};')
+            title_lbl.setStyleSheet(f'font-size: 16px; font-weight: 700; color: {TOKENS["ink"]};')
+            title_lbl.setWordWrap(True)
             title_v.addWidget(title_lbl)
 
             sub_lbl = text(info.get('subtitle', ''), 'caption')
+            sub_lbl.setWordWrap(True)
             title_v.addWidget(sub_lbl)
             foot.addLayout(title_v, 1)
 
-            details = IconButton('arrow', tr('进入配置 ') + info['name'], lambda checked=False, k=family: self.open_family(k), 32)
-            details.setStyleSheet(f'background: {TOKENS["elevated"]}; border-radius: {TOKENS["r_sm"]}px; border: 1px solid {TOKENS["border"]};')
+            description = (tr('管理') if family in connected else copy('查看详情', 'View details')) + ' · ' + info['name']
+            details = IconButton('arrow', description, lambda checked=False, k=family: self.open_family(k), 36)
+            details.setStyleSheet(f'background: {TOKENS["accent_bg"] if family in connected else TOKENS["elevated"]}; border-radius: {TOKENS["r_sm"]}px; border: 1px solid {TOKENS["border_acc"] if family in connected else TOKENS["border"]};')
             foot.addWidget(details)
             body.addLayout(foot)
-
-            if family == 'generic':
-                example = text(tr('8BitDo · 示例'), 'caption')
-                body.addWidget(example)
 
             box.setToolTip(info['note'])
             self.grid.addWidget(box, index // self.columns, index % self.columns)
 
         if not families:
-            empty = text(tr('未找到匹配的手柄设备'), 'muted')
-            empty.setAlignment(Qt.AlignCenter)
+            empty = GlassPanel()
+            empty.setMinimumHeight(240)
+            body = QVBoxLayout(empty)
+            body.setContentsMargins(32, 32, 32, 32)
+            body.setSpacing(10)
+            body.addStretch()
+            icon = text('')
+            icon.setPixmap(glyph('search' if query else 'disconnected', TOKENS['ink_3']).pixmap(32, 32))
+            icon.setAlignment(Qt.AlignCenter)
+            body.addWidget(icon)
+            heading = text(tr('未找到匹配的手柄设备'), 'section')
+            heading.setAlignment(Qt.AlignCenter)
+            body.addWidget(heading)
+            if self.filter.currentIndex() == 1 and not connected:
+                hint = copy('连接手柄后重新扫描，即可在这里管理设备。',
+                            'Connect a controller and rescan to manage it here.')
+                button = action(tr('重新扫描设备'), self.on_scan, 'refresh', primary=True)
+            elif self.filter.currentIndex() == 2 and not self.favorites:
+                hint = copy('点击型号卡片右上角的爱心，将常用手柄加入收藏。',
+                            'Use the heart on a model card to add a favorite.')
+                button = action(copy('浏览全部型号', 'Browse all models'), self.reset_filters, 'arrow')
+            else:
+                hint = copy('尝试其他关键词，或清除筛选以浏览全部型号。',
+                            'Try another search or clear filters to browse all models.')
+                button = action(copy('清除筛选', 'Clear filters'), self.reset_filters, 'refresh')
+            caption = text(hint, 'muted')
+            caption.setAlignment(Qt.AlignCenter)
+            caption.setWordWrap(True)
+            body.addWidget(caption)
+            body.addWidget(button, 0, Qt.AlignHCenter)
+            body.addStretch()
             self.grid.addWidget(empty, 0, 0, 1, self.columns)
 
         for i in range(self.columns):
             self.grid.setColumnStretch(i, 1)
         self.grid.setRowStretch((len(families) + self.columns - 1) // self.columns, 1)
 
+    def reset_filters(self):
+        self.search.clear()
+        self.filter.setCurrentIndex(0)
+
+    def column_count(self):
+        width = self.scroll.viewport().width() if hasattr(self, 'scroll') else self.width()
+        if width >= 1600:
+            return 5
+        if width >= 1320:
+            return 4
+        if width >= 930:
+            return 3
+        return 2 if width >= 620 else 1
+
     def detail_dialog(self, family):
         info = get_catalog_entry(family)
         dialog = QDialog(self)
         dialog.setWindowTitle(info['name'])
-        dialog.resize(580, 430)
+        dialog.resize(640, 540)
+        dialog.setMinimumWidth(520)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(24, 24, 24, 22)
         layout.setSpacing(16)
 
         head = QHBoxLayout()
-        head.addWidget(text(info['name'], 'heading'))
+        title = text(info['name'], 'heading')
+        title.setWordWrap(True)
+        head.addWidget(title, 1)
         head.addStretch()
         head.addWidget(IconButton('close', tr('关闭'), dialog.accept))
         layout.addLayout(head)
 
         art = ControllerPhoto(family)
-        art.setMinimumSize(440, 240)
+        art.setMinimumSize(440, 220)
         layout.addWidget(art, 1)
 
+        compatibility = GlassPanel()
+        notes = QVBoxLayout(compatibility)
+        notes.setContentsMargins(16, 12, 16, 12)
+        notes.setSpacing(5)
+        notes.addWidget(text(copy('兼容性说明', 'Compatibility'), 'section'))
+        note = text(info['note'], 'muted')
+        note.setWordWrap(True)
+        notes.addWidget(note)
+        layout.addWidget(compatibility)
+
         footer = QHBoxLayout()
-        footer.addWidget(text('8BitDo Ultimate 2C · 示例' if family == 'generic' else info['brand'], 'muted'))
+        footer.addWidget(text(copy('8BitDo Ultimate 2C · 示例', '8BitDo Ultimate 2C · Visual example') if family == 'generic' else info['brand'], 'muted'))
         footer.addStretch()
-        footer.addWidget(IconButton('info', info['note']))
-        footer.addWidget(IconButton('external', tr('官方产品页'), lambda: QDesktopServices.openUrl(QUrl(PHOTOS[family]['page']))))
+        footer.addWidget(action(tr('官方产品页'), lambda: QDesktopServices.openUrl(QUrl(PHOTOS[family]['page'])), 'external'))
         layout.addLayout(footer)
 
         for device in self.devices:
-            if device['family'] == family and device['supported']:
+            if device['family'] == family and device.get('supported', True):
                 def activate(checked=False, i=device['instance_id']):
                     self.on_select(i)
                     dialog.accept()
                     self.on_manage()
                 row = QHBoxLayout()
-                row.addWidget(text(device['name']))
+                name = text(device['name'], 'section')
+                name.setWordWrap(True)
+                row.addWidget(name, 1)
                 row.addStretch()
-                row.addWidget(IconButton('arrow', tr('管理'), activate))
+                row.addWidget(action(tr('管理'), activate, 'arrow', primary=True))
                 layout.addLayout(row)
+        if not any(d['family'] == family and d.get('supported', True) for d in self.devices):
+            hint = text(copy('连接此型号后，可直接进入设备管理与按键配置。',
+                             'Connect this model to manage the device and configure its controls.'), 'caption')
+            hint.setWordWrap(True)
+            layout.addWidget(hint)
         return dialog
 
     def details(self, family):
@@ -327,7 +481,7 @@ class ControllerGallery(QWidget):
         dialog.deleteLater()
 
     def reflow(self):
-        columns = 3 if self.width() >= 940 else 2
+        columns = self.column_count()
         if columns == self.columns:
             return
         widgets = []
@@ -339,12 +493,24 @@ class ControllerGallery(QWidget):
             self.grid.setColumnStretch(i, 0)
         self.columns = columns
         for i, widget in enumerate(widgets):
-            self.grid.addWidget(widget, i // columns, i % columns)
+            if self.empty_state:
+                self.grid.addWidget(widget, 0, 0, 1, columns)
+            else:
+                self.grid.addWidget(widget, i // columns, i % columns)
         for i in range(columns):
             self.grid.setColumnStretch(i, 1)
-        self.grid.setRowStretch((len(widgets) + columns - 1) // columns, 1)
+        self.grid.setRowStretch(0 if self.empty_state else (len(widgets) + columns - 1) // columns, 1)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, 'grid') and (3 if self.width() >= 940 else 2) != self.columns:
+        if hasattr(self, 'toolbar_layout'):
+            narrow = self.width() < 700
+            self.toolbar_layout.removeWidget(self.search)
+            if narrow:
+                self.search.setMaximumWidth(16777215)
+                self.toolbar_layout.addWidget(self.search, 1, 0, 1, 2)
+            else:
+                self.search.setMaximumWidth(320)
+                self.toolbar_layout.addWidget(self.search, 0, 1, Qt.AlignRight)
+        if hasattr(self, 'grid'):
             QTimer.singleShot(0, self.reflow)

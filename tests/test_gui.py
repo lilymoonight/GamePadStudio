@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtTest import QTest
 from gamepadstudio.studio import Studio, STYLE, MappingDialog
+from gamepadstudio.kbm_mapper import NIKKI_PROFILE_NAME
 
 
 def test_remote_gui_signal_connection_and_close(tmp_path,monkeypatch):
@@ -53,8 +54,8 @@ def test_gui_pages_capture_and_persistent_mapping(tmp_path,monkeypatch):
     dialog=MappingDialog(window,4,window.store.mappings['4'])
     assert dialog.value()['short']['action']=='capture'
     assert dialog.value()['long']['action']=='replay_record'
-    window.change_profile('桌面导航')
-    assert window.store.mappings['0']['short']['value']=='Enter'
+    window.change_profile(NIKKI_PROFILE_NAME)
+    assert window.store.mappings['0']['short']['value']=='Space'
     window.change_profile('主机体验')
     window.toggle_pause(); assert not window.enabled
     window.toggle_pause(); assert window.enabled
@@ -80,7 +81,7 @@ def test_gallery_filters_favorites_and_device_specific_capabilities(tmp_path,mon
         assert '4' not in window.store.mappings and '5' not in window.store.mappings
         window.navigate(1);app.processEvents()
         QTest.mouseClick(window.mapping_boxes[2][0],Qt.LeftButton)
-        assert window.selected_key==2 and window.selected_label.text()=='X' and window.mapping_art.selected==2
+        assert window.selected_key==2 and window.mapping_deck.selected_trigger=='2' and window.mapping_art.selected==2
         assert all(not button.isEnabled() for button in window.led_buttons)
         assert not window.touch_mouse_box.isEnabled() and window.feedback_rumble.isEnabled()
         assert window.mapping_boxes[20][0].isHidden()
