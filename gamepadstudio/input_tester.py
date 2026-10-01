@@ -76,8 +76,8 @@ class InputTester(QWidget):
         self.send_rumble = send_rumble
         self.identity = None
         self.state = None
-        self.family = 'dualsense'
-        self.axis_names = axis_labels('dualsense')
+        self.family = 'generic'
+        self.axis_names = axis_labels('generic')
         self.positions = [None, None]
         self.histories = [StickHistory(), StickHistory()]
 
@@ -222,7 +222,7 @@ class InputTester(QWidget):
         self.btn_tiles = {}
 
         # 16 slots in 2 rows of 8
-        init_names = button_labels('dualsense')
+        init_names = button_labels('generic')
         def clean_lbl(k):
             raw = init_names.get(k, str(k))
             return (raw.replace('方向键 ', '').replace('D-Pad ', '')
@@ -381,9 +381,16 @@ class InputTester(QWidget):
     def rumble_pattern(self, strength, count=1):
         if not self.send_rumble or not (self.state and self.state.get('rumble')):
             return
+        from .studio_core import profile_scope
+        identity = (profile_scope(self.state), self.state.get('instance_id'))
+        def pulse():
+            current = self.state
+            if (current and current.get('rumble') and
+                    identity == (profile_scope(current), current.get('instance_id'))):
+                self.send_rumble(strength)
         self.send_rumble(strength)
         for i in range(1, count):
-            QTimer.singleShot(i * 180, lambda s=strength: self.send_rumble(s) if self.state and self.state.get('rumble') else None)
+            QTimer.singleShot(i * 180, pulse)
 
     def update_state(self, state, collect=True):
         self.state = state
@@ -392,6 +399,11 @@ class InputTester(QWidget):
             button.setEnabled(rumble_supported)
 
         if not state:
+            self.family = 'generic'
+            self.axis_names = axis_labels(self.family)
+            for title, name in zip(self.trigger_names, self.axis_names[4:6]):
+                title.setText(name)
+            names = button_labels(self.family)
             self.positions = [None, None]
             for h in self.histories:
                 h.clear()
@@ -417,10 +429,14 @@ class InputTester(QWidget):
             for g in self.trigger_gauges:
                 g.set_value('', None)
             for k, tile in self.btn_tiles.items():
+                tile.setText(names.get(k, str(k + 1)).replace('方向键 ', '').replace('D-Pad ', '')
+                             .replace('左摇杆按下', 'L3').replace('右摇杆按下', 'R3')
+                             .replace('Left Stick Click', 'L3').replace('Right Stick Click', 'R3'))
+                tile.setVisible(k < 15)
                 tile.setStyleSheet(f"background: {TOKENS['void']}; color: {TOKENS['ink_3']}; font: 11px 'Cascadia Code', Consolas; font-weight: 600; border: 1px solid {TOKENS['border']}; border-radius: {TOKENS['r_sm']}px;")
             return
 
-        new_family = state.get('family', 'dualsense')
+        new_family = state.get('family', 'generic')
         if new_family != self.family:
             for h in self.histories:
                 h.clear()

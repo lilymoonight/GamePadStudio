@@ -114,6 +114,21 @@ def find_hid_instances(vendor: Optional[int] = None, product: Optional[int] = No
     return found
 
 
+def selected_device_instances(vendor, product, device_path=None):
+    """Resolve only the selected physical HID, never all pads of its model."""
+    if vendor is None or product is None:
+        return []
+    candidates = find_hid_instances(vendor, product)
+    if device_path:
+        normalized = str(device_path).upper().replace('#', '\\')
+        normalized = normalized.removeprefix('\\\\?\\')
+        normalized = normalized.split('\\{', 1)[0]
+        exact = [item for item in candidates if item.upper() == normalized]
+        return exact
+    # Legacy drivers can omit an interface path. A single match is unambiguous.
+    return candidates if len(candidates) == 1 else []
+
+
 def find_all_gamepad_instances() -> List[str]:
     """
     枚举系统内接入的所有手柄/游戏控制器 HID 实例路径（涵盖 PS5/PS4、Xbox 全系、Switch Pro、第三方通用 HID 手柄）
@@ -126,6 +141,28 @@ def find_all_gamepad_instances() -> List[str]:
             if inst not in found:
                 found.append(inst)
     return found
+
+
+def ensure_current_app_input_access(client=None) -> Tuple[bool, str]:
+    """Allow this input application before SDL enumerates an already hidden pad.
+
+    Installation and inactive-driver checks are read-only. With active filtering,
+    only the application's access entry can be added; hiding settings stay intact.
+    """
+    try:
+        client = client if client is not None else HidHideClient()
+        if not client.is_driver_installed():
+            return True, ''
+        ok, active = client._send_ioctl(IOCTL_GET_ACTIVE, out_size=1)
+        if not ok or len(active) != 1:
+            return False, '无法读取手柄访问状态，已隐身的手柄可能不可见。'
+        if not active[0]:
+            return True, ''
+        if not client.allow_current_input_app():
+            return False, '无法登记当前程序的手柄访问权限，已隐身的手柄可能不可见。'
+        return True, ''
+    except Exception:
+        return False, '无法登记当前程序的手柄访问权限，已隐身的手柄可能不可见。'
 
 
 class HidHideClient:
@@ -250,6 +287,36 @@ class HidHideClient:
         ok, _ = self._send_ioctl(IOCTL_SET_WHITELIST, in_bytes=payload, out_size=0)
         return ok
 
+    def _read_whitelist_checked(self) -> Tuple[bool, List[str]]:
+        """Keep a failed or truncated read distinct from an empty access list."""
+        ok, data = self._send_ioctl(IOCTL_GET_WHITELIST, out_size=8192)
+        if not ok or len(data) < 4 or len(data) % 2 or not data.endswith(b'\x00\x00\x00\x00'):
+            return False, []
+        try:
+            text = data.decode('utf-16le', errors='strict')
+        except UnicodeError:
+            return False, []
+        return True, [item for item in text.split('\x00') if item]
+
+    def _append_whitelist_paths(self, paths: List[str]) -> bool:
+        ok, whitelist = self._read_whitelist_checked()
+        if not ok:
+            return False
+        original = list(whitelist)
+        for path in paths:
+            normalized = os.path.normpath(path).casefold()
+            if not any(os.path.normpath(existing).casefold() == normalized for existing in whitelist):
+                whitelist.append(path)
+        return self.set_whitelist(whitelist) if whitelist != original else True
+
+    def allow_current_input_app(self) -> bool:
+        """Register only this executable, preserving every existing access entry."""
+        candidates = [sys.executable]
+        nt_path = dos_to_nt_path(sys.executable)
+        if nt_path and nt_path not in candidates:
+            candidates.append(nt_path)
+        return self._append_whitelist_paths(candidates)
+
     def add_current_app_to_whitelist(self) -> bool:
         """确保当前运行的 Python 进程及其同伴程序 (python.exe, pythonw.exe 等，包含 venv 与真实基准解释器) 在白名单中 (同时加入 NT 设备路径与 DOS 路径)"""
         curr_exe = sys.executable
@@ -272,16 +339,7 @@ class HidHideClient:
             if nt_p and nt_p not in full_candidates:
                 full_candidates.append(nt_p)
 
-        whitelist = self.get_whitelist()
-        added = False
-        for p in full_candidates:
-            norm_p = os.path.normpath(p).lower()
-            if not any(os.path.normpath(w).lower() == norm_p for w in whitelist):
-                whitelist.append(p)
-                added = True
-        if added:
-            return self.set_whitelist(whitelist)
-        return True
+        return self._append_whitelist_paths(full_candidates)
 
     def get_blacklist(self) -> List[str]:
         """获取当前被屏蔽隐身的外设 Instance ID 列表"""
@@ -303,7 +361,7 @@ class HidHideClient:
         """彻底对外部系统隐身并屏蔽所有接入的手柄设备（无论是 PS5、Xbox 还是 Switch Pro 等）"""
         return self.cloak_controller(None, None)
 
-    def cloak_controller(self, vendor: Optional[int] = None, product: Optional[int] = None) -> Tuple[bool, str]:
+    def cloak_controller(self, vendor: Optional[int] = None, product: Optional[int] = None, device_path=None) -> Tuple[bool, str]:
         """
         对控制器执行一键独占隐身接管：
         1. 确保当前主程序在白名单中
@@ -314,17 +372,13 @@ class HidHideClient:
         if not self.is_driver_installed():
             return False, "未检测到 HidHide 驱动，请先安装驱动"
 
-        instances = []
         if vendor is not None or product is not None:
-            instances.extend(find_hid_instances(vendor, product))
-        # 通用原则：无论接入什么手柄，将系统内所有物理手柄节点一并彻底对外部屏蔽，杜绝双重输入
-        all_pads = find_all_gamepad_instances()
-        for p in all_pads:
-            if p not in instances:
-                instances.append(p)
+            instances = selected_device_instances(vendor, product, device_path)
+        else:
+            instances = find_all_gamepad_instances()
 
         if not instances:
-            return False, "未在系统中找到任何手柄外设的 HID 硬件节点"
+            return False, "无法唯一匹配当前设备的 HID 节点，请重新连接后重试"
 
         # 尝试通过直接内核 IOCTL 通信
         direct_ok = False
@@ -363,12 +417,16 @@ class HidHideClient:
 
         return False, "写入黑名单失败，请检查驱动权限或以管理员身份运行工作台"
 
-    def uncloak_controller(self, vendor: Optional[int] = None, product: Optional[int] = None) -> Tuple[bool, str]:
+    def uncloak_controller(self, vendor: Optional[int] = None, product: Optional[int] = None, device_path=None) -> Tuple[bool, str]:
         """解除特定控制器的隐身屏蔽，恢复系统共享访问"""
         if not self.is_driver_installed():
             return False, "未检测到 HidHide 驱动"
 
         cli_path = r"C:\Program Files\Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe"
+        targets = selected_device_instances(vendor, product, device_path) if vendor is not None or product is not None else None
+        if targets == []:
+            return False, "无法唯一匹配当前设备的 HID 节点，请重新连接后重试"
+        remaining = [item for item in self.get_blacklist() if targets is not None and item.upper() not in {target.upper() for target in targets}]
 
         # 尝试直接 IOCTL 通信
         direct_ok = False
@@ -377,13 +435,7 @@ class HidHideClient:
                 if self.set_blacklist([]) and self.set_active(False):
                     direct_ok = True
             else:
-                instances = find_hid_instances(vendor, product)
-                if instances:
-                    blacklist = self.get_blacklist()
-                    norm_targets = {inst.upper() for inst in instances}
-                    new_blacklist = [b for b in blacklist if b.upper() not in norm_targets]
-                    self.set_blacklist(new_blacklist)
-                if self.set_active(False):
+                if self.set_blacklist(remaining) and self.set_active(bool(remaining)):
                     direct_ok = True
         except Exception:
             direct_ok = False
@@ -396,18 +448,20 @@ class HidHideClient:
             if not vendor and not product:
                 cmd = f'Start-Process "{cli_path}" -ArgumentList \'--cloak-off\' -Verb RunAs -Wait'
             else:
-                instances = find_hid_instances(vendor, product)
+                instances = targets
                 unhide_args = " ".join([f'--dev-unhide "{inst}"' for inst in instances]) if instances else ""
-                cmd = f'Start-Process "{cli_path}" -ArgumentList \'{unhide_args} --cloak-off\' -Verb RunAs -Wait'
+                cloak_flag = '--cloak-on' if remaining else '--cloak-off'
+                cmd = f'Start-Process "{cli_path}" -ArgumentList \'{unhide_args} {cloak_flag}\' -Verb RunAs -Wait'
             try:
                 import subprocess
                 flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
-                subprocess.call(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd], creationflags=flags)
-                return True, "已解除控制器隐身，系统已恢复共享访问"
+                result = subprocess.call(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd], creationflags=flags)
+                if result == 0:
+                    return True, "已解除当前控制器隐身"
             except Exception:
                 pass
 
-        return True, "已尝试解除隐身"
+        return False, "解除当前设备隐身失败，请检查驱动权限"
 
 
     def get_status_summary(self) -> Dict[str, Any]:

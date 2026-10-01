@@ -5,7 +5,12 @@ from gamepadstudio.mapping_engine import (
 )
 from gamepadstudio.studio_core import ConfigStore
 from gamepadstudio.kbm_mapper import NIKKI_PROFILE_NAME, CHORD_MAPPINGS
-from tests.test_unified_mapping import Actions, frame, entry
+from tests.test_unified_mapping import Actions, frame as input_frame, entry
+
+
+def frame(buttons=(), axes=None):
+    # These regressions run the disconnected XInput preset with synthetic input.
+    return {**input_frame(buttons, axes), 'device_key': 'offline:xinput'}
 
 
 def test_radial_menu_no_leak_when_holding_shoulder_or_trigger(tmp_path):
@@ -25,20 +30,21 @@ def test_radial_menu_no_leak_when_holding_shoulder_or_trigger(tmp_path):
 
     # 2. Player presses A (button 0) to form chord LB+A (Outfit 1) at t=0.25
     runtime.update(frame([9, 0]), store.data, now=0.25)
-    # Outfit 1 (key '1') must be fired immediately!
-    assert any(call == ('key', '1', True) for call in actions.calls)
+    # Wait for release to distinguish a quick ability tap from a held outfit slot.
+    assert not actions.calls
     assert not any('Tab' in str(call) for call in actions.calls), "Tab must NOT leak when chord triggers!"
 
     # 3. Player releases A, still holding LB
     runtime.update(frame([9]), store.data, now=0.35)
+    assert ('key', '1', True) in actions.calls
     # 4. Player releases LB
     runtime.update(frame([]), store.data, now=0.50)
     # Tab must NOT fire on release because LB was consumed by the chord!
     assert not any('Tab' in str(call) for call in actions.calls)
 
 
-def test_tap_shoulder_button_alone_opens_radial_menu_on_release(tmp_path):
-    """Tapping LB quickly (< 250ms) without chord fires Tab on release to toggle radial wheel."""
+def test_tap_ability_modifier_alone_stays_silent(tmp_path):
+    """The modifier cannot accidentally open the held ability wheel."""
     store = ConfigStore(tmp_path)
     store.data['active_profile'] = NIKKI_PROFILE_NAME
     actions = Actions()
@@ -50,7 +56,7 @@ def test_tap_shoulder_button_alone_opens_radial_menu_on_release(tmp_path):
 
     # Release LB at t=0.08 (quick tap)
     runtime.update(frame([]), store.data, now=0.08)
-    assert ('key', 'Tab', True) in actions.calls  # Fires Tab on release!
+    assert not actions.calls
 
 
 def test_long_hold_shoulder_button_alone_stays_silent(tmp_path):
@@ -107,12 +113,12 @@ def test_universal_button_logic_for_all_modifier_keys(btn, chord_partner, chord_
 def test_active_profile_is_single_source_of_truth_for_all_mappings(tmp_path):
     """Verify controller bindings and virtual KBM are 100% unified under active_profile."""
     store = ConfigStore(tmp_path)
-    # 1. Default loaded profile has full 40 entries for Nikki
+    # The unified preset contains abilities, movement, and explicit mouse holds.
     assert NIKKI_PROFILE_NAME in store.data['profiles']
     nikki = store.data['profiles'][NIKKI_PROFILE_NAME]
     assert len(nikki) >= 30
     assert '0+9' in nikki
-    assert '0+LT' in nikki
+    assert not any('LT' in key.split('+') for key in nikki if '+' in key)
     assert 'LS:up' in nikki
     assert 'LS:outer' in nikki
 
@@ -130,9 +136,9 @@ def test_active_profile_is_single_source_of_truth_for_all_mappings(tmp_path):
     runtime.update(frame([], [0, -0.9, 0, 0, 0, 0]), store.data, now=0.0)
     assert actions.keys[ord('W')] == 1
 
-    # Left stick outer stimulates 'Shift'
+    # Full movement does not trigger an unwanted dash.
     runtime.update(frame([], [0, -0.95, 0, 0, 0, 0]), store.data, now=0.05)
-    assert actions.keys[16] == 1  # VK_SHIFT = 16
+    assert actions.keys.get(16, 0) == 0
 
 
 def test_chord_locks_independent_of_release_order():

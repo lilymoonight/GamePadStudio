@@ -7,12 +7,14 @@ from PySide6.QtWidgets import (QWidget, QLabel, QPushButton, QVBoxLayout,
 
 from .glass import TOKENS
 from .i18n import tr
+from .controller_glyphs import display_parts, make_token_label
 from .mapping_engine import (canonical_trigger, trigger_label, effective_mappings,
                              profile_family, binding_label)
+from .response_curves import curve_capabilities
 
 
 class FlowLayout(QLayout):
-    """A natural-width chip row which wraps within its available width."""
+    """A natural-width token row which wraps within its available width."""
     def __init__(self, parent=None, spacing=5):
         super().__init__(parent)
         self.items = []
@@ -56,6 +58,8 @@ class FlowLayout(QLayout):
     def _arrange(self, rect, measure):
         x, y, line_height = rect.x(), rect.y(), 0
         for item in self.items:
+            if item.isEmpty():
+                continue
             hint = item.sizeHint()
             width = min(hint.width(), max(1, rect.width()))
             if x > rect.x() and x + width > rect.right() + 1:
@@ -77,17 +81,6 @@ def _clear(layout):
             _clear(item.layout())
 
 
-def _key_name(key, family):
-    full = trigger_label(key, family)
-    replacements = {'左摇杆按下': 'L3', '右摇杆按下': 'R3',
-                    'Left Stick Click': 'L3', 'Right Stick Click': 'R3',
-                    '左摇杆推满': 'LS MAX', '左摇杆': 'LS ', '右摇杆': 'RS ',
-                    '方向键 ': '', 'D-Pad ': ''}
-    for old, new in replacements.items():
-        full = full.replace(old, new)
-    return full.split('  ')[0].strip()
-
-
 def _chip(text, parent, accent=False, key=None):
     chip = QLabel(text, parent)
     chip.setAlignment(Qt.AlignCenter)
@@ -95,9 +88,8 @@ def _chip(text, parent, accent=False, key=None):
     chip.setProperty('keyToken', key)
     chip.setStyleSheet(
         f"color: {TOKENS['ink'] if accent else TOKENS['ink_2']}; "
-        f"background: {TOKENS['accent_bg'] if accent else TOKENS['elevated']}; "
-        f"border: 1px solid {TOKENS['border_acc'] if accent else TOKENS['border_hi']}; "
-        "border-radius: 6px; padding: 3px 7px; min-height: 20px; font-weight: 600; font-size: 13px;")
+        "background: transparent; border: none; padding: 0 1px; "
+        "min-height: 18px; font-weight: 600; font-size: 13px;")
     chip.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
     return chip
 
@@ -111,20 +103,23 @@ def _text(text, parent, muted=True):
 
 def _add_keys(layout, trigger, family, parent, accent=False):
     try:
-        keys = canonical_trigger(trigger).split('+')
+        keys = display_parts(trigger)
     except ValueError:
         layout.addWidget(_chip(str(trigger), parent, accent))
         return
     for i, key in enumerate(keys):
         if i:
             layout.addWidget(_text('+', parent))
-        chip = _chip(_key_name(key, family), parent, accent, key)
-        chip.setToolTip(trigger_label(key, family))
-        layout.addWidget(chip)
+        token = make_token_label(
+            key, family, parent=parent,
+            color=TOKENS['ink'] if accent else TOKENS['ink_2'], size=13)
+        token.setAttribute(Qt.WA_TransparentForMouseEvents)
+        token.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        layout.addWidget(token)
 
 
 class ActionCard(QPushButton):
-    """One keyboard-accessible gesture card with real keycap widgets."""
+    """One keyboard-accessible gesture card with compact button symbols."""
     def __init__(self, gesture, parent=None):
         super().__init__(parent)
         self.gesture = gesture
@@ -209,7 +204,7 @@ class ActionCard(QPushButton):
 
 
 class ComboButton(QPushButton):
-    """Use the child keycaps as the button's natural size, rather than empty text."""
+    """Use the button symbols to size the combination's shared hit target."""
     def sizeHint(self):
         return self.layout().sizeHint() if self.layout() else super().sizeHint()
 
@@ -244,6 +239,20 @@ class MappingDeck(QWidget):
         layout.addLayout(header)
         self.input_keys = FlowLayout()
         layout.addLayout(self.input_keys)
+        # Response settings are directly beside the input they affect.
+        self.curve_controls = QWidget(self)
+        self.curve_layout = FlowLayout(self.curve_controls, spacing=6)
+        self.curve_buttons = {}
+        for kind, title in (('trigger', '扳机输入曲线'), ('rumble', '双马达振动曲线'),
+                            ('trigger_rumble', '扳机振动曲线')):
+            control = QPushButton(tr(title), self.curve_controls)
+            control.setObjectName('pill')
+            control.setCursor(Qt.PointingHandCursor)
+            control.setStyleSheet('font-size: 12px; padding: 5px 10px; min-height: 24px;')
+            control.clicked.connect(lambda checked=False, kind=kind: self.open_curve(kind))
+            self.curve_layout.addWidget(control)
+            self.curve_buttons[kind] = control
+        layout.addWidget(self.curve_controls)
         self.short_card = ActionCard('short', self)
         self.long_card = ActionCard('long', self)
         self.short_card.clicked.connect(self.edit)
@@ -285,9 +294,11 @@ class MappingDeck(QWidget):
         _clear(self.input_keys)
         self.input_heading.setText(tr('组合输入') if '+' in self.selected_trigger else tr('当前按键'))
         _add_keys(self.input_keys, self.selected_trigger, family, self, True)
-        threshold = entry.get('long_press', config.get('long_press', .65))
+        from .studio_core import device_config
+        threshold = entry.get('long_press', device_config(config, state).get('long_press', .65))
         self.short_card.set_binding(entry.get('short', {}), self.selected_trigger, family, threshold)
         self.long_card.set_binding(entry.get('long', {}), self.selected_trigger, family, threshold)
+        self.refresh_curve_controls()
         self.clear_btn.setEnabled(any(entry.get(g, {}).get('action', 'none') != 'none' for g in ('short', 'long')))
         self.clear_btn.setText(tr('清除映射'))
         self.combo_heading.setText(tr('组合映射'))
@@ -308,10 +319,7 @@ class MappingDeck(QWidget):
             row = QHBoxLayout(button)
             row.setContentsMargins(8, 4, 8, 4)
             row.setSpacing(4)
-            for index, key in enumerate(trigger.split('+')):
-                if index:
-                    row.addWidget(_text('+', button))
-                row.addWidget(_chip(_key_name(key, family), button, key=key))
+            _add_keys(row, trigger, family, button)
             button._base_style = (
                 f"QPushButton {{ padding: 0; min-height: 0; border: 1px solid {TOKENS['border']}; border-radius: 8px; background: {TOKENS['base']}; }}"
                 f"QPushButton:checked {{ border-color: {TOKENS['border_acc']}; background: {TOKENS['accent_bg']}; }}"
@@ -324,6 +332,47 @@ class MappingDeck(QWidget):
             self.combo_layout.addWidget(_text(tr('暂无组合映射'), self))
         self.updateGeometry()
         self.feedback(self._feedback_data)
+
+    def curve_channel(self, kind):
+        if kind == 'rumble':
+            return None
+        members = set(self.selected_trigger.split('+'))
+        if 'RT' in members and 'LT' not in members:
+            return 'right'
+        if 'LT' in members:
+            return 'left'
+        return None
+
+    def refresh_curve_controls(self):
+        state = getattr(self.owner, 'snapshot', None)
+        capabilities = curve_capabilities(state)
+        can_open = callable(getattr(self.owner, 'open_curve_editor', None))
+        family = profile_family(self.owner.config, state, self._profile())
+        any_visible = False
+        for kind, title in (('trigger', '扳机输入曲线'), ('rumble', '双马达振动曲线'),
+                            ('trigger_rumble', '扳机振动曲线')):
+            supported = bool(capabilities['trigger_axes']) if kind == 'trigger' else capabilities[kind]
+            control = self.curve_buttons[kind]
+            visible = can_open and supported
+            control.setVisible(visible)
+            control.setEnabled(visible)
+            channel = self.curve_channel(kind)
+            if kind == 'trigger' and ((channel == 'left' and 4 not in capabilities['trigger_axes']) or
+                                      (channel == 'right' and 5 not in capabilities['trigger_axes'])):
+                channel = None
+            prefix = trigger_label('LT' if channel == 'left' else 'RT', family) + ' · ' if channel else ''
+            control.setText(prefix + tr(title))
+            control.setAccessibleName(control.text())
+            control.setToolTip(control.text())
+            any_visible |= visible
+        self.curve_controls.setVisible(any_visible)
+        self.curve_controls.updateGeometry()
+
+    def open_curve(self, kind):
+        # Recheck at the time of the click; capability metadata can update live.
+        self.refresh_curve_controls()
+        if not self.curve_buttons[kind].isHidden():
+            self.owner.open_curve_editor(kind, channel=self.curve_channel(kind))
 
     def edit(self):
         self.owner.edit_mapping(self.selected_trigger, profile=self._profile(), mode='gamepad')

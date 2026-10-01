@@ -9,12 +9,13 @@ import json
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal, QByteArray
-from PySide6.QtGui import (QColor, QPainter, QPainterPath, QPixmap, QPen,
+from PySide6.QtGui import (QColor, QPainter, QPainterPath, QPixmap, QPen, QFont,
                            QRadialGradient, QImage)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget, QSizePolicy
 
 from .glass import TOKENS
+from .controller_catalog import axis_labels
 
 
 ASSET_DIR = Path(__file__).resolve().parent / 'assets' / 'controllers'
@@ -35,7 +36,7 @@ VIEWBOX = {
 
 
 def _svg_family(family):
-    if family in ('dualsense', 'dualshock4', 'generic'):
+    if family in ('dualsense', 'dualshock4'):
         return 'playstation'
     if family == 'switch':
         return 'switch'
@@ -186,6 +187,8 @@ _te_pixmap_cache = {}
 
 
 def get_te_controller_pixmap(family):
+    if family == 'generic':
+        return None
     if family not in _te_pixmap_cache:
         fname = TE_ASSET_NAMES.get(family)
         if fname:
@@ -291,7 +294,7 @@ def photo_health():
 class ControllerPhoto(QWidget):
     """GamepadTester Controller Art Widget."""
 
-    def __init__(self, family='dualsense', parent=None):
+    def __init__(self, family='generic', parent=None):
         super().__init__(parent)
         self.family = None
         self.led = TOKENS['accent']
@@ -307,7 +310,9 @@ class ControllerPhoto(QWidget):
         if family == self.family:
             return
         self.family = family
-        self.info = PHOTOS[family]
+        self.info = dict(PHOTOS[family])
+        if family == 'generic':
+            self.info['caption'] = '通用 XInput 键位示意'
         self.setAccessibleName(self.info['caption'])
         self.setToolTip(self.info['caption'] + '\n图形来源：GamepadTester.cn')
         self.update()
@@ -317,19 +322,79 @@ class ControllerPhoto(QWidget):
         self.update()
 
     def product_rect(self):
-        stage = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        stage = self.product_stage()
         return controller_art_rect(stage, self.family)
+
+    def product_stage(self):
+        # Front views hide the triggers behind the shoulder buttons. One compact
+        # label row keeps those inputs visible without covering the hardware.
+        label_height = max(18., min(28., self.height() * .11))
+        return QRectF(self.rect()).adjusted(1, label_height + 1, -1, -1)
+
+    def trigger_anchors(self):
+        rect = self.product_rect()
+        if rect.isEmpty():
+            return {}
+        source = controller_source_rect(self.family)
+        if not source.isEmpty() and self.family in RASTER_BUTTON_CENTERS:
+            return {trigger: ((RASTER_BUTTON_CENTERS[self.family][button][0] - source.left()) / source.width(),
+                              -12. / rect.height())
+                    for trigger, button in (('LT', 9), ('RT', 10))}
+        if _svg_family(self.family) == 'xbox':
+            return {'LT': (138.5 / 441, 29 / 383), 'RT': (302.5 / 441, 29 / 383)}
+        positions = (30 / 128, 98 / 128) if _svg_family(self.family) == 'playstation' else (96 / 400, 274 / 400)
+        return {key: (x, -12. / rect.height()) for key, x in zip(('LT', 'RT'), positions)}
+
+    def input_is_available(self, key):
+        available = getattr(self, 'available', None)
+        if key in ('LT', 'RT'):
+            # New consumers pass every canonical source. Legacy consumers keep
+            # integer buttons and report axes independently.
+            if available is not None and (not available or any(isinstance(item, str) for item in available)):
+                return key in available
+            axes = getattr(self, 'available_axes', None)
+            return axes is None or (4 if key == 'LT' else 5) in axes
+        return available is None or key in available or str(key) in available
+
+    def trigger_regions(self):
+        rect = self.product_rect()
+        return {key: QRectF(rect.left() + x * rect.width() - 23,
+                           rect.top() + y * rect.height() - 11, 46, 22)
+                for key, (x, y) in self.trigger_anchors().items()}
+
+    def draw_trigger_labels(self, painter):
+        labels = axis_labels(self.family)[-2:]
+        font = QFont('Segoe UI')
+        font.setPixelSize(12)
+        font.setWeight(QFont.DemiBold)
+        painter.setFont(font)
+        selected = getattr(self, 'selected_buttons', set())
+        axes = getattr(self, 'axes', [])
+        for index, (key, region) in enumerate(self.trigger_regions().items()):
+            if not self.input_is_available(key):
+                continue
+            amount = max(0., min(1., axes[index + 4])) if len(axes) > index + 4 else 0.
+            active = key in selected or amount > .01
+            painter.setPen(QColor(TOKENS['accent'] if active else TOKENS['ink_2']))
+            painter.drawText(region, Qt.AlignCenter, labels[index])
+            if active:
+                width = 23 if key in selected else 23 * amount
+                painter.setPen(QPen(QColor(TOKENS['accent']), 2.))
+                painter.drawLine(QPointF(region.center().x() - width / 2, region.bottom()),
+                                 QPointF(region.center().x() + width / 2, region.bottom()))
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        stage = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        stage = self.product_stage()
         draw_controller_svg(painter, stage, self.family, self.led)
+        self.draw_trigger_labels(painter)
 
 
 class ControllerInput(ControllerPhoto):
     """Live interactive controller diagram with clickable button anchors and glow nodes."""
     button_clicked = Signal(int)
+    input_clicked = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent=parent)
@@ -337,6 +402,7 @@ class ControllerInput(ControllerPhoto):
         self.buttons = set()
         self.axes = [0.] * 6
         self.available = None
+        self.available_axes = None
         self.selected = None
         self.selected_buttons = set()
 
@@ -344,17 +410,29 @@ class ControllerInput(ControllerPhoto):
         self.select_buttons([] if key is None else [key])
 
     def select_buttons(self, keys):
-        self.selected_buttons = {key for key in keys if key in self.anchors()
-                                 and (self.available is None or key in self.available)}
-        self.selected = min(self.selected_buttons) if self.selected_buttons else None
-        self.update()
+        normalized = {int(key) if str(key).isdigit() else str(key) for key in keys}
+        selected_buttons = {key for key in normalized if key in self.anchors()
+                            and self.input_is_available(key)}
+        if selected_buttons != self.selected_buttons:
+            self.selected_buttons = selected_buttons
+            self.selected = min(selected_buttons, key=lambda key: (1, key) if isinstance(key, str) else (0, key)) if selected_buttons else None
+            self.update()
 
     def anchors(self):
+        return {**self.button_anchors(), **self.trigger_anchors()}
+
+    def button_anchors(self):
+        if self.family == 'generic':
+            centers = {0: (330,181), 1: (348,161), 2: (310,162), 3: (329,140),
+                       4: (188,162), 5: (220.5,125), 6: (253,162),
+                       7: (113,160), 8: (278,238), 9: (138.5,77), 10: (302.5,77),
+                       11: (166,221), 12: (166,254), 13: (149,238), 14: (183,238)}
+            return {key: (x / 441, y / 383) for key, (x, y) in centers.items()}
         source = controller_source_rect(self.family)
         if not source.isEmpty() and self.family in RASTER_BUTTON_CENTERS:
             return {key: ((x - source.left()) / source.width(), (y - source.top()) / source.height())
                     for key, (x, y) in RASTER_BUTTON_CENTERS[self.family].items()}
-        if self.family in ('dualsense', 'dualshock4', 'generic'):
+        if self.family in ('dualsense', 'dualshock4'):
             return {
                 0: (.773, .440),  # Cross
                 1: (.845, .340),  # Circle
@@ -399,16 +477,23 @@ class ControllerInput(ControllerPhoto):
         }
 
     def update_state(self, state):
+        previous_available = self.available
+        previous_axes = self.available_axes
         if state:
             self.set_family(state.get('family', 'generic'))
         if state:
             self.available = set(state.get('available_buttons', []))
+            available_axes = state.get('available_axes')
+            self.available_axes = set(available_axes) if available_axes is not None else set(range(len(state.get('axes', []))))
         buttons = set(state['buttons']) if state else set()
         axes = state['axes'] if state else [0.] * 6
-        if buttons != self.buttons or axes != self.axes:
+        if (buttons != self.buttons or axes != self.axes
+                or previous_available != self.available or previous_axes != self.available_axes):
             self.buttons = buttons
             self.axes = axes[:]
             self.update()
+        if state:
+            self.select_buttons(self.selected_buttons)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -424,20 +509,26 @@ class ControllerInput(ControllerPhoto):
         painter.setPen(QPen(stroke, 2.))
         painter.setBrush(fill)
         for key, (x, y) in self.anchors().items():
-            if key in self.selected_buttons and (self.available is None or key in self.available):
+            if isinstance(key, int) and key in self.selected_buttons and self.input_is_available(key):
                 painter.drawEllipse(QPointF(rect.left() + x * rect.width(), rect.top() + y * rect.height()), radius, radius)
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
+        for key, region in self.trigger_regions().items():
+            if region.contains(event.position()):
+                if self.input_is_available(key):
+                    self.input_clicked.emit(key)
+                return
         rect = self.product_rect()
         points = {k: QPointF(rect.left() + x * rect.width(), rect.top() + y * rect.height())
-                  for k, (x, y) in self.anchors().items()}
+                  for k, (x, y) in self.button_anchors().items()}
         if not points:
             return
         def distance_squared(point):
             delta = point - event.position()
             return delta.x() ** 2 + delta.y() ** 2
         key = min(points, key=lambda k: distance_squared(points[k]))
-        if (self.available is None or key in self.available) and distance_squared(points[key]) < max(20, rect.width() * .075) ** 2:
+        if self.input_is_available(key) and distance_squared(points[key]) < max(20, rect.width() * .075) ** 2:
             self.button_clicked.emit(key)
+            self.input_clicked.emit(str(key))

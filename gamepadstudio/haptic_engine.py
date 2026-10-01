@@ -1,12 +1,11 @@
-"""
-GamePad Studio · 触觉拟真引擎 (Haptic Simulation Engine)
-1. 机械快门、棘轮刻度、打击阻尼、心跳多重高精度物理触觉波形合成
-2. 独立低延迟触觉发生工作线程 (异步非阻塞，不占用手柄 300Hz 轮询循环)
-3. 机械快门声音异步联动 (支持相机快门音效与静音快门)
-4. 双音圈线性马达分频控制 (Low-freq 重马达 / High-freq 细腻音圈 / 独立扳机马达)
+"""Application feedback patterns using SDL motor amplitudes and timed pulses.
+
+Device applies each channel's response curve. Independent trigger motors are
+optional hardware capabilities; these pulses do not control adaptive resistance.
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 import math
 from pathlib import Path
 import sys
@@ -66,26 +65,46 @@ class HapticEngine:
         self.device = device_provider
         self.on_notice = on_notice
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="HapticWorker")
+        self._state_lock = threading.RLock()
+        self._pattern_cancel = threading.Event()
+        self._closed = False
 
         self.sound_enabled = True
         self.haptics_enabled = True
         self.intensity = 1.0  # 0.0 ~ 1.0
         self.profile = "crisp"  # crisp (清脆点触), deep (深沉阻尼), dynamic (动效模拟)
+        self.trigger_rumble_enabled = False
 
         self.assets_dir = Path(__file__).resolve().parent / "assets"
         self.shutter_wav = self.assets_dir / "shutter.wav"
         ensure_shutter_sound_file(self.shutter_wav)
 
-    def set_config(self, sound_enabled: bool, haptics_enabled: bool, intensity: float = 1.0, profile: str = "crisp"):
-        self.sound_enabled = bool(sound_enabled)
-        self.haptics_enabled = bool(haptics_enabled)
-        self.intensity = max(0.0, min(1.0, float(intensity)))
-        if profile in ("crisp", "deep", "dynamic"):
-            self.profile = profile
+    def set_config(self, sound_enabled: bool, haptics_enabled: bool, intensity: float = 1.0,
+                   profile: str = "crisp", trigger_rumble_enabled: bool = False):
+        with self._state_lock:
+            # A queued or two-part pattern belongs to its original device and
+            # settings. Reconfiguration invalidates its remaining pulses.
+            self._pattern_cancel.set()
+            self._pattern_cancel = threading.Event()
+            self.sound_enabled = bool(sound_enabled)
+            self.haptics_enabled = bool(haptics_enabled)
+            self.intensity = max(0.0, min(1.0, float(intensity)))
+            if profile in ("crisp", "deep", "dynamic"):
+                self.profile = profile
+            self.trigger_rumble_enabled = bool(trigger_rumble_enabled)
+
+    def _device_identity(self):
+        metadata = getattr(self.device, 'metadata', None)
+        if not isinstance(metadata, dict):
+            metadata = getattr(self.device, 'state', None)
+        metadata = metadata if isinstance(metadata, dict) else {}
+        return (id(self.device), metadata.get('device_key') or metadata.get('profile_key'),
+                getattr(self.device, 'instance_id', metadata.get('instance_id')),
+                getattr(self.device, 'handle', None))
 
     def play_shutter_sound(self):
         """异步播放高保真机械快门音效（0 延迟、非阻塞）"""
-        if not self.sound_enabled:
+        if not self.sound_enabled or self._closed:
             return
         def _worker():
             try:
@@ -100,7 +119,7 @@ class HapticEngine:
 
     def trigger_feedback(self, event_type: str = "capture"):
         """
-        触发综合反馈组合拳 (快门声音 + 双音圈物理脉冲)
+        触发截图、回放和预览的声音与震动反馈。
         """
         if event_type == "capture":
             self.play_shutter_sound()
@@ -108,46 +127,58 @@ class HapticEngine:
         elif event_type == "replay_saved":
             self.play_shutter_sound()
             self.play_pattern("replay_saved")
-        elif event_type == "tick":
-            self.play_pattern("tick")
-        elif event_type == "impact":
-            self.play_pattern("impact")
+        elif event_type in ("tick", "impact", "shutter", "heartbeat", "trigger_test"):
+            self.play_pattern(event_type)
 
     def play_pattern(self, pattern_name: str):
-        """异步在手柄音圈马达上合成特定物理质感的触觉脉冲"""
-        if not self.haptics_enabled or self.intensity <= 0.01:
-            return
+        """Play bounded amplitude pulses asynchronously on the current device."""
+        with self._state_lock:
+            if self._closed or not self.haptics_enabled or self.intensity <= 0.01:
+                return
+            cancellation = self._pattern_cancel
+            identity = self._device_identity()
+            scale = self.intensity
+            profile = self.profile
+            metadata = getattr(self.device, 'metadata', {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            trigger_enabled = (self.trigger_rumble_enabled and metadata.get('trigger_rumble') is True
+                               and hasattr(self.device, 'rumble_triggers'))
+            if pattern_name == 'trigger_test' and not trigger_enabled:
+                return
+        # Each tuple contains motor amplitudes, duration and the gap before
+        # the next pulse. No delayed pulse may follow a device/config change.
+        patterns = {
+            "shutter": ((0.0, .42, 22, .025), (.28, .78, 48, 0)),
+            "tick": ((0.0, .35, 18, 0),),
+            "impact": ((.85, .55, 85, 0),),
+            "heartbeat": ((.35, .15, 45, .075), (.65, .30, 70, 0)),
+            "replay_saved": ((.15, .45, 35, .055), (.40, .88, 90, 0)),
+            "trigger_test": ((.55, .55, 180, 0),),
+        }
+        pulses = patterns.get(pattern_name, ((.35, .35, 50, 0),))
 
         def _worker():
             try:
-                scale = self.intensity
-                if pattern_name == "shutter":
-                    # 机械快门两段式微脉冲：前帘微动(20ms) -> 间隙(15ms) -> 后帘闭合扎实反馈(45ms)
-                    self._rumble(0.0, 0.42 * scale, 22)
-                    time.sleep(0.025)
-                    self._rumble(0.28 * scale, 0.78 * scale, 48)
-                elif pattern_name == "tick":
-                    # 机械旋钮/棘轮轻微刻度感
-                    self._rumble(0.0, 0.35 * scale, 18)
-                elif pattern_name == "impact":
-                    # 强劲撞击阻尼反馈
-                    self._rumble(0.85 * scale, 0.55 * scale, 85)
-                elif pattern_name == "heartbeat":
-                    # 仿真双心跳律动
-                    self._rumble(0.35 * scale, 0.15 * scale, 45)
-                    time.sleep(0.075)
-                    self._rumble(0.65 * scale, 0.30 * scale, 70)
-                elif pattern_name == "replay_saved":
-                    # 回放录像保存成功双升调波纹
-                    self._rumble(0.15 * scale, 0.45 * scale, 35)
-                    time.sleep(0.055)
-                    self._rumble(0.40 * scale, 0.88 * scale, 90)
-                else:
-                    self._rumble(0.35 * scale, 0.35 * scale, 50)
+                for low, high, duration, gap in pulses:
+                    with self._state_lock, getattr(self.device, '_io_lock', None) or nullcontext():
+                        # Identity also detects Device.select changing the
+                        # handle before the next poll updates settings.
+                        if cancellation.is_set() or self._closed or identity != self._device_identity():
+                            return
+                        if profile == 'deep':
+                            low, high = min(1., low * 1.2 + high * .20), high * .55
+                        elif profile == 'dynamic':
+                            low, high = min(1., low * .85 + high * .15), min(1., high * .85 + low * .15)
+                        if pattern_name != 'trigger_test':
+                            self._rumble(low * scale, high * scale, duration)
+                        if trigger_enabled:
+                            self.device.rumble_triggers(low * scale, high * scale, duration)
+                    if gap and cancellation.wait(gap):
+                        return
             except Exception:
                 pass
 
-        self.executor.submit(_worker)
+        return self.executor.submit(_worker)
 
     def _rumble(self, low: float, high: float, duration_ms: int):
         """底层驱动马达调用"""
@@ -159,7 +190,10 @@ class HapticEngine:
             self.device.rumble(max(low, high))
 
     def close(self):
+        with self._state_lock:
+            self._closed = True
+            self._pattern_cancel.set()
         try:
-            self.executor.shutdown(wait=False)
+            self.executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass

@@ -280,8 +280,8 @@ class VirtualMouseThread(threading.Thread):
                 is_click_locked = self.click_locked
 
             mag = math.sqrt(rx * rx + ry * ry)
-            # 点击防抖锁定：按下鼠标按键时，过滤掉拇指下压微小晃动，防止 Windows 识别为拖拽而取消按钮点击
-            if is_click_locked and mag < 0.35:
+            # 桌面点击防抖；游戏中的瞄准/蓄力仍需保留小幅镜头调整。
+            if is_desktop and is_click_locked and mag < 0.35:
                 mag = 0.0
             
             if mag > deadzone:

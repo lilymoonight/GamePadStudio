@@ -1,50 +1,89 @@
-"""
-GamePad Studio · 无限暖暖 专属全盘键鼠与前缀换挡映射引擎
-支持全手柄生态：DualSense / DualShock 4 / Xbox / Switch / 通用PC手柄
-100% 硬件扫描码注入，零丢帧、零模式冲突，单键极速瞬发换装！
+"""Infinity Nikki PC controls, grouped by frequency and hand position.
+
+Keyboard defaults follow the post-2.0 layout. Slot numbers deliberately do
+not name an ability: players can rearrange those slots inside the game.
 """
 
 import math
-import time
 
 NIKKI_PROFILE_NAME = "《无限暖暖》专属预设"
 LEGACY_NIKKI_PROFILE_NAME = "无限暖暖 · 键鼠全盘接管"
+NIKKI_LAYOUT_VERSION = 3
+NIKKI_SLOT_HOLD_SECONDS = .50
+NIKKI_MENU_HOLD_SECONDS = .60
 
-# 4大前缀换挡组合键定义：
-# 前缀键:
-# 9: LB / L1
-# 10: RB / R1
-# 'LT': 左扳机 (行程 > 0.35)
-# 'RT': 右扳机 (行程 > 0.35)
-# 动作键 (SDL 物理方位):
-# 0: A / 交叉 (南 / 下方位)
-# 1: B / 圆圈 (东 / 右方位)
-# 2: X / 方块 (西 / 左方位)
-# 3: Y / 三角 (北 / 上方位)
-
-CHORD_MAPPINGS = {
-    # 【左手前缀】1 ~ 8 号能力套装极速秒切换装
-    (9, 0): '1',    # LB + A (南) -> 套装 1 (主线跳跃/漂浮套)
-    (9, 2): '2',    # LB + X (西) -> 套装 2 (清洁/净化套)
-    (9, 3): '3',    # LB + Y (北) -> 套装 3 (电工/特殊能力套)
-    (9, 1): '4',    # LB + B (东) -> 套装 4 (捕虫/交互套)
-    
-    ('LT', 0): '5', # LT + A (南) -> 套装 5
-    ('LT', 2): '6', # LT + X (西) -> 套装 6
-    ('LT', 3): '7', # LT + Y (北) -> 套装 7
-    ('LT', 1): '8', # LT + B (东) -> 套装 8
-    
-    # 【右手前缀】探索工具与系统全景面板
-    (10, 0): 'M',   # RB + A -> 大地图
-    (10, 2): 'P',   # RB + X -> 拍照模式相机
-    (10, 3): 'C',   # RB + Y -> 完整衣柜搭配间
-    (10, 1): 'U',   # RB + B -> 任务追踪面板
-    
-    ('RT', 0): 'O', # RT + A -> 共鸣 (抽卡)
-    ('RT', 2): 'I', # RT + X -> 无限之心 (能力天赋树)
-    ('RT', 3): 'Y', # RT + Y -> 奇想设计图 (制作配方)
-    ('RT', 1): 'K', # RT + B -> 活动界面
+# Gestures deliberately open menus and exploration tools. Movement, combat and
+# continuous aiming remain on physical controls, so a delayed tap or a stray
+# touch cannot turn into a jump, dash or held mouse button.
+NIKKI_TOUCH_MAPPINGS = {
+    'TP:tap': 'T',
+    'TP:double_tap': 'P',
+    'TP:hold': 'CapsLock',
+    'TP:swipe_up': 'U',
+    'TP:swipe_down': 'M',
+    'TP:swipe_left': 'C',
+    'TP:swipe_right': 'B',
+    'TP:two_tap': 'V',
 }
+NIKKI_TOUCH_SCROLL_MAPPINGS = {'TP:scroll_up': 'up', 'TP:scroll_down': 'down'}
+NIKKI_TOUCH_SETTINGS = {'touch_gestures_enabled': True, 'touch_mouse': False,
+                        'touch_scroll': False, 'touch_gesture_sensitivity': .4}
+
+# SDL physical positions: south=0, east=1, west=2, north=3.
+# LB is the ability modifier; View/Create is the menu modifier.
+# Triggers remain dedicated mouse buttons, including while held for aiming.
+CHORD_MAPPINGS = {
+    (9, 0): '1', (9, 2): '2', (9, 3): '3', (9, 1): '4',
+    (9, 11): '5', (9, 14): '6', (9, 12): '7', (9, 13): '8',
+    (9, 10): 'G',
+    (4, 0): 'C', (4, 2): 'B', (4, 3): 'U', (4, 1): 'I',
+    (4, 8): 'Enter', (4, 6): 'K', (4, 9): 'H',
+}
+
+NIKKI_KEY_ROLES = {
+    'W': '前进 / 自行车前进', 'S': '后退 / 钓鱼提杆',
+    'A': '向左移动 / 钓鱼拉线', 'D': '向右移动 / 钓鱼拉线',
+    'SPACE': '跳跃 / 漂浮 / 自行车跳跃', 'SHIFT': '冲刺 / 闪避',
+    'CTRL': '步行', 'F': '交互 / 拾取 / 对话', 'E': '奇想战技 1',
+    'Q': '下落攻击', 'R': '奇想战技 2 / 家园派生能力',
+    'G': '派生能力 1 / 流转灵珠', 'T': '任务追踪 / 派生能力 2',
+    'TAB': '能力轮盘（按住）', 'X': '鸣星铃', 'V': '大喵视角',
+    'Z': '使用消耗品', 'ESC': '美鸭梨 / 返回', 'M': '地图',
+    'P': '大喵相机', 'F12': '游戏快拍', 'ALT': '显示鼠标光标（按住）',
+    'C': '衣柜 / 相机世界漂浮', 'N': '服装进化', 'B': '背包 / 相机相册',
+    'L': '奇想手账', 'U': '任务 / 相机拓展', 'Y': '设计图',
+    'I': '无限之心', 'O': '共鸣', 'ENTER': '聊天 / 确认',
+    'F10': '联机', 'K': '活动', 'J': '奇迹之旅 / 圆梦创想',
+    'H': '商城', 'CAPSLOCK': '功能汇总',
+    **{str(i): f'能力快捷槽 {i}' for i in range(1, 9)},
+    **{f'F{i}': f'常用搭配 {i}' for i in range(1, 8)},
+}
+
+NIKKI_LAYOUT_GROUPS = (
+    {'title': '基础行动', 'description': '轻推慢走，推深正常跑；冲刺由你主动控制。',
+     'triggers': ('LS:up', 'LS:inner', '0', '1', '2', '3', '10', '7', 'LT', 'RT')},
+    {'title': '探索与相机', 'description': '方向键管理探索工具；按住上方向，再用右摇杆和 RT 选择能力。',
+     'triggers': ('11', '12', '13', '14', '8', '9+7', '9+8', '6')},
+    {'title': '能力与常用搭配', 'description': '先按住 L1 / LB：轻点切能力，按住 0.50 秒换常用搭配。槽位顺序在游戏中设置。',
+     'triggers': ('0+9', '2+9', '3+9', '1+9', '9+11', '9+14', '9+12', '9+13', '9+10')},
+    {'title': '衣柜、任务与社交', 'description': '触摸板四向滑动直达常用菜单；Create / View 组合保留次级功能和无触摸板手柄的入口。',
+     'triggers': (*NIKKI_TOUCH_MAPPINGS, *NIKKI_TOUCH_SCROLL_MAPPINGS,
+                  '0+4', '2+4', '3+4', '1+4', '4+8', '4+6', '4+9')},
+)
+
+
+def nikki_binding_hint(binding):
+    """A concise game-context label for the actual current output."""
+    action, value = binding.get('action'), str(binding.get('value', ''))
+    if action in ('hold', 'shortcut'):
+        return NIKKI_KEY_ROLES.get(value.upper(), '')
+    if action in ('mouse_hold', 'mouse_click'):
+        return {'left': '净化 / 弓箭 / 点击', 'right': '能力使用 / 潜行捕捉 / 钓鱼收线',
+                'middle': '鼠标中键'}.get(value, '')
+    if action == 'wheel':
+        return '镜头缩放 / 列表滚动'
+    return {'replay_record': '保存精彩回放', 'capture': '保存软件截图',
+            'home': '打开控制中心'}.get(action, '')
 
 def stick_to_wasd(x, y, deadzone=0.15, sprint_threshold=0.85):
     """将左摇杆连续量解析为平滑 8 向 WASD，推满附加 Shift 疾跑"""
@@ -89,78 +128,134 @@ def stick_to_mouse(rx, ry, deadzone=0.07, sensitivity=28.0, y_ratio=0.65, boost=
     dy = (ry / mag) * speed * y_ratio
     return dx, dy
 
-def infinity_nikki_defaults(family='generic', available=None):
-    """生成《无限暖暖》专属基础按键配置（支持全手柄系列通用）"""
+def infinity_nikki_defaults(family='generic', available=None, *, touch_inputs=None,
+                            layout_version=NIKKI_LAYOUT_VERSION):
+    """Generate the PC layout with device-specific, independently fired gestures.
+
+    Device-bound callers pass the actual ``touch_sources(state)``. Family-based
+    inference is only for the Sony template and legacy configuration comparison;
+    an explicit empty list keeps a Sony device without touch reporting usable.
+    ``layout_version=2`` reproduces the previous layout for a preserving upgrade.
+    """
     available = set(range(21) if available is None else available)
     mapping = {}
     
-    # 动作基础层 (南=跳跃, 东=冲刺, 西=交互, 北=技能)
+    def entry(action, value=None, long_action='none', long_value=None, threshold=None):
+        short = {'action': action}
+        if value is not None:
+            short['value'] = value
+        long = {'action': long_action}
+        if long_value is not None:
+            long['value'] = long_value
+        result = {'short': short, 'long': long}
+        if threshold is not None:
+            result['long_press'] = threshold
+        return result
+
+    # Holding these keys preserves variable jump height and sprint duration.
     base_actions = [
         (0, 'Space'), # 跳跃 / 浮空
         (1, 'Shift'), # 冲刺 / 闪避
         (2, 'F'),     # 交互 / 拾取
-        (3, 'E'),     # 套装主动技能
+        (3, 'E'),     # 奇想战技 1；当前 PC 默认已不是鸣星铃
     ]
     for btn, key in base_actions:
         if btn in available:
-            mapping[str(btn)] = {'short': {'action': 'hold', 'value': key}, 'long': {'action': 'none'}}
+            mapping[str(btn)] = entry('hold', key)
             
     # 4 号键 (Create / View / Back / Share)：统一作为精彩回放录制/保存键，严禁映射为打开地图
     if 4 in available:
-        mapping['4'] = {'short': {'action': 'replay_record'}, 'long': {'action': 'none'}}
+        mapping['4'] = entry('replay_record', long_action='suppress', threshold=.28)
 
     # 截图与相册专用键适配 (若其他型号手柄有专用截图键如 15 号键)
     from .controller_catalog import capture_button
     cap_btn = capture_button(family, available)
     if cap_btn is not None and str(cap_btn) != '4':
-        mapping[str(cap_btn)] = {'short': {'action': 'capture'}, 'long': {'action': 'replay_record'}}
+        mapping[str(cap_btn)] = entry('capture', long_action='replay_record', threshold=.60)
         
     # 主页键 / PS键 / Guide
     if 5 in available and family != 'xbox':
-        mapping['5'] = {'short': {'action': 'home'}, 'long': {'action': 'none'}}
+        mapping['5'] = entry('home')
         
     # 菜单 / 暂停键 (Options / Menu / Start)
     if 6 in available:
-        mapping['6'] = {'short': {'action': 'shortcut', 'value': 'Esc'}, 'long': {'action': 'none'}}
+        mapping['6'] = entry('shortcut', 'Esc')
         
     # 摇杆按下
-    if 7 in available: # L3
-        mapping['7'] = {'short': {'action': 'hold', 'value': 'Shift'}, 'long': {'action': 'none'}}
-    if 8 in available: # R3
-        mapping['8'] = {'short': {'action': 'shortcut', 'value': 'V'}, 'long': {'action': 'none'}}
+    if 7 in available:
+        mapping['7'] = entry('hold', 'R')
+    if 8 in available:
+        mapping['8'] = entry('shortcut', 'V', 'shortcut', 'Z', .50)
         
-    # 肩键前缀换挡与单发功能：短按触发单发，长按进入组合键静默压制状态
-    if 9 in available: # LB / L1
-        mapping['9'] = {'short': {'action': 'shortcut', 'value': 'Tab'}, 'long': {'action': 'suppress'}, 'long_press': 0.25}
-    if 10 in available: # RB / R1
-        mapping['10'] = {'short': {'action': 'shortcut', 'value': 'V'}, 'long': {'action': 'suppress'}, 'long_press': 0.25}
+    if 9 in available:
+        mapping['9'] = entry('suppress')
+    if 10 in available:
+        mapping['10'] = entry('hold', 'Q')
         
     # 十字键功能快捷键
-    for btn, key in [(11, '3'), (12, '4'), (13, 'G'), (14, 'M')]:
+    navigation = {
+        11: entry('hold', 'Tab'),
+        12: entry('shortcut', 'T', 'shortcut', 'X', .50),
+        13: entry('shortcut', 'M', 'hold', 'Alt', .50),
+        14: entry('shortcut', 'P', 'shortcut', 'F12', .50),
+    }
+    for btn, binding in navigation.items():
         if btn in available:
-            mapping[str(btn)] = {'short': {'action': 'shortcut', 'value': key}, 'long': {'action': 'none'}}
+            mapping[str(btn)] = binding
             
     # 辅助键与触摸板
     if 15 in available and cap_btn != 15:
-        mapping['15'] = {'short': {'action': 'shortcut', 'value': 'C'}, 'long': {'action': 'none'}}
+        mapping['15'] = entry('shortcut', 'C')
     if 20 in available:
-        mapping['20'] = {'short': {'action': 'shortcut', 'value': 'Esc'}, 'long': {'action': 'none'}}
+        mapping['20'] = entry('shortcut', 'Esc')
 
-    # 双扳机：LT 鼠标右键长按瞄准/蓄力，RT 鼠标左键普攻/快门
-    mapping['LT'] = {'short': {'action': 'mouse_hold', 'value': 'right'}, 'long': {'action': 'mouse_hold', 'value': 'right'}, 'long_press': 0.20}
-    mapping['RT'] = {'short': {'action': 'mouse_hold', 'value': 'left'}, 'long': {'action': 'mouse_hold', 'value': 'left'}, 'long_press': 0.20}
+    # No dual short/long arbitration or chords: press/release injects immediately.
+    mapping['LT'] = entry('mouse_hold', 'right')
+    mapping['RT'] = entry('mouse_hold', 'left')
 
-    # 左摇杆 8 向平滑走位 WASD + 推满疾跑 Shift
+    # Light deflection holds Ctrl; full deflection never adds an unrequested dash.
     for direction, key in [('up', 'W'), ('down', 'S'), ('left', 'A'), ('right', 'D')]:
-        mapping['LS:' + direction] = {'short': {'action': 'hold', 'value': key}, 'long': {'action': 'none'}}
-    mapping['LS:outer'] = {'short': {'action': 'hold', 'value': 'Shift'}, 'long': {'action': 'none'}}
+        mapping['LS:' + direction] = entry('hold', key)
+    mapping['LS:inner'] = entry('hold', 'Ctrl')
+    mapping['LS:outer'] = entry('none')
 
-    # 4 大前缀换挡组合键：完整注入当前核心配置
     from .mapping_engine import canonical_trigger
     for parts, val in CHORD_MAPPINGS.items():
+        if not set(parts) <= available:
+            continue
         trig = canonical_trigger('+'.join(str(p) for p in parts))
-        mapping[trig] = {'short': {'action': 'shortcut', 'value': val}, 'long': {'action': 'none'}}
-        
+        if val.isdigit() and int(val) <= 7:
+            mapping[trig] = entry('shortcut', val, 'shortcut', 'F' + val, NIKKI_SLOT_HOLD_SECONDS)
+        elif val == '8':
+            mapping[trig] = entry('shortcut', val)
+        elif parts == (9, 10):
+            mapping[trig] = entry('shortcut', 'G', 'shortcut', 'T', .50)
+        else:
+            secondary = {'C': 'N', 'B': 'L', 'U': 'Y', 'I': 'O',
+                         'Enter': 'F10', 'K': 'J', 'H': 'CapsLock'}[val]
+            mapping[trig] = entry('shortcut', val, 'shortcut', secondary, NIKKI_MENU_HOLD_SECONDS)
+
+    for button, direction in ((7, 'up'), (8, 'down')):
+        if {9, button} <= available:
+            mapping[canonical_trigger(f'9+{button}')] = entry('wheel', direction)
+
+    if layout_version >= 3:
+        if touch_inputs is None:
+            touch_inputs = (*NIKKI_TOUCH_MAPPINGS, *NIKKI_TOUCH_SCROLL_MAPPINGS) if family in ('dualsense', 'dualshock4') and 20 in available else ()
+        for trigger in touch_inputs:
+            if trigger in NIKKI_TOUCH_MAPPINGS:
+                mapping[trigger] = entry('shortcut', NIKKI_TOUCH_MAPPINGS[trigger])
+            elif trigger in NIKKI_TOUCH_SCROLL_MAPPINGS:
+                mapping[trigger] = entry('wheel', NIKKI_TOUCH_SCROLL_MAPPINGS[trigger])
+        # The direct menu gesture replaces only its matching chord's short
+        # action. Rare secondary functions keep their established held chord;
+        # devices without that gesture retain the full keyboard-only layout.
+        for gesture, chord in (('TP:swipe_left', '0+4'),
+                               ('TP:swipe_right', '2+4'),
+                               ('TP:swipe_up', '3+4')):
+            if gesture in mapping and chord in mapping:
+                mapping[chord]['short'] = {'action': 'none'}
+
     return mapping
 
 

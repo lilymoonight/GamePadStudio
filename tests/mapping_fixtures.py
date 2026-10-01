@@ -7,6 +7,7 @@ class MappingOwner(QWidget):
     def __init__(self, root):
         super().__init__()
         self.store=ConfigStore(root); self.config=self.store.data; self.snapshot=None
+        self.store.activate_controller(None)
         self.edits=[]; self.changes=[]
     def mapping_change(self, change):
         self.changes.append(change); self.store.apply_mapping_change(change,self.snapshot)

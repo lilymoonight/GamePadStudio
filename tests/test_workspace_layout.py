@@ -19,6 +19,7 @@ def workspace(tmp_path, monkeypatch):
         def close(self): pass
 
     monkeypatch.setattr('gamepadstudio.studio.Device', Disconnected)
+    monkeypatch.setattr(QMessageBox, 'information', lambda *args, **kwargs: pytest.fail('Unexpected informational dialog'))
     app = QApplication.instance() or QApplication([])
     QFontDatabase.addApplicationFont('C:/Windows/Fonts/msyh.ttc')
     app.setStyleSheet(STYLE)
@@ -113,6 +114,10 @@ def test_keyboard_profile_actions_use_the_displayed_preset_offline(workspace, mo
 
 def test_combination_cards_and_controller_selection_follow_the_displayed_gamepad_profile(workspace, monkeypatch):
     window = workspace
+    # This fixture intentionally moves the sample macro into the offline input
+    # device's library; profiles belonging to another device stay hidden.
+    window.config['profile_devices']['动作与格斗宏'] = 'offline:xinput'
+    window.config['profile_families']['动作与格斗宏'] = 'generic'
     window.change_profile('动作与格斗宏')
     window.navigate(1)
     edits = []
@@ -137,6 +142,10 @@ def test_combination_cards_and_controller_selection_follow_the_displayed_gamepad
 def test_deleting_displayed_gamepad_profile_keeps_active_keyboard_profile(workspace, monkeypatch):
     window = workspace
     window.navigate(1)
+    # Retain a native fallback for this input device while deleting the visible
+    # native preset with the keyboard preset active.
+    assert window.mapping_change({'op': 'create', 'profile': '离线手柄副本', 'mode': 'gamepad',
+                                  'source': window.current_gamepad_profile()})
     window.change_profile(NIKKI_PROFILE_NAME)
     displayed = window.current_gamepad_profile()
     keyboard_before = window.config['profiles'][NIKKI_PROFILE_NAME].copy()

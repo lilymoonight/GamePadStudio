@@ -24,9 +24,14 @@ from .mapping_engine import MappingRuntime, effective_mappings, binding_label
 from .mapping_ui import BindingDialog
 from .mapping_deck import MappingDeck
 from .virtual_kbm_ui import VirtualKbmPage
+from .curve_ui import CurveDialog, supports_curve
+from .touch_ui import TouchGestureDialog, supports_touch
+from .response_curves import curve_capabilities, normalize_curve
 from .controller_photo import ControllerPhoto, ControllerInput, PHOTOS, photo_health
 from .input_tester import InputTester
 from .controller_catalog import CATALOG, button_labels, capture_button, button_order, controller_defaults
+from .studio_core import device_config, profile_scope, DEVICE_SETTING_KEYS
+from .mapping_engine import profile_family, input_sources, canonical_trigger, trigger_label
 from .screenshot_service import take_screenshot, list_captures, set_favorite, delete_capture
 
 from .glass import (TOKENS, tag_style, token, token_color, STYLE, GlassWindow, GlassCanvas, GlassPanel, TitleBar,
@@ -95,6 +100,9 @@ class Studio(GlassWindow):
         super().__init__()
         root=Path(root).resolve(); self.remote=not standalone; self.closed=False
         self.store=ConfigStore(root); self.config=self.store.data
+        self.store.activate_controller(None)
+        if not self.remote:
+            self.store.save()
         self.lang_pref = lang
         init_language(lang or self.config.get('language', 'auto'))
         self.setWindowTitle('GamePad Studio'); self.setWindowIcon(app_icon()); self.resize(1440,900); self.setMinimumSize(960,640)
@@ -109,7 +117,10 @@ class Studio(GlassWindow):
                 cleanup_stale_agent(root)
                 spawn(root,'--agent')
         self.snapshot=None; self.previous_connected=False; self.enabled=bool(self.config.get('mapping_enabled',True)); self.last_capture=0; self.worker=None
-        self.device_identity=object();self.button_names=button_labels('dualsense');self.mapping_boxes={}
+        if not self.remote:
+            from .haptic_engine import HapticEngine
+            self.haptic_engine = HapticEngine(self.device)
+        self.device_identity=object();self.button_names=button_labels('generic');self.mapping_boxes={}
         self.last_touch=None; self.last_buttons=set(); self.quitting=False; self.learn=False
         self.log_rows=[]; self.nav={}; self.mapping_labels={}; self.recent_labels=[]
         main = GlassCanvas()
@@ -247,7 +258,7 @@ class Studio(GlassWindow):
         sep2.setStyleSheet(f'color: {_border_hi}; max-height: 18px;')
         capsule_layout.addWidget(sep2)
 
-        self.capture_button = IconButton('camera', tr('即时截屏 (Create / F12)'), self.capture, 28)
+        self.capture_button = IconButton('camera', tr('即时截屏'), self.capture, 28)
         self.capture_button.setObjectName('primary')
         self.capture_button.set_symbol('camera', '#ffffff')
         capsule_layout.addWidget(self.capture_button)
@@ -285,7 +296,7 @@ class Studio(GlassWindow):
         self.notice_timer=QTimer(self);self.notice_timer.setSingleShot(True);self.notice_timer.timeout.connect(lambda:self.notice.setText(tr('映射运行中') if self.enabled else tr('映射已暂停')))
         outer.addWidget(body,1)
         self.tray=QSystemTrayIcon(app_icon(),self); self.tray.setToolTip('GamePad Studio')
-        self.navigate(5); self.refresh_gallery(); self.refresh_mappings()
+        self.navigate(5); self.refresh_gallery(); self.update_controller_ui(None)
         self.timer=QTimer(self); self.timer.timeout.connect(self.poll); self.timer.start(16)
         self.scan_timer=QTimer(self); self.scan_timer.timeout.connect(self.scan); self.scan_timer.start(1000)
         self.gallery_timer=QTimer(self); self.gallery_timer.timeout.connect(self.refresh_gallery); self.gallery_timer.start(5000)
@@ -310,7 +321,7 @@ class Studio(GlassWindow):
         title_box.setSpacing(4)
         self.controller_eyebrow = label('HARDWARE WORKSTATION', 'eyebrow')
         title_box.addWidget(self.controller_eyebrow)
-        self.controller_heading = label(CATALOG.get('dualsense', {}).get('name', 'DualSense 无线控制器'), 'productTitle')
+        self.controller_heading = label(tr('通用 XInput'), 'productTitle')
         title_box.addWidget(self.controller_heading)
 
         # Clean pro workstation header (no redundant marketing text)
@@ -343,7 +354,7 @@ class Studio(GlassWindow):
         self.home_input_feedback = label(tr('等待输入'), 'muted', True)
         h.addWidget(self.home_input_feedback)
 
-        self.photo_caption = label(PHOTOS['dualsense']['caption'], 'muted')
+        self.photo_caption = label(tr('通用 XInput 键位示意'), 'muted')
         self.photo_caption.hide()
         row.addWidget(hero, 7)
 
@@ -362,7 +373,7 @@ class Studio(GlassWindow):
         right_panel.vbox.addWidget(hdr1)
 
         self.profile_combo = QComboBox()
-        self.profile_combo.addItems(self.config['profiles'])
+        self.profile_combo.addItems(self.store.profiles_for(None))
         self.profile_combo.setCurrentText(self.config['active_profile'])
         self.profile_combo.currentTextChanged.connect(self.change_profile)
         self.profile_combo.setFixedWidth(148)
@@ -384,6 +395,7 @@ class Studio(GlassWindow):
         self.rumble_button.setFixedWidth(112)
         self.rumble_button.setMinimumHeight(36)
         row_rumble = AppleRow('wave', BADGE_COLOR, tr('触觉反馈'), '', self.rumble_button)
+        self.home_rumble_row = row_rumble
         row_rumble.setToolTip(tr('双马达触觉脉冲与响应测试'))
         right_panel.add_row(row_rumble)
 
@@ -416,10 +428,10 @@ class Studio(GlassWindow):
         self.guide_hint = QLabel()
         right_panel.add_row(self.row_guide)
 
-        self.touch_action_btn = button(tr('手势映射 ›'), lambda: self.navigate(1), pill=True)
+        self.touch_action_btn = button(tr('手势映射 ›'), lambda checked=False: self.open_touch_editor(), pill=True)
         self.touch_action_btn.setFixedWidth(112)
         self.touch_action_btn.setMinimumHeight(36)
-        self.row_touchpad = AppleRow('touchpad', BADGE_COLOR, tr('触摸板'), '', self.touch_action_btn)
+        self.row_touchpad = AppleRow('touchpad', BADGE_COLOR, tr('触摸板'), tr('设置鼠标与手势动作'), self.touch_action_btn)
         right_panel.add_row(self.row_touchpad)
         right_panel.vbox.addStretch()
         telemetry = QVBoxLayout()
@@ -461,7 +473,7 @@ class Studio(GlassWindow):
         layout.setSpacing(14)
         tools = QHBoxLayout()
         tools.setSpacing(10)
-        self.mapping_profile = label('主机体验', 'section')
+        self.mapping_profile = label(tr_profile(self.config['active_profile']), 'section')
         self.mapping_profile.hide()
         tools.addWidget(label(tr('手柄按键预设：'), 'muted'))
         self.mapping_combo = QComboBox()
@@ -505,12 +517,12 @@ class Studio(GlassWindow):
         stage.setFixedHeight(max(350, min(760, self.height() - 290)))
         body.setContentsMargins(22, 18, 22, 18)
         body.setSpacing(12)
-        self.mapping_model = label('DualSense', 'productTitle')
+        self.mapping_model = label(tr('通用 XInput'), 'productTitle')
         body.addWidget(self.mapping_model)
         body.addWidget(label(tr('点击手柄上的按键'), 'caption'))
         self.mapping_art = ControllerInput()
         self.mapping_art.setMinimumSize(240, 140)
-        self.mapping_art.button_clicked.connect(self.select_mapping)
+        self.mapping_art.input_clicked.connect(self.select_mapping)
         body.addWidget(self.mapping_art, 1)
 
         self.selected_key = 0
@@ -535,7 +547,7 @@ class Studio(GlassWindow):
         self.mapping_grid = grid
         grid.setContentsMargins(0, 0, 4, 0)
         grid.setSpacing(8)
-        for i, key in enumerate(button_order('dualsense')):
+        for i, key in enumerate([*range(64), 'LT', 'RT']):
             box = QPushButton()
             box.setObjectName('mappingTile')
             box.setCheckable(True)
@@ -546,7 +558,8 @@ class Studio(GlassWindow):
             b.setContentsMargins(14, 8, 14, 8)
             b.setSpacing(10)
 
-            name = label(self.button_names[key], 'section')
+            name = label(self.button_names.get(key, str(key + 1)) if isinstance(key, int) else
+                         trigger_label(key, 'generic'), 'section')
             name.setMinimumWidth(0)
             name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             name.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -564,8 +577,8 @@ class Studio(GlassWindow):
             grid.addWidget(box, i // 2, i % 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
-        self.mapping_input_order = button_order('dualsense')
-        self.mapping_available = set(self.mapping_input_order)
+        self.mapping_input_order = button_order('generic') + ['LT', 'RT']
+        self.mapping_available = set(range(15)) | {'LT', 'RT'}
         self.mapping_inputs = scroll(rows)
         self.mapping_inputs.setMinimumWidth(0)
         self.mapping_inputs.setMinimumHeight(190)
@@ -597,6 +610,9 @@ class Studio(GlassWindow):
             self.mapping_grid.setRowStretch(row, 0)
         for column in range(3):
             self.mapping_grid.setColumnStretch(column, 1 if column < columns else 0)
+        for box, _ in self.mapping_boxes.values():
+            self.mapping_grid.removeWidget(box)
+            box.hide()
         position = 0
         for key in self.mapping_input_order:
             box = self.mapping_boxes[key][0]
@@ -698,7 +714,7 @@ class Studio(GlassWindow):
         self.mode_combo.setMaximumWidth(270)
         self.mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.mode_combo.setMinimumContentsLength(14)
-        cap.add_row(AppleRow('camera', (TOKENS['accent'], TOKENS['accent_lo']), tr('捕获目标屏幕与范围'), tr('智能锁定游戏屏幕或双屏跨屏全景录制'), self.mode_combo))
+        cap.add_row(AppleRow('camera', (TOKENS['accent'], TOKENS['accent_lo']), tr('捕获目标屏幕与范围'), tr('选择截图范围；录制屏幕在精彩回放中单独设置。'), self.mode_combo))
 
         folder_row = QWidget()
         f_layout = QHBoxLayout(folder_row)
@@ -762,7 +778,8 @@ class Studio(GlassWindow):
         self.shutter_haptics_box = Toggle(tr('启用'))
         self.shutter_haptics_box.setChecked(bool(self.config.get('capture_haptics_enabled', True)))
         self.shutter_haptics_box.toggled.connect(lambda v: self.setting('capture_haptics_enabled', v))
-        cap.add_row(AppleRow('controller', (TOKENS['purple'], TOKENS['accent_lo']), tr('掌心触觉脉冲反馈'), tr('截图成功瞬间手柄给予 60ms 两段式物理快门轻触确认'), self.shutter_haptics_box))
+        self.shutter_haptics_row = AppleRow('controller', (TOKENS['purple'], TOKENS['accent_lo']), tr('掌心触觉脉冲反馈'), tr('截图成功瞬间手柄给予 60ms 两段式物理快门轻触确认'), self.shutter_haptics_box)
+        cap.add_row(self.shutter_haptics_row)
 
         # 屏蔽 Windows 截图与 Game Bar 弹窗开关
         from .gamebar_shield import is_gamebar_shield_active
@@ -805,6 +822,7 @@ class Studio(GlassWindow):
             colors.addWidget(b)
             self.led_buttons.append(b)
         l_layout.addLayout(colors)
+        self.led_settings_row = led_row
         hardware.add_row(led_row)
 
         rumble_row = QWidget()
@@ -818,7 +836,7 @@ class Studio(GlassWindow):
         r_top = QHBoxLayout()
         r_top.addWidget(label(tr('双马达振动强度'), 'section'))
         r_top.addStretch()
-        rumble_val = label(f"{round(self.config['rumble'] * 100)}%", 'metric')
+        rumble_val = label(f"{round(device_config(self.config, self.snapshot)['rumble'] * 100)}%", 'metric')
         rumble_val.setStyleSheet(f"font: 12px 'Cascadia Code', monospace; font-weight: 700; color: {TOKENS['accent']};")
         r_top.addWidget(rumble_val)
         r_tv.addLayout(r_top)
@@ -829,7 +847,7 @@ class Studio(GlassWindow):
         r_bottom.setSpacing(10)
         rumble_slider = QSlider(Qt.Horizontal)
         rumble_slider.setRange(0, 100)
-        rumble_slider.setValue(round(self.config['rumble'] * 100))
+        rumble_slider.setValue(round(device_config(self.config, self.snapshot)['rumble'] * 100))
         r_bottom.addWidget(rumble_slider, 1)
 
         self.feedback_rumble = button(tr('脉冲测试'), self.rumble, primary=True, icon='wave', pill=True)
@@ -842,12 +860,30 @@ class Studio(GlassWindow):
             rumble_val.setText(f"{v}%")
             self.setting('rumble', pct)
         rumble_slider.valueChanged.connect(on_rumble_change)
+        self.rumble_settings_row = rumble_row
+        self.rumble_slider = rumble_slider
+        self.rumble_value = rumble_val
         hardware.add_row(rumble_row)
+
+        self.curve_rows = {}
+        for kind, title, subtitle in (
+            ('trigger', '扳机输入曲线', '左右扳机 · 输入灵敏度与死区'),
+            ('rumble', '双马达振动曲线', '低频 / 高频 · 本应用的振动反馈'),
+            ('trigger_rumble', '扳机振动曲线', '左右扳机马达 · 默认关闭')):
+            edit = button(tr('编辑曲线'), lambda checked=False, kind=kind: self.open_curve_editor(kind), pill=True)
+            row = AppleRow('wave', ['#8b5cf6', '#6d28d9'], tr(title), tr(subtitle), edit)
+            self.curve_rows[kind] = row
+            hardware.add_row(row)
 
         self.touch_mouse_box = Toggle(tr('启用'))
         self.touch_mouse_box.setChecked(self.config['touch_mouse'])
         self.touch_mouse_box.toggled.connect(lambda value: self.setting('touch_mouse', value))
-        hardware.add_row(AppleRow('touchpad', (TOKENS['green'], TOKENS['green']), tr('触摸板手势扩展'), tr('双指轻扫模拟 Windows 鼠标指针'), self.touch_mouse_box))
+        self.touch_settings_row = AppleRow('touchpad', (TOKENS['green'], TOKENS['green']), tr('单指鼠标'), tr('单指滑动移动 Windows 鼠标指针'), self.touch_mouse_box)
+        hardware.add_row(self.touch_settings_row)
+        self.touch_gesture_settings_row = AppleRow(
+            'touchpad', (TOKENS['green'], TOKENS['green']), tr('触摸板手势'),
+            tr('单次动作映射与识别灵敏度'), button(tr('手势映射 ›'), lambda checked=False: self.open_touch_editor(), pill=True))
+        hardware.add_row(self.touch_gesture_settings_row)
 
         # 触觉拟真引擎与波形调校
         haptic_row = QWidget()
@@ -858,15 +894,15 @@ class Studio(GlassWindow):
         h_tv = QVBoxLayout()
         h_tv.setContentsMargins(0, 0, 0, 0)
         h_tv.setSpacing(6)
-        h_title = label(tr('触觉拟真引擎 (Haptic Engine)'), 'section')
+        h_title = label(tr('应用触觉反馈'), 'section')
         h_tv.addWidget(h_title)
-        h_desc = label(tr('微秒级双音圈多段触觉波形合成 (快门/棘轮/冲击/心跳)'), 'caption')
+        h_desc = label(tr('毫秒级振动脉冲 · 快门、冲击与心跳反馈'), 'caption', True)
         h_tv.addWidget(h_desc)
 
         h_btns = QHBoxLayout()
         h_btns.setSpacing(8)
         self.test_haptic_shutter = button(tr('快门触觉'), lambda: self.test_haptic_pattern('shutter'), pill=True)
-        self.test_haptic_impact = button(tr('冲击阻尼'), lambda: self.test_haptic_pattern('impact'), pill=True)
+        self.test_haptic_impact = button(tr('冲击脉冲'), lambda: self.test_haptic_pattern('impact'), pill=True)
         self.test_haptic_heart = button(tr('心跳律动'), lambda: self.test_haptic_pattern('heartbeat'), pill=True)
         h_btns.addWidget(self.test_haptic_shutter)
         h_btns.addWidget(self.test_haptic_impact)
@@ -874,7 +910,10 @@ class Studio(GlassWindow):
         h_btns.addStretch()
         h_tv.addLayout(h_btns)
         h_layout.addLayout(h_tv, 1)
+        self.haptic_settings_row = haptic_row
         hardware.add_row(haptic_row)
+        self.hardware_empty = label(tr('连接手柄后显示它支持的硬件设置。'), 'caption', True)
+        hardware.add_row(self.hardware_empty)
 
         grid.addWidget(hardware, 0, 1)
 
@@ -913,6 +952,8 @@ class Studio(GlassWindow):
             sec = v / 100
             lp_val.setText(f"{sec:.2f} " + tr('秒'))
             self.setting('long_press', sec)
+        self.long_press_slider = lp_slider
+        self.long_press_value = lp_val
         lp_slider.valueChanged.connect(on_lp_change)
         general.add_row(lp_row)
 
@@ -985,10 +1026,32 @@ class Studio(GlassWindow):
         self.replay_toggle = Toggle(tr('启用'))
         self.replay_toggle.setChecked(bool(self.config.get('replay_buffer_enabled', False)))
         def on_replay_toggle(enabled):
+            self.refresh_recording_displays()
+            selected = self.replay_mode_combo.currentData()
+            selected_row = next((row for row in self.recording_displays if selected == ('all' if row['index'] == 0 else f"monitor_{row['index']}")), None)
+            if enabled and selected_row and not selected_row.get('recording_enabled', True):
+                self.replay_toggle.blockSignals(True)
+                self.replay_toggle.setChecked(False)
+                self.replay_toggle.blockSignals(False)
+                self.notify(selected_row['recording_reason'])
+                return
             self.setting('replay_buffer_enabled', enabled)
             self._update_replay_hud()
         self.replay_toggle.toggled.connect(on_replay_toggle)
-        replay_group.add_row(AppleRow('wave', (TOKENS['purple'], TOKENS['accent_lo']), tr('4K 极清回放缓存'), tr('开启后长按 Create 键保存本地极清 MP4（若关闭则联动系统 Game Bar）'), self.replay_toggle))
+        replay_group.add_row(AppleRow('wave', (TOKENS['purple'], TOKENS['accent_lo']), tr('4K 极清回放缓存'), tr('使用当前手柄映射或“立即保存当前回放”保存本地视频。'), self.replay_toggle))
+
+        self.replay_mode_combo = QComboBox()
+        self.replay_mode_combo.setMinimumWidth(180)
+        self.replay_mode_combo.setMaximumWidth(360)
+        self.replay_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.replay_mode_combo.setMinimumContentsLength(18)
+        self.replay_mode_combo.currentIndexChanged.connect(lambda: self.setting('replay_capture_mode', self.replay_mode_combo.currentData()))
+        replay_group.add_row(AppleRow('camera', (TOKENS['accent'], TOKENS['accent_lo']), tr('录制屏幕'), tr('HDR 自动转换为标准颜色；刷新率不同的屏幕需分别录制。'), self.replay_mode_combo))
+        self.recording_displays = []
+        self.recording_display_hint = label('', 'caption', True)
+        self.recording_display_hint.setContentsMargins(16, 0, 16, 8)
+        replay_group.vbox.addWidget(self.recording_display_hint)
+        self.refresh_recording_displays()
 
         rep_min_row = QWidget()
         rm_layout = QHBoxLayout(rep_min_row)
@@ -1101,6 +1164,8 @@ class Studio(GlassWindow):
             enabled = self.config.get('replay_buffer_enabled', False)
             if not enabled:
                 status_text = '回放已关闭' if get_language() == 'zh' else 'Replay disabled'
+            elif replay_status.get('last_error'):
+                status_text = replay_status['last_error']
             elif replay_status.get('running'):
                 status_text = '回放录制中' if get_language() == 'zh' else 'Replay recording'
             else:
@@ -1110,8 +1175,52 @@ class Studio(GlassWindow):
             self.replay_hud_label.setText(
                 f"{status_text}  |  {codec.upper()} {bitrate}Mbps  |  {overhead_txt}: ~{ram_gb:.2f} GB (0 磁盘损耗)  |  {hw_core}: {enc}"
             )
+            if replay_status.get('running') and replay_status.get('color_mode'):
+                self.replay_hud_label.setText(self.replay_hud_label.text() + '  |  ' + replay_status['color_mode'])
         except Exception:
             pass
+
+    def refresh_recording_displays(self):
+        from .display_info import enumerate_displays, match_monitors, format_refresh
+        import mss
+        try:
+            with mss.mss() as capture:
+                rows = match_monitors(capture.monitors, enumerate_displays())
+        except Exception:
+            rows = [{'index': 0, 'recording_enabled': False,
+                     'recording_reason': tr('无法确认所有显示器的刷新率，请选择单个屏幕录制')}]
+        self.recording_displays = rows
+        if rows and rows[0].get('recording_enabled') and rows[0].get('display_count', 0) > 1 and rows[0].get('hdr_enabled'):
+            rows[0]['recording_enabled'] = False
+            rows[0]['recording_reason'] = tr('HDR 跨屏录制暂不支持，请选择单个屏幕录制')
+        current = self.config.get('replay_capture_mode') or self.config.get('capture_mode', 'game')
+        self.replay_mode_combo.blockSignals(True)
+        self.replay_mode_combo.clear()
+        self.replay_mode_combo.addItem(tr('跟随游戏所在屏幕'), 'game')
+        for row in rows:
+            index = row['index']
+            if index == 0:
+                title, mode = tr('0 号 · 全部屏幕'), 'all'
+            else:
+                hdr = 'HDR' if row.get('hdr_enabled') is True else 'SDR' if row.get('hdr_enabled') is False else tr('色彩待检测')
+                title = f"{tr('屏幕')} {index} · {format_refresh(row.get('refresh_hz'))} · {hdr}"
+                mode = f'monitor_{index}'
+            self.replay_mode_combo.addItem(title, mode)
+            item = self.replay_mode_combo.model().item(self.replay_mode_combo.count() - 1)
+            item.setEnabled(row.get('recording_enabled', True))
+            item.setToolTip(row.get('recording_reason') or row.get('friendly_name') or title)
+        index = self.replay_mode_combo.findData(current)
+        if index < 0:
+            self.replay_mode_combo.addItem(tr('录制屏幕已断开'), current)
+            index = self.replay_mode_combo.count() - 1
+            self.replay_mode_combo.model().item(index).setEnabled(False)
+            rows.append({'index': int(current.split('_')[-1]) if isinstance(current, str) and current.startswith('monitor_') and current.split('_')[-1].isdigit() else -1,
+                         'recording_enabled': False, 'recording_reason': tr('录制屏幕已断开')})
+        self.replay_mode_combo.setCurrentIndex(index)
+        self.replay_mode_combo.blockSignals(False)
+        reason = rows[0].get('recording_reason', '') if rows else ''
+        self.recording_display_hint.setText(reason)
+        self.recording_display_hint.setVisible(bool(reason))
 
     def trigger_manual_replay(self):
         if self.remote:
@@ -1129,13 +1238,68 @@ class Studio(GlassWindow):
             self.notify(tr("已触发系统回放录制 (Win+Alt+G)"))
 
     def test_haptic_pattern(self, pattern: str):
+        if not self.snapshot or not self.snapshot.get('rumble'):
+            self.notify(tr('此设备暂时无法预览振动。'))
+            return
         if self.remote:
-            self.client.send('test_haptics', pattern=pattern)
+            self.client.send('test_haptics', pattern=pattern, device_scope=profile_scope(self.snapshot),
+                             instance_id=self.snapshot.get('instance_id'))
         else:
             if hasattr(self, 'haptic_engine'):
                 self.haptic_engine.trigger_feedback(pattern)
-        names = {'shutter': '快门触觉微脉冲', 'impact': '重度撞击阻尼', 'heartbeat': '心跳仿真律动'}
-        self.notify(tr('已触发触觉波形：') + tr(names.get(pattern, pattern)))
+        names = {'shutter': '快门触觉微脉冲', 'impact': '冲击振动脉冲', 'heartbeat': '心跳仿真律动'}
+        self.notify(tr('已请求振动测试：') + tr(names.get(pattern, pattern)))
+
+    def open_curve_editor(self, kind, channel=None):
+        if supports_curve(self.snapshot, kind):
+            dialog = CurveDialog(self, kind)
+            if channel is not None:
+                index = dialog.channel_combo.findData(channel)
+                if index >= 0:
+                    dialog.channel_combo.setCurrentIndex(index)
+            dialog.exec()
+            dialog.deleteLater()
+
+    def open_touch_editor(self, profile=None, mode=None):
+        if not supports_touch(self.snapshot):
+            return False
+        if profile is None:
+            from .studio_core import profile_mode
+            if mode is None:
+                page = self.stack.currentIndex()
+                mode = ('kbm' if page == 6 else 'gamepad' if page == 1 else
+                        profile_mode(self.config, self.config.get('active_profile', '')))
+            profile = self.virtual_kbm_page.current_scheme() if mode == 'kbm' else self.current_gamepad_profile()
+        if profile not in self.store.profiles_for(self.snapshot):
+            return False
+        if self.remote:
+            self.client.send('suspend', seconds=2)
+        self.engine.reset()
+        self.actions.release_all()
+        dialog = TouchGestureDialog(self, profile)
+        dialog.exec()
+        dialog.deleteLater()
+        if self.remote:
+            self.client.send('suspend', seconds=2 if QApplication.activeModalWidget() is not None else 0)
+        return True
+
+    def preview_response_curve(self, kind, channel, curve, strength=.55):
+        if not supports_curve(self.snapshot, kind):
+            return False
+        try:
+            if self.remote:
+                result = request(self.store.root, 'preview_curve', kind=kind, channel=channel,
+                                 curve=normalize_curve(curve), strength=strength,
+                                 device_scope=profile_scope(self.snapshot),
+                                 instance_id=self.snapshot.get('instance_id'), timeout=1500)
+                return bool(result and result.get('ok') and result.get('supported'))
+            from .curve_preview import preview_response_curve
+            return preview_response_curve(self.device, device_config(self.config, self.snapshot),
+                                          self.snapshot, kind, channel, normalize_curve(curve),
+                                          strength, self.haptic_engine)
+        except (ValueError, TypeError, RuntimeError) as exc:
+            self.notify(str(exc))
+            return False
 
     def on_toggle_gamebar_shield(self, checked: bool):
         from .gamebar_shield import set_gamebar_shield
@@ -1179,7 +1343,7 @@ class Studio(GlassWindow):
             msg = (
                 "在手柄图库中选择设备。当前一次只为所选手柄执行映射，切换或断开时释放按键。\n\n"
                 "PS：Create / Share 截图。Xbox：独立 Share 截图；未提供 Share 时保留原始按键，可自定义映射。Switch：优先 Capture，否则使用 −。\n\n"
-                "预设按型号保存。点击映射页的手柄按键或按键列表，再点编辑。恢复默认只影响当前预设。\n\n"
+                "预设按输入设备独立保存。点击映射页的手柄按键或按键列表，再点编辑。恢复默认只影响当前预设。\n\n"
                 "后台随登录运行，关闭窗口不影响映射。键盘映射不屏蔽原始输入，Xbox 键的系统功能由 Windows 管理。游戏触觉和自适应扳机取决于游戏支持。\n\n"
                 "产品图片来自品牌官网，通用手柄使用标注的示例机型。"
             )
@@ -1191,7 +1355,7 @@ class Studio(GlassWindow):
             if self.remote:self.client.send('select_device',instance_id=instance)
             else:
                 self.engine.reset();self.actions.release_all();self.device.select(instance);self.poll()
-                if self.snapshot:self.setting('preferred_controller',self.snapshot['profile_key'])
+                if self.snapshot:self.setting('preferred_controller',self.snapshot.get('device_key', self.snapshot['profile_key']))
         except (ValueError,RuntimeError) as exc:self.notify(str(exc))
 
     def rescan_controllers(self):
@@ -1199,53 +1363,59 @@ class Studio(GlassWindow):
         else:self.scan();self.poll()
 
     def update_controller_ui(self,state):
-        family=(state.get('family','dualsense') if state else
-                self.config.get('profile_families',{}).get(self.config['active_profile'],'dualsense'))
-        if family not in CATALOG:family='generic'
-        self.button_names=button_labels(family,state.get('controller_type',0) if state else 0)
-        if state:
-            self.controller_heading.setText(CATALOG[family]['name']);self.controller_heading.setToolTip(state['name'])
-            if self.remote:
-                latest = ConfigStore(self.store.root)
-                self.store.data.clear(); self.store.data.update(latest.data)
-                self.store._baseline = copy.deepcopy(latest.data)
-            else:self.store.activate_controller(state);self.store.save()
-        else:
-            self.controller_heading.setText(CATALOG[family]['name'])
-            self.controller_heading.setToolTip(tr('上次使用的型号 · 当前未连接'))
-        self.art.set_family(family);self.mapping_art.set_family(family);self.photo_caption.setText(PHOTOS[family]['caption'])
-        self.mapping_model.setText(CATALOG[family]['name']);self.mapping_model.setToolTip(state['name'] if state else tr('上次使用的型号 · 当前未连接'))
-        for combo in (self.profile_combo,self.mapping_combo):
-            combo.blockSignals(True);combo.clear();combo.addItems(self.store.profiles_for(state));combo.setCurrentText(self.config['active_profile']);combo.blockSignals(False)
-        if state:
-            available=set(state.get('available_buttons',BUTTONS))
-        else:
-            available=set(range(15))
-            if family=='xbox' and '15' in self.store.mappings:available.add(15)
-            elif family in ('dualsense','dualshock4'):available.update((15,20))
-            elif family!='xbox':available.add(15)
-        self.mapping_art.available=available
-        self.mapping_input_order = button_order(family)
-        self.mapping_available = available
-        for key in button_order(family):
-            box,title=self.mapping_boxes[key]
-            title.setText(self.button_names[key])
-            box.setAccessibleName(self.button_names[key]);box.setToolTip(self.button_names[key])
+        self.device_capabilities_signature = self._device_ui_signature(state)
+        family = profile_family(self.config, state)
+        self.button_names = button_labels(family, state.get('controller_type', 0) if state else 0)
+        if self.remote and state:
+            latest = ConfigStore(self.store.root)
+            self.store.data.clear(); self.store.data.update(latest.data)
+            self.store._baseline = copy.deepcopy(latest.data)
+        self.store.activate_controller(state)
+        if not self.remote:
+            self.store.save()
+        title = CATALOG[family]['name'] if state else tr('通用 XInput')
+        description = state.get('name', title) if state else tr('未连接设备 · 通用 XInput 键位预览')
+        self.controller_heading.setText(title)
+        self.controller_heading.setToolTip(description)
+        self.art.set_family(family); self.mapping_art.set_family(family)
+        self.photo_caption.setText(PHOTOS[family]['caption'] if state else tr('通用 XInput 键位示意'))
+        self.mapping_model.setText(title); self.mapping_model.setToolTip(description)
+        sources = set(input_sources(state))
+        available = {int(key) for key in sources if key.isdigit()}
+        self.mapping_sources = sources
+        self.mapping_art.available = sources
+        order = button_order(family)
+        insert = order.index(10) + 1 if 10 in order else len(order)
+        order[insert:insert] = ['LT', 'RT']
+        self.mapping_input_order = order + [key for key in sorted(available) if key not in order]
+        self.mapping_available = available | (sources & {'LT', 'RT'})
+        for key in self.mapping_input_order:
+            if key not in self.mapping_boxes:
+                continue
+            box, title_label = self.mapping_boxes[key]
+            name = self.button_names.get(key, str(key + 1)) if isinstance(key, int) else trigger_label(key, family)
+            title_label.setText(name)
+            box.setAccessibleName(name); box.setToolTip(name)
         self.reflow_mapping_inputs()
         self.learn_button.setEnabled(True)
         previous_trigger = self.mapping_deck.selected_trigger
-        numeric_members = {int(part) for part in previous_trigger.split('+') if part.isdigit()}
-        if '+' in previous_trigger and numeric_members.issubset(available):
+        if set(previous_trigger.split('+')).issubset(sources):
             self.select_mapping_trigger(previous_trigger)
         else:
-            self.select_mapping(self.selected_key if self.selected_key in available else next(iter(sorted(available)),0))
-        for button in self.led_buttons:button.setEnabled(bool(state and state['led']));button.setToolTip(tr('灯条颜色') if state and state['led'] else tr('设备未提供灯条控制'))
-        self.feedback_rumble.setEnabled(bool(state and state['rumble']))
+            fallback = str(self.selected_key) if str(self.selected_key) in sources else next(iter(input_sources(state)), '0')
+            if sources:
+                self.select_mapping(fallback)
+            else:
+                self.mapping_art.select_buttons([])
+                for box, _ in self.mapping_boxes.values():
+                    box.setChecked(False)
+        self.refresh_device_settings_ui(state)
+        self.feedback_rumble.setEnabled(bool(state and state.get('rumble')))
         for control in (self.test_haptic_shutter, self.test_haptic_impact, self.test_haptic_heart):
             control.setEnabled(bool(state and state.get('rumble')))
             control.setToolTip(tr('双马达触觉脉冲与响应测试') if state and state.get('rumble') else tr('未连接手柄'))
-        self.touch_mouse_box.setEnabled(bool(state and state.get('touchpad',False)))
-        self.touch_mouse_box.setToolTip(tr('触摸板鼠标') if state and state.get('touchpad') else tr('设备未提供触摸板'))
+        self.touch_mouse_box.setEnabled(supports_touch(state))
+        self.touch_mouse_box.setToolTip(tr('触摸板鼠标') if supports_touch(state) else tr('设备未提供触摸板'))
 
         # Update Guide key and Touchpad row dynamically according to controller family
         if hasattr(self, 'guide_heading'):
@@ -1279,12 +1449,21 @@ class Studio(GlassWindow):
         if hasattr(self, 'controller_features'):
             self.controller_features.hide()
         if hasattr(self, 'row_touchpad'):
-            has_touchpad = family in ('dualsense', 'dualshock4') or bool(state and state.get('touchpad', False))
+            has_touchpad = supports_touch(state)
             self.row_touchpad.setVisible(has_touchpad)
             if hasattr(self.row_touchpad, '_associated_divider') and self.row_touchpad._associated_divider:
                 self.row_touchpad._associated_divider.setVisible(has_touchpad)
 
         self.refresh_mappings()
+
+    @staticmethod
+    def _device_ui_signature(state):
+        if not state:
+            return None
+        capabilities = curve_capabilities(state)
+        return (state.get('family'), state.get('controller_type'), tuple(input_sources(state)),
+                tuple(capabilities['trigger_axes']), capabilities['rumble'], capabilities['trigger_rumble'],
+                bool(state.get('led')), bool(state.get('touchpad')))
 
     def toggle_autostart(self,enabled):
         try:
@@ -1303,7 +1482,7 @@ class Studio(GlassWindow):
         kind=message.get('type')
         if kind=='state' and hasattr(self,'replay_hud_label'):
             replay = message.get('replay', {})
-            signature = (replay.get('running'), replay.get('encoder'))
+            signature = (replay.get('running'), replay.get('encoder'), replay.get('last_error'), replay.get('color_mode'))
             if signature != getattr(self, '_replay_hud_signature', None):
                 self._replay_hud_signature = signature
                 self._update_replay_hud()
@@ -1345,12 +1524,13 @@ class Studio(GlassWindow):
                         '检查按键、摇杆和扳机的实时响应。',
                         '管理捕获、触觉反馈与后台服务，修改后自动保存。',
                         '连接设备，选择你的手柄并进入工作空间。',
-                        '点击目标按键，再按下手柄按钮完成绑定。']
+                        '点击目标按键，选择或录入手柄按键、触摸手势。']
         self.stack.setCurrentIndex(index)
         self.page_heading.setText(tr(headings[index]))
         self.page_description.setText(tr(descriptions[index]))
         for i,b in self.nav.items(): b.setChecked(i==index)
         if index==2: self.refresh_gallery()
+        if index==4: self.refresh_recording_displays()
         if hasattr(self, 'virtual_kbm_page'):
             if index == 6:
                 self.virtual_kbm_page.refresh_display()
@@ -1411,10 +1591,86 @@ class Studio(GlassWindow):
         with (self.store.root/'events.jsonl').open('a',encoding='utf-8') as file: file.write(json.dumps(self.log_rows[-1],ensure_ascii=False)+'\n')
 
     def setting(self,key,value):
-        self.config[key]=value; self.store.save()
+        self.store.set_setting(key, value, self.snapshot)
+        self.store.save()
         if self.remote:self.client.send('reload')
         if key=='long_press': self.engine.threshold=value
         if key=='touch_mouse': self.last_touch=None
+        if not self.remote and (key in DEVICE_SETTING_KEYS or key == 'capture_sound_enabled'):
+            self.apply_device_feedback_settings(self.snapshot)
+
+    def apply_device_feedback_settings(self, state):
+        if self.remote:
+            return
+        settings = device_config(self.config, state)
+        if hasattr(self.device, 'set_response_curves'):
+            self.device.set_response_curves(settings)
+        if hasattr(self, 'haptic_engine'):
+            self.haptic_engine.set_config(
+                sound_enabled=settings.get('capture_sound_enabled', True),
+                haptics_enabled=bool(state and state.get('rumble')
+                                     and settings.get('haptic_engine_enabled', True)
+                                     and settings.get('capture_haptics_enabled', True)),
+                intensity=settings.get('haptic_intensity', 1.),
+                profile=settings.get('haptic_profile', 'crisp'),
+                trigger_rumble_enabled=bool(state and state.get('trigger_rumble')
+                                           and settings.get('trigger_rumble_enabled', False)))
+
+    @staticmethod
+    def _show_device_row(row, visible):
+        row.setVisible(visible)
+        divider = getattr(row, '_associated_divider', None)
+        if divider is not None:
+            divider.setVisible(visible)
+
+    def refresh_device_settings_ui(self, state):
+        settings = device_config(self.config, state)
+        capabilities = curve_capabilities(state)
+        has_led = bool(state and state.get('led'))
+        has_rumble = bool(state and state.get('rumble'))
+        has_touch = supports_touch(state)
+        for row, visible in ((self.led_settings_row, has_led),
+                             (self.rumble_settings_row, has_rumble),
+                             (self.haptic_settings_row, has_rumble),
+                             (self.shutter_haptics_row, has_rumble),
+                             (self.home_rumble_row, has_rumble),
+                             (self.touch_settings_row, has_touch),
+                             (self.touch_gesture_settings_row, has_touch)):
+            self._show_device_row(row, visible)
+        self.touch_action_btn.setEnabled(has_touch)
+        self.touch_gesture_settings_row.control.setEnabled(has_touch)
+        if hasattr(self, 'virtual_kbm_page'):
+            self.virtual_kbm_page.refresh_touch_action(state)
+        for kind, row in self.curve_rows.items():
+            supported = bool(capabilities['trigger_axes']) if kind == 'trigger' else capabilities[kind]
+            self._show_device_row(row, supported)
+            row.control.setEnabled(supported)
+        self.curve_rows['trigger_rumble'].subtitle_label.setText(
+            tr('左右扳机马达 · 应用反馈已启用') if settings.get('trigger_rumble_enabled') else
+            tr('左右扳机马达 · 默认关闭'))
+        self.hardware_empty.setVisible(not (has_led or has_rumble or has_touch or capabilities['trigger_axes']
+                                            or capabilities['trigger_rumble']))
+        for control, value in ((self.rumble_slider, round(settings['rumble'] * 100)),
+                               (self.long_press_slider, round(settings['long_press'] * 100))):
+            control.blockSignals(True)
+            control.setValue(value)
+            control.blockSignals(False)
+        self.rumble_value.setText(f"{round(settings['rumble'] * 100)}%")
+        self.long_press_value.setText(f"{settings['long_press']:.2f} " + tr('秒'))
+        for control, value in ((self.touch_mouse_box, settings['touch_mouse']),
+                               (self.shutter_haptics_box, settings['capture_haptics_enabled'])):
+            control.blockSignals(True)
+            control.setChecked(bool(value))
+            control.blockSignals(False)
+        self.rumble_slider.setEnabled(has_rumble)
+        self.shutter_haptics_box.setEnabled(has_rumble)
+        for swatch in self.led_buttons:
+            swatch.setEnabled(has_led)
+            swatch.set_selected(swatch.color == settings['led'])
+        self.art.set_led(settings['led']); self.mapping_art.set_led(settings['led'])
+        if has_led and not self.remote:
+            self.device.led(settings['led'])
+        self.apply_device_feedback_settings(state)
 
     def scan(self):
         try: self.device.scan()
@@ -1429,14 +1685,15 @@ class Studio(GlassWindow):
     def poll(self):
         try:
             state=self.device.read(); self.snapshot=state; connected=state is not None
-            identity=(state.get('instance_id'),state.get('family')) if state else None
+            identity=(state.get('instance_id'),profile_scope(state)) if state else None
             profile_changed=self.remote and (self.client.status.get('profile',self.config['active_profile'])!=self.config['active_profile'] or self.client.status.get('mapping_revision',0)!=self.config.get('mapping_revision',0))
             if profile_changed:
                 latest=ConfigStore(self.store.root);self.store.data.clear();self.store.data.update(latest.data);self.store._baseline=copy.deepcopy(latest.data)
-            if identity!=self.device_identity or profile_changed:
+            capabilities_changed = self._device_ui_signature(state) != getattr(self, 'device_capabilities_signature', None)
+            if identity!=self.device_identity or profile_changed or capabilities_changed:
                 self.engine.reset();self.actions.release_all();self.last_buttons=set();self.device_identity=identity
                 self.update_controller_ui(state)
-            self.controllers.set_devices(self.device.available,state.get('instance_id') if state else None)
+            self.controllers.set_devices(self.device.available,state.get('instance_id') if state else None,state)
             if self.remote:
                 online=self.client.connected; self.enabled=self.client.status.get('enabled',False)
                 self.agent_status.setText(tr('运行中') if online else tr('已停止')); self.agent_toggle.setText(tr('停止后台') if online else tr('启动后台'))
@@ -1456,7 +1713,7 @@ class Studio(GlassWindow):
                 self.engine.reset(); self.actions.release_all(); self.last_touch=None
                 self.previous_connected=connected
                 self.notify(tr('已连接 ') + state['name'] if connected else tr('手柄已断开，等待重新连接'))
-                if connected and state['led'] and not self.remote: self.device.led(self.config['led'])
+                if connected and state.get('led') and not self.remote: self.device.led(device_config(self.config, state)['led'])
             self.home_connection_hint.setText(tr('按下手柄按键查看实时反馈，或进入按键配置调整动作。') if connected else tr('连接手柄后，即可查看状态并配置按键。'))
             if connected:
                 dev_name = state.get('name', tr('手柄'))
@@ -1479,7 +1736,7 @@ class Studio(GlassWindow):
                 if hasattr(self, 'status_capsule'):
                     self.status_capsule.setStyleSheet(f"QWidget#statusCapsule {{ border: 1px solid {TOKENS['border']}; background: {TOKENS['surface']}; border-radius: 18px; }}")
             self.side_status.setText(tr('●  已连接') if connected else tr('○  未连接'))
-            self.rumble_button.setEnabled(bool(state and state['rumble']))
+            self.rumble_button.setEnabled(bool(state and state.get('rumble')))
             self.tester.update_state(state,collect=self.stack.currentIndex()==3 and self.isVisible() and not self.isMinimized())
             self.mapping_art.update_state(state)
             if hasattr(self, 'matrix'):
@@ -1511,7 +1768,7 @@ class Studio(GlassWindow):
             if events:
                 from .mapping_engine import trigger_label
                 last=events[-1]
-                message=trigger_label(last['trigger'],(state or {}).get('family','dualsense'))+' '+('长按' if last.get('gesture')=='long' else '短按')+' → '+last.get('action','')
+                message=trigger_label(last['trigger'],(state or {}).get('family','generic'))+' '+('长按' if last.get('gesture')=='long' else '短按')+' → '+last.get('action','')
                 message=('安全试按 · ' if feedback.get('preview') else '')+message
                 self.mapping_feedback.setText(message); self.home_input_feedback.setText(message)
             elif not state:
@@ -1580,13 +1837,13 @@ class Studio(GlassWindow):
     def current_gamepad_profile(self):
         from .studio_core import profile_mode
         active = self.config.get('active_profile', '')
-        if profile_mode(self.config, active) == 'gamepad':
+        gamepad_profiles = self.store.profiles_for(self.snapshot, mode='gamepad')
+        if active in gamepad_profiles:
             return active
         combo_text = self.mapping_combo.currentText()
-        if combo_text and profile_mode(self.config, combo_text) == 'gamepad':
+        if combo_text in gamepad_profiles:
             return combo_text
-        gamepad_profiles = self.store.profiles_for(self.snapshot, mode='gamepad')
-        return gamepad_profiles[0] if gamepad_profiles else active
+        return gamepad_profiles[0] if gamepad_profiles else ''
 
     def on_mapping_combo_changed(self, name):
         if not name:
@@ -1673,17 +1930,28 @@ class Studio(GlassWindow):
         return tr(base)
 
     def select_mapping(self,key):
-        self.selected_key=key
-        self.mapping_deck.set_trigger(str(key))
         self.select_mapping_trigger(str(key))
 
     def select_mapping_trigger(self, trigger):
-        keys = {int(part) for part in trigger.split('+') if part.isdigit()}
+        try:
+            trigger = canonical_trigger(trigger)
+        except ValueError:
+            return False
+        members = set(trigger.split('+'))
+        if not members.issubset(getattr(self, 'mapping_sources', set(input_sources(self.snapshot)))):
+            return False
+        if self.mapping_deck.selected_trigger != trigger:
+            self.mapping_deck.set_trigger(trigger)
         for number, (box, _) in self.mapping_boxes.items():
-            box.setChecked(number in keys)
-        self.mapping_art.select_buttons(keys)
-        if len(keys) == 1:
-            self.selected_key = next(iter(keys))
+            box.setChecked(str(number) in members)
+        self.mapping_art.select_buttons(members)
+        if len(members) == 1:
+            member = next(iter(members))
+            self.selected_key = int(member) if member.isdigit() else member
+            selected_box = self.mapping_boxes.get(self.selected_key)
+            if selected_box and not selected_box[0].isHidden():
+                self.mapping_inputs.ensureWidgetVisible(selected_box[0], 0, 8)
+        return True
 
     def _on_nav_mapping_clicked(self):
         from .studio_core import profile_mode
@@ -1763,8 +2031,7 @@ class Studio(GlassWindow):
 
         target_gamepad = self.current_gamepad_profile()
         compact = self.compact_binding
-        family = (self.snapshot.get('family', 'dualsense') if self.snapshot else
-                  self.config.get('profile_families', {}).get(target_gamepad, 'dualsense'))
+        family = (profile_family(self.config, self.snapshot, target_gamepad))
         gamepad_entries = effective_mappings(self.config, self.snapshot, target_gamepad)
         for key, info in self.mapping_labels.items():
             entry = gamepad_entries.get(str(key), {})
@@ -1774,7 +2041,7 @@ class Studio(GlassWindow):
             info.setVisible(not original)
             info.setText('' if original else '●')
             info.setToolTip(f"{tr('短按')}：{short}\n{tr('长按')}：{long}")
-            self.mapping_boxes[key][0].setToolTip(self.button_names.get(key, str(key)) + '\n' + info.toolTip())
+            self.mapping_boxes[key][0].setToolTip(trigger_label(str(key), family) + '\n' + info.toolTip())
         self.select_mapping_trigger(self.mapping_deck.selected_trigger)
         if hasattr(self, 'row_guide'):
             guide = gamepad_entries.get('5', {})
@@ -1814,7 +2081,7 @@ class Studio(GlassWindow):
     def mapping_change(self, change):
         try:
             if self.remote:
-                result = request(self.store.root, 'mapping_change', change=change)
+                result = request(self.store.root, 'mapping_change', change=change, device_scope=profile_scope(self.snapshot))
                 if not result or not result.get('ok', True) or 'config' not in result:
                     raise ValueError((result or {}).get('error', '后台未连接，修改尚未保存'))
                 data = result['config']
@@ -1824,17 +2091,25 @@ class Studio(GlassWindow):
                 self.engine.reset()
                 self.store.apply_mapping_change(change, self.snapshot)
             self.refresh_mappings()
-            self.notify('映射已保存')
+            if (change.get('op') == 'binding' and str(change.get('trigger', '')).startswith('TP:') and
+                    change.get('mapping', {}).get('short', {}).get('action', 'none') not in ('none', 'suppress')):
+                self.notify('手势已绑定并启用' if self.config.get('active_profile') == change.get('profile')
+                            else '手势已绑定；此预设尚未生效，请设为当前生效。')
+            else:
+                self.notify('映射已保存')
             return True
         except (ValueError, OSError) as exc:
             self.notify(str(exc)); return False
 
     def edit_mapping(self, key, new=False, output=None, capture=False, profile=None, mode=None):
+        target_profile = profile or (self.virtual_kbm_page.current_scheme() if self.stack.currentIndex() == 6 else self.current_gamepad_profile())
+        if target_profile not in self.store.profiles_for(self.snapshot):
+            self.notify(tr('输入设备已变化，请重新打开映射编辑。'))
+            return
         if self.remote:
             self.client.send('suspend', seconds=2)
         self.engine.reset()
         self.actions.release_all()
-        target_profile = profile or (self.virtual_kbm_page.current_scheme() if self.stack.currentIndex() == 6 else self.current_gamepad_profile())
         from .studio_core import profile_mode
         target_mode = mode or profile_mode(self.config, target_profile)
         mapping = {} if new else effective_mappings(self.config, self.snapshot, target_profile).get(str(key), {})
@@ -1849,8 +2124,9 @@ class Studio(GlassWindow):
                 'previous_trigger': None if new else str(key),
                 'mapping': dialog.value()
             })
+        dialog.deleteLater()
         if self.remote:
-            self.client.send('suspend', seconds=0)
+            self.client.send('suspend', seconds=2 if QApplication.activeModalWidget() is not None else 0)
 
     def capture(self):
         if self.remote:
@@ -2079,11 +2355,11 @@ class Studio(GlassWindow):
         if path: self.setting('save_dir',path); self.folder_label.setText(path);self.folder_button.setText(tr('截图位置：')+path); self.gallery_signature=None; self.refresh_gallery(); self.notify(tr('截图目录已更新'))
 
     def rumble(self):
-        if self.remote:self.client.send('rumble',strength=self.config['rumble']);return
-        self.notify(tr('已发送 350 ms 振动测试') if self.device.rumble(self.config['rumble']) else tr('当前设备暂不支持振动或尚未连接'))
+        if self.remote:self.client.send('rumble',strength=device_config(self.config, self.snapshot)['rumble'], device_scope=profile_scope(self.snapshot));return
+        self.notify(tr('已发送 350 ms 振动测试') if self.device.rumble(device_config(self.config, self.snapshot)['rumble']) else tr('当前设备暂不支持振动或尚未连接'))
 
     def test_rumble(self,strength):
-        if self.remote:self.client.send('rumble',strength=strength)
+        if self.remote:self.client.send('rumble',strength=strength, device_scope=profile_scope(self.snapshot))
         else:self.device.rumble(strength)
 
     def set_led(self,color):
@@ -2092,7 +2368,7 @@ class Studio(GlassWindow):
             if hasattr(b, 'set_selected'):
                 b.set_selected(getattr(b, 'color', None) == color)
         if self.remote:
-            self.setting('led',color);self.client.send('led',color=color);return
+            self.setting('led',color);self.client.send('led',color=color, device_scope=profile_scope(self.snapshot));return
         if self.device.led(color):
             self.setting('led',color); self.notify(tr('灯条颜色已更新'))
         else: self.notify(tr('当前设备暂不支持灯条控制或尚未连接'))
@@ -2123,6 +2399,8 @@ class Studio(GlassWindow):
                 pass
         self.engine.reset(); self.actions.release_all()
         self.engine.close()
+        if hasattr(self, 'haptic_engine'):
+            self.haptic_engine.close()
         self.device.close(); self.tray.hide()
         if self.worker and self.worker.isRunning(): self.worker.wait()
 

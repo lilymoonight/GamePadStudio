@@ -11,6 +11,7 @@ from gamepadstudio import i18n
 from gamepadstudio.i18n import tr, tr_button, tr_profile, init_language, set_language, get_language, is_english
 from gamepadstudio.controller_catalog import button_labels, axis_labels, get_catalog_entry
 from gamepadstudio.studio_core import get_action_names, get_buttons
+from gamepadstudio.kbm_mapper import NIKKI_PROFILE_NAME
 from gamepadstudio.glass import Indicator, TOKENS
 from gamepadstudio.studio import Studio
 
@@ -149,9 +150,13 @@ def test_studio_gui_english_initialization(qapp, tmp_path):
         assert 'Virtual KBM' in tooltips
         assert 'Controller Library' in tooltips
 
-        # Test changing profile by English name
-        win.change_profile('Console Standard')
-        assert win.config['active_profile'] == '主机体验'
+        # English display still selects the device's stored profile identity.
+        # With no device attached the available native preview is XInput.
+        assert win.config['active_profile'] == 'XInput · 默认'
+        win.change_profile(NIKKI_PROFILE_NAME)
+        assert win.config['active_profile'] == NIKKI_PROFILE_NAME
+        win.change_profile('XInput · 默认')
+        assert win.config['active_profile'] == 'XInput · 默认'
 
         # Test language selector change to Simplified Chinese
         zh_index = win.lang_combo.findText('简体中文 (Simplified Chinese)')

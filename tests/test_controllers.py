@@ -1,7 +1,7 @@
 import ctypes as C
 import pytest
 from gamepadstudio.controller_catalog import family_for,button_labels,controller_defaults,desktop_defaults,axis_labels
-from gamepadstudio.studio_core import ConfigStore
+from gamepadstudio.studio_core import ConfigStore, is_nikki_profile
 from gamepadstudio.kbm_mapper import NIKKI_PROFILE_NAME
 from gamepadstudio.device import Device
 
@@ -24,9 +24,10 @@ def test_xbox_backend_upgrade_retains_current_profile(tmp_path):
     assert store.data['active_profile'] == 'My Xbox'
     assert store.mappings['0']['short']['value'] == 'Enter'
     # Once migrated, a later deliberate profile selection stays in effect.
-    store.remember_profile(state, '主机体验')
+    store.apply_mapping_change({'op': 'create', 'profile': 'My second Xbox',
+                                'source': 'My Xbox', 'mode': 'gamepad'}, state)
     store.activate_controller(state)
-    assert store.data['active_profile'] == '主机体验'
+    assert store.data['active_profile'] == 'My second Xbox'
 
 
 def test_face_positions_and_capture_fallback():
@@ -76,8 +77,10 @@ def test_xbox_legacy_default_migration_and_profile_isolation(tmp_path):
     state=dict(family='xbox',profile_key='xbox:driver',available_buttons=list(range(15)))
     store.activate_controller(state)
     assert store.mappings=={} and store.data['profiles']['主机体验']==original_ps
-    assert set(store.profiles_for(state)) == {NIKKI_PROFILE_NAME, 'Xbox · 默认'}
-    assert store.profiles_for(state, 'kbm') == [NIKKI_PROFILE_NAME]
+    keyboard = store.profiles_for(state, 'kbm')
+    assert len(keyboard) == 1 and is_nikki_profile(store.data, keyboard[0])
+    assert set(store.profiles_for(state)) == {keyboard[0], 'Xbox · 默认'}
+    assert NIKKI_PROFILE_NAME not in store.profiles_for(state)
     store.mappings['4']={'short':{'action':'shortcut','value':'F12'}};store.save()
     again=ConfigStore(tmp_path);again.activate_controller(state)
     assert again.mappings['4']['short']['value']=='F12'

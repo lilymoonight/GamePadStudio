@@ -1,10 +1,9 @@
-"""GamepadTester Controller Catalog — Clean product cards with live status."""
-from PySide6.QtCore import Qt, QTimer, QUrl, QVariantAnimation, QEasingCurve, QSize
-from PySide6.QtGui import QDesktopServices
+"""Connected input devices and the selected device's settings entry."""
+from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QEasingCurve, QSize
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QLineEdit, QComboBox, QScrollArea, QDialog, QSizePolicy,
                                QPushButton)
-from .controller_photo import ControllerPhoto, PHOTOS
+from .controller_photo import ControllerPhoto
 from .controller_catalog import CATALOG, get_catalog_entry
 from .glass import GlassPanel, IconButton, Indicator, glyph, TOKENS, tag_style
 from .i18n import tr, get_language
@@ -102,6 +101,7 @@ class ControllerGallery(QWidget):
         self.favorites = set(favorites)
         self.devices = []
         self.active = None
+        self.active_state = None
         self.signature = None
         self.columns = 0
         self.empty_state = False
@@ -125,7 +125,7 @@ class ControllerGallery(QWidget):
 
         # Keep the selection model available to integrations and keyboard users.
         self.filter = QComboBox(self)
-        self.filter.addItems([tr('全部手柄'), tr('已连接'), tr('我的收藏')])
+        self.filter.addItems([copy('当前设备', 'Current device'), tr('已连接'), tr('我的收藏')])
         self.filter.hide()
         self.filter_group = QWidget()
         filters = QHBoxLayout(self.filter_group)
@@ -163,7 +163,7 @@ class ControllerGallery(QWidget):
 
         catalog_head = QHBoxLayout()
         catalog_head.setContentsMargins(2, 0, 2, 0)
-        catalog_title = text(copy('型号与兼容性', 'Models & compatibility'), 'section')
+        catalog_title = text(copy('当前输入设备', 'Current input device'), 'section')
         catalog_title.setMinimumHeight(24)
         catalog_head.addWidget(catalog_title)
         catalog_head.addStretch()
@@ -190,13 +190,22 @@ class ControllerGallery(QWidget):
         self.filter.currentIndexChanged.connect(self.refresh)
         self.set_devices([], None)
 
-    def set_devices(self, devices, active):
-        signature = (tuple((d.get('instance_id'), d.get('name'), d.get('family'), d.get('supported', True)) for d in devices), active)
+    def set_devices(self, devices, active, state=None):
+        devices = list(devices)
+        if state and state.get('instance_id') == active and not any(device.get('instance_id') == active for device in devices):
+            devices.append(state)
+        fields = ('device_key', 'name', 'family', 'supported', 'available_buttons', 'available_axes',
+                  'num_axes', 'touchpad', 'led', 'rumble')
+        selected = next((device for device in devices if device.get('instance_id') == active), None)
+        actual = {**(selected or {}), **(state or {})} if state and state.get('instance_id') == active else selected
+        signature = (tuple((d.get('instance_id'), d.get('name'), d.get('family'), d.get('supported', True)) for d in devices),
+                     active, tuple((field, repr((actual or {}).get(field))) for field in fields))
         if signature == self.signature:
             return
         self.signature = signature
         self.devices = devices
         self.active = active
+        self.active_state = actual
         clear(self.connection_rows)
 
         header = QWidget()
@@ -225,8 +234,8 @@ class ControllerGallery(QWidget):
             guidance = QVBoxLayout()
             guidance.setSpacing(4)
             guidance.addWidget(text(copy('连接手柄，开始配置', 'Connect a controller to get started'), 'section'))
-            hint = text(copy('通过 USB 或蓝牙连接；也可以先浏览下方支持的型号。',
-                             'Connect with USB or Bluetooth, or browse supported models below.'), 'muted')
+            hint = text(copy('通过 USB 或蓝牙连接；下方可先查看通用 XInput 按键布局。',
+                             'Connect with USB or Bluetooth. A standard XInput layout is available below.'), 'muted')
             hint.setWordWrap(True)
             guidance.addWidget(hint)
             line.addLayout(guidance, 1)
@@ -274,13 +283,41 @@ class ControllerGallery(QWidget):
         self.refresh()
 
     def open_family(self, family):
-        connected = [d for d in self.devices if d['family'] == family and d.get('supported', True)]
-        if len(connected) == 1:
-            if connected[0]['instance_id'] != self.active:
-                self.on_select(connected[0]['instance_id'])
+        if family != self.current_family():
+            return
+        if self.active_state and self.active_state.get('supported', True):
             self.on_manage()
         else:
             self.details(family)
+
+    def current_family(self):
+        family = (self.active_state or {}).get('family', 'generic')
+        return family if family in CATALOG else 'generic'
+
+    def device_info(self):
+        family = self.current_family()
+        if not self.active_state:
+            return dict(name=copy('通用 XInput', 'Standard XInput'), brand='XINPUT',
+                        subtitle=copy('未连接 · 标准按键预览', 'Disconnected · Standard button preview'),
+                        note=copy('连接手柄后，显示该设备的型号与实际输入。',
+                                  'Connect a controller to display its model and reported inputs.'))
+        device = self.active_state
+        info = get_catalog_entry(family)
+        info['name'] = device.get('name') or info['name']
+        capabilities = []
+        if 'available_buttons' in device:
+            count = len(set(device['available_buttons']))
+            capabilities.append(copy(f'{count} 个按键', f'{count} buttons'))
+        if 'available_axes' in device or 'num_axes' in device:
+            count = len(set(device['available_axes'])) if 'available_axes' in device else device['num_axes']
+            capabilities.append(copy(f'{count} 个轴', f'{count} axes'))
+        for field, zh, en in [('rumble', '震动', 'Rumble'), ('led', '灯光', 'LED'), ('touchpad', '触摸板', 'Touchpad')]:
+            if device.get(field):
+                capabilities.append(copy(zh, en))
+        info['subtitle'] = ' · '.join(capabilities) or copy('当前连接设备', 'Currently connected device')
+        info['note'] = copy('配置只应用于当前输入设备；按键与功能以设备实际提供的能力为准。',
+                            'Settings apply to this input device and its reported controls and features.')
+        return info
 
     def refresh(self, *args):
         self.columns = self.column_count()
@@ -293,19 +330,18 @@ class ControllerGallery(QWidget):
             b.setChecked(i == self.filter.currentIndex())
 
         query = self.search.text().strip().casefold()
-        connected = {d['family'] for d in self.devices if d.get('supported', True)}
-        families = [
-            key for key, item in CATALOG.items()
-            if query in (' '.join((item['name'], item['brand'], item['subtitle'],
-                                  get_catalog_entry(key)['name'], get_catalog_entry(key)['subtitle']))).casefold()
-            and (self.filter.currentIndex() != 1 or key in connected)
-            and (self.filter.currentIndex() != 2 or key in self.favorites)
-        ]
+        family = self.current_family()
+        info = self.device_info()
+        connected = {family} if self.active_state else set()
+        families = [family] if (query in ' '.join((info['name'], info['brand'], info['subtitle'])).casefold()
+                               and (self.filter.currentIndex() != 1 or bool(connected))
+                               and (self.filter.currentIndex() != 2 or family in self.favorites)) else []
         self.empty_state = not families
-        self.result_count.setText(copy(f'{len(families)} 个型号', f'{len(families)} models'))
+        self.result_count.setText(copy(f'{len(families)} 个设备', f'{len(families)} devices') if self.active_state else
+                                  copy('通用布局预览', 'Standard layout preview'))
 
         for index, family in enumerate(families):
-            info = get_catalog_entry(family)
+            info = self.device_info()
             box = ProductCard(lambda k=family: self.open_family(k))
             box.setAccessibleName(info['name'])
             box.setMinimumHeight(312)
@@ -356,7 +392,8 @@ class ControllerGallery(QWidget):
             title_v.addWidget(sub_lbl)
             foot.addLayout(title_v, 1)
 
-            description = (tr('管理') if family in connected else copy('查看详情', 'View details')) + ' · ' + info['name']
+            description = (tr('管理') if self.active_state and self.active_state.get('supported', True)
+                           else copy('按键预览', 'Button preview')) + ' · ' + info['name']
             details = IconButton('arrow', description, lambda checked=False, k=family: self.open_family(k), 36)
             details.setStyleSheet(f'background: {TOKENS["accent_bg"] if family in connected else TOKENS["elevated"]}; border-radius: {TOKENS["r_sm"]}px; border: 1px solid {TOKENS["border_acc"] if family in connected else TOKENS["border"]};')
             foot.addWidget(details)
@@ -386,10 +423,10 @@ class ControllerGallery(QWidget):
             elif self.filter.currentIndex() == 2 and not self.favorites:
                 hint = copy('点击型号卡片右上角的爱心，将常用手柄加入收藏。',
                             'Use the heart on a model card to add a favorite.')
-                button = action(copy('浏览全部型号', 'Browse all models'), self.reset_filters, 'arrow')
+                button = action(copy('查看当前设备', 'View current device'), self.reset_filters, 'arrow')
             else:
-                hint = copy('尝试其他关键词，或清除筛选以浏览全部型号。',
-                            'Try another search or clear filters to browse all models.')
+                hint = copy('尝试其他关键词，或清除筛选以查看当前设备。',
+                            'Try another search or clear filters to view the current device.')
                 button = action(copy('清除筛选', 'Clear filters'), self.reset_filters, 'refresh')
             caption = text(hint, 'muted')
             caption.setAlignment(Qt.AlignCenter)
@@ -418,7 +455,9 @@ class ControllerGallery(QWidget):
         return 2 if width >= 620 else 1
 
     def detail_dialog(self, family):
-        info = get_catalog_entry(family)
+        if family != self.current_family():
+            return None
+        info = self.device_info()
         dialog = QDialog(self)
         dialog.setWindowTitle(info['name'])
         dialog.resize(640, 540)
@@ -443,20 +482,22 @@ class ControllerGallery(QWidget):
         notes = QVBoxLayout(compatibility)
         notes.setContentsMargins(16, 12, 16, 12)
         notes.setSpacing(5)
-        notes.addWidget(text(copy('兼容性说明', 'Compatibility'), 'section'))
+        notes.addWidget(text(copy('设备信息', 'Device information'), 'section'))
+        capabilities = text(info['subtitle'], 'caption')
+        capabilities.setWordWrap(True)
+        notes.addWidget(capabilities)
         note = text(info['note'], 'muted')
         note.setWordWrap(True)
         notes.addWidget(note)
         layout.addWidget(compatibility)
 
         footer = QHBoxLayout()
-        footer.addWidget(text(copy('8BitDo Ultimate 2C · 示例', '8BitDo Ultimate 2C · Visual example') if family == 'generic' else info['brand'], 'muted'))
+        footer.addWidget(text(info['brand'], 'muted'))
         footer.addStretch()
-        footer.addWidget(action(tr('官方产品页'), lambda: QDesktopServices.openUrl(QUrl(PHOTOS[family]['page'])), 'external'))
         layout.addLayout(footer)
 
         for device in self.devices:
-            if device['family'] == family and device.get('supported', True):
+            if device['instance_id'] == self.active and device.get('supported', True):
                 def activate(checked=False, i=device['instance_id']):
                     self.on_select(i)
                     dialog.accept()
@@ -468,15 +509,17 @@ class ControllerGallery(QWidget):
                 row.addStretch()
                 row.addWidget(action(tr('管理'), activate, 'arrow', primary=True))
                 layout.addLayout(row)
-        if not any(d['family'] == family and d.get('supported', True) for d in self.devices):
-            hint = text(copy('连接此型号后，可直接进入设备管理与按键配置。',
-                             'Connect this model to manage the device and configure its controls.'), 'caption')
+        if not self.active_state or not self.active_state.get('supported', True):
+            hint = text(copy('连接手柄后，即可查看该设备的设置。',
+                             'Connect a controller to access its settings.'), 'caption')
             hint.setWordWrap(True)
             layout.addWidget(hint)
         return dialog
 
     def details(self, family):
         dialog = self.detail_dialog(family)
+        if dialog is None:
+            return
         dialog.exec()
         dialog.deleteLater()
 
