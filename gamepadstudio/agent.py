@@ -9,47 +9,33 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from PySide6.QtCore import QCoreApplication, QLockFile, QObject, QTimer, Signal
 from .studio_core import ConfigStore, GestureEngine, BUTTONS
+from .controller_catalog import button_labels
 from .device import Device
 from .actions import WindowsActions, launch_command
 from .screenshot_service import take_screenshot
 from .replay_service import ReplayBufferEngine
 from .haptic_engine import HapticEngine
 from .ipc import LocalServer, request, spawn, default_root
-from .kbm_mapper import NIKKI_PROFILE_NAME, NikkiKbmEngine
-from .virtual_kbm import VirtualKbmEngine, NIKKI_PRESET_CONFIG
+from .mapping_engine import MappingRuntime
 
 
 class Agent(QObject):
     captured=Signal(str,str)
+    replay_finished=Signal(str,str)
     def __init__(self,root,device=None,actions=None):
         super().__init__();self.root=Path(root);self.store=ConfigStore(self.root);self.config=self.store.data
         if not self.store.path.exists():self.store.save()
         self.device=device or Device();self.actions=actions or WindowsActions()
-        self.nikki_engine=NikkiKbmEngine(self.actions,on_chord=self.log)
-        self.virtual_kbm_engine=VirtualKbmEngine(self.actions,on_notice=self.log)
-        schemes = self.store.data.get("virtual_kbm_schemes", {})
-        if not schemes:
-            from .virtual_kbm import NIKKI_PRESET_CONFIG, GENERAL_PRESET_CONFIG, NIKKI_SCHEME_NAME, GENERAL_SCHEME_NAME
-            import copy
-            schemes = {
-                NIKKI_SCHEME_NAME: copy.deepcopy(NIKKI_PRESET_CONFIG),
-                GENERAL_SCHEME_NAME: copy.deepcopy(GENERAL_PRESET_CONFIG),
-            }
-            schemes[NIKKI_SCHEME_NAME]["enabled"] = (self.config.get('active_profile') == NIKKI_PROFILE_NAME)
-            self.store.data["virtual_kbm_schemes"] = schemes
-            self.store.save()
-        active_s = next((s for s in schemes.values() if s.get("enabled")), None)
-        if active_s:
-            self.virtual_kbm_engine.load_scheme(active_s)
-        else:
-            self.virtual_kbm_engine.scheme["enabled"] = False
         self.device.preferred_key=self.config.get('preferred_controller','')
-        self.engine=GestureEngine(self.dispatch,self.config['long_press'])
-        self.state=None;self.enabled=True;self.suspended_until=0.;self.blocked=set();self.last_touch=None
+        self.engine=MappingRuntime(self.actions, self.dispatch)
+        self.state=None;self.enabled=bool(self.config.get('mapping_enabled', True));self.suspended_until=0.;self.blocked=set();self.last_touch=None
+        self.preview_until = 0.
         self.busy=False;self.last_capture=0.;self.last_buttons=set();self.last_ui=0.;self.closed=False
         self.executor=ThreadPoolExecutor(max_workers=1);self.captured.connect(self.on_captured)
+        self.replay_finished.connect(self.on_replay_finished)
+        self.replay_busy = False
         self.server=LocalServer(self.root,self.handle)
-        self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(16)
+        self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(4)
         self.scan_timer=QTimer(self);self.scan_timer.timeout.connect(self.scan);self.scan_timer.start(1000)
         self.broadcast_timer=QTimer(self);self.broadcast_timer.timeout.connect(self.broadcast);self.broadcast_timer.start(33)
         self.replay_engine = ReplayBufferEngine(
@@ -58,6 +44,7 @@ class Agent(QObject):
             codec=self.config.get('replay_codec', 'hevc'),
             bitrate_mbps=self.config.get('replay_bitrate_mbps', 50),
             fps=self.config.get('replay_fps', 30),
+            capture_mode=self.config.get('capture_mode', 'game'),
             on_event=self.log
         )
         if self.config.get('replay_buffer_enabled', False):
@@ -69,24 +56,74 @@ class Agent(QObject):
             intensity=self.config.get('haptic_intensity', 1.0),
             profile=self.config.get('haptic_profile', 'crisp')
         )
-        self.scan();self.log('后台映射已启动')
+        self.apply_gamebar_shield()
+        self.scan()
+        self.apply_device_cloaking()
+        self.log('后台映射已启动')
+
+    def apply_device_cloaking(self):
+        if not self.config.get('device_cloaking_enabled', True):
+            return
+        vendor = self.state.get('vendor') if self.state else None
+        product = self.state.get('product') if self.state else None
+        try:
+            from .hidhide import HidHideClient
+            client = HidHideClient()
+            if client.is_driver_installed():
+                ok, msg = client.cloak_controller(vendor, product)
+                if ok:
+                    self.log(f'硬件独占隐身已就绪：{msg}')
+                else:
+                    self.log(f'硬件独占隐身未生效：{msg}')
+        except Exception as exc:
+            self.log(f'硬件独占隐身配置异常：{exc}')
 
     def status(self):
         return {'pid':os.getpid(),'device':self.state,'enabled':self.enabled,'capturing':self.busy,
                 'devices':getattr(self.device,'available',[]),
+                'replay':self.replay_engine.get_status() if hasattr(self,'replay_engine') else {},
+                'mapping':self.engine.feedback(), 'mapping_revision':self.config.get('mapping_revision',0),
                 'profile':self.config['active_profile'],'suspended':time.monotonic()<self.suspended_until}
 
-    def broadcast(self):self.server.broadcast({'type':'state',**self.status()})
+    def apply_gamebar_shield(self):
+        if self.config.get('gamebar_shield_enabled', False):
+            from .gamebar_shield import set_gamebar_shield, is_gamebar_shield_active
+            if not is_gamebar_shield_active():
+                ok, message = set_gamebar_shield(self.store, True)
+                if not ok:
+                    self.log(message)
+
+    def broadcast(self):
+        if hasattr(self, 'server') and self.server:
+            self.server.broadcast({'type':'state',**self.status()})
 
     def log(self,text):
         row={'time':datetime.now().isoformat(),'message':text}
         with (self.root/'agent-events.jsonl').open('a',encoding='utf-8') as file:file.write(json.dumps(row,ensure_ascii=False)+'\n')
-        self.server.broadcast({'type':'notice',**row})
+        if hasattr(self, 'server') and self.server:
+            self.server.broadcast({'type':'notice',**row})
 
     def release(self):
-        self.engine.reset();self.actions.release_all();self.nikki_engine.reset();self.last_touch=None
-        if hasattr(self, 'virtual_kbm_engine'): self.virtual_kbm_engine.reset()
-        self.blocked.update(self.state['buttons'] if self.state else [])
+        try:
+            self.engine.reset()
+        finally:
+            try:
+                self.actions.release_all()
+            finally:
+                self.last_touch=None
+                self.blocked.update(self.state['buttons'] if self.state else [])
+
+    def set_enabled(self, enabled):
+        # Persist pause before attempting any release. If that fails, restart
+        # must still be paused; enabling happens only after a clean release.
+        self.enabled=False
+        self.config['mapping_enabled']=False
+        self.store.save()
+        self.release()
+        if enabled:
+            self.config['mapping_enabled']=True
+            self.store.save()
+            self.enabled=True
 
     def scan(self):
         try:self.device.scan()
@@ -94,37 +131,41 @@ class Agent(QObject):
 
     def poll(self):
         try:
+            # 键盘 PrintScreen (VK_SNAPSHOT 0x2C) 物理快捷键全局监听
+            if not hasattr(self, '_user32'):
+                import ctypes
+                self._user32 = ctypes.WinDLL('user32')
+                self._last_prtsc_down = False
+            prtsc_down = bool(self._user32.GetAsyncKeyState(0x2C) & 0x8000)
+            if prtsc_down and not self._last_prtsc_down:
+                self.capture()
+            self._last_prtsc_down = prtsc_down
+
             previous=self.state;self.state=self.device.read()
             identity=lambda s: (True,s.get('instance_id')) if s else None
             if identity(previous)!=identity(self.state):
                 self.release();self.last_buttons=set()
+                self.engine.blocked.update(self.engine.normalizer.update(self.state))
                 self.log('手柄已连接' if self.state else '手柄已断开')
                 if self.state:
                     self.store.activate_controller(self.state);self.store.save()
+                    self.apply_device_cloaking()
                 if self.state and self.state['led']:self.device.led(self.config['led'])
-            if not self.state:return
+            if not self.state:
+                self.engine.update(None, self.config, enabled=False);return
             buttons=set(self.state['buttons']);new=buttons-self.last_buttons;self.last_buttons=buttons
             if new:
                 self.server.broadcast({'type':'buttons','buttons':sorted(new)})
-                names = [BUTTONS.get(b, str(b)) for b in sorted(new)]
+                labels = button_labels(self.state.get('family', 'generic'), self.state.get('controller_type', 0))
+                names = [labels.get(b, str(b)) for b in sorted(new)]
                 self.log(f"按键输入: {' / '.join(names)}")
-            if not self.enabled or time.monotonic()<self.suspended_until:
-                self.release();return
-            self.blocked.intersection_update(buttons)
-            if hasattr(self, 'virtual_kbm_engine') and (
-                self.virtual_kbm_engine.scheme.get("enabled", False)
-                or self.config.get('active_profile') == NIKKI_PROFILE_NAME
-            ):
-                self.virtual_kbm_engine.update(self.state)
-            else:
-                self.engine.update(buttons - self.blocked, self.store.mappings)
-                touch=self.state['touch']
-                if self.config['touch_mouse'] and touch and self.last_touch:
-                    dx,dy=(touch[0]-self.last_touch[0])*1600,(touch[1]-self.last_touch[1])*900
-                    if abs(dx)<250 and abs(dy)<250:self.actions.move_mouse(dx,dy)
-                self.last_touch=touch or None
+            running = self.enabled and time.monotonic() >= self.suspended_until
+            self.engine.update(self.state, self.config, enabled=running, preview=time.monotonic()<self.preview_until)
         except Exception as exc:
             self.enabled=False
+            self.config['mapping_enabled']=False
+            try:self.store.save()
+            except Exception:pass
             try:self.release()
             except Exception:pass
             self.log('映射已暂停：'+str(exc))
@@ -133,38 +174,42 @@ class Agent(QObject):
         command=message.get('command')
         if command=='status':return self.status()
         if command in ('pause','resume'):
-            self.release();self.enabled=command=='resume';self.log('映射已恢复' if self.enabled else '映射已暂停')
+            self.set_enabled(command=='resume');self.log('映射已恢复' if self.enabled else '映射已暂停')
         elif command=='suspend':
             self.release();self.suspended_until=time.monotonic()+min(3.,max(0.,float(message.get('seconds',2))))
+        elif command=='preview':
+            self.preview_until=time.monotonic()+min(1.,max(0.,float(message.get('seconds',.75))))
+        elif command=='mapping_change':
+            self.release()
+            latest = ConfigStore(self.root)
+            data = latest.apply_mapping_change(message['change'], self.state)
+            self.store = latest; self.config = latest.data
+            self.broadcast()
+            return {'config': data}
         elif command=='reload':
             self.release()
+            previous_config = self.config
             self.store=ConfigStore(self.root)
             self.config=self.store.data
-            self.engine.threshold=self.config['long_press']
-            schemes = self.store.data.get("virtual_kbm_schemes", {})
-            if not schemes:
-                from .virtual_kbm import NIKKI_PRESET_CONFIG, GENERAL_PRESET_CONFIG, NIKKI_SCHEME_NAME, GENERAL_SCHEME_NAME
-                import copy
-                schemes = {
-                    NIKKI_SCHEME_NAME: copy.deepcopy(NIKKI_PRESET_CONFIG),
-                    GENERAL_SCHEME_NAME: copy.deepcopy(GENERAL_PRESET_CONFIG),
-                }
-                schemes[NIKKI_SCHEME_NAME]["enabled"] = True
-                self.store.data["virtual_kbm_schemes"] = schemes
-                self.store.save()
-            active_s = next((s for s in schemes.values() if s.get("enabled")), None)
-            if active_s:
-                self.virtual_kbm_engine.load_scheme(active_s)
-            else:
-                self.virtual_kbm_engine.scheme["enabled"] = False
+            self.apply_gamebar_shield()
+            self.apply_device_cloaking()
             if hasattr(self, 'replay_engine'):
-                self.replay_engine.stop()
+                replay_defaults = {'replay_buffer_minutes': 5, 'replay_codec': 'hevc',
+                                   'replay_bitrate_mbps': 50, 'replay_fps': 30,
+                                   'capture_mode': 'game'}
+                replay_changed = any(previous_config.get(k, default) != self.config.get(k, default)
+                                     for k, default in replay_defaults.items())
+                replay_enabled = bool(self.config.get('replay_buffer_enabled', False))
+                newly_enabled = replay_enabled and not previous_config.get('replay_buffer_enabled', False)
+                if replay_changed or not replay_enabled:
+                    self.replay_engine.stop()
                 self.replay_engine.save_dir = Path(self.config.get('save_dir', self.root / 'Captures'))
                 self.replay_engine.minutes = self.config.get('replay_buffer_minutes', 5)
                 self.replay_engine.codec = self.config.get('replay_codec', 'hevc')
                 self.replay_engine.bitrate_mbps = self.config.get('replay_bitrate_mbps', 50)
                 self.replay_engine.fps = self.config.get('replay_fps', 30)
-                if self.config.get('replay_buffer_enabled', False):
+                self.replay_engine.capture_mode = self.config.get('capture_mode', 'game')
+                if replay_enabled and (replay_changed or newly_enabled):
                     self.replay_engine.start()
             if hasattr(self, 'haptic_engine'):
                 self.haptic_engine.set_config(
@@ -174,6 +219,32 @@ class Agent(QObject):
                     profile=self.config.get('haptic_profile', 'crisp')
                 )
             if self.state and self.state['led']:self.device.led(self.config['led'])
+        elif command=='set_device_cloaking':
+            enabled = bool(message.get('enabled', True))
+            self.config['device_cloaking_enabled'] = enabled
+            self.store.data['device_cloaking_enabled'] = enabled
+            self.store.save()
+            applied = False
+            msg = '未连接手柄或无需隐身'
+            if self.state:
+                from .hidhide import HidHideClient
+                client = HidHideClient()
+                if client.is_driver_installed():
+                    vendor = self.state.get('vendor')
+                    product = self.state.get('product')
+                    applied, msg = client.cloak_controller(vendor, product) if enabled else client.uncloak_controller(vendor, product)
+                    self.log(msg)
+            return {'applied': applied, 'message': msg, 'enabled': enabled}
+        elif command=='set_gamebar_shield':
+            from .gamebar_shield import set_gamebar_shield
+            if type(message.get('enabled')) is not bool:
+                raise ValueError('无效屏蔽状态')
+            self.store=ConfigStore(self.root); self.config=self.store.data
+            ok, text=set_gamebar_shield(self.store, message['enabled'])
+            self.log(text)
+            return {'applied':ok, 'message':text,
+                    'enabled':self.config.get('gamebar_shield_enabled',False),
+                    'backup':self.config.get('gamebar_shield_backup',{})}
         elif command=='select_device':
             instance=message.get('instance_id')
             if type(instance) is not int:raise ValueError('无效设备')
@@ -186,14 +257,7 @@ class Agent(QObject):
         elif command=='capture':self.capture()
         elif command=='replay_record':self.replay_record()
         elif command=='save_replay':
-            if hasattr(self, 'replay_engine') and self.replay_engine.is_running():
-                path = self.replay_engine.save_replay(message.get('title'))
-                if path and hasattr(self, 'haptic_engine'):
-                    self.haptic_engine.trigger_feedback('replay_saved')
-                return {'path': path, 'status': 'success' if path else 'empty'}
-            else:
-                self.replay_record()
-                return {'mode': 'system'}
+            return self.replay_record(message.get('title'))
         elif command=='get_replay_status':
             if hasattr(self, 'replay_engine'):
                 return self.replay_engine.get_status()
@@ -211,7 +275,9 @@ class Agent(QObject):
             color=message.get('color','')
             if not isinstance(color,str) or not re.fullmatch(r'#[0-9a-fA-F]{6}',color):raise ValueError('无效颜色')
             success=self.device.led(color);self.log('灯条已更新' if success else '灯条不可用');return {'supported':success}
-        elif command=='stop':QTimer.singleShot(80,QCoreApplication.quit)
+        elif command in ('stop', 'exit', 'quit'):
+            QTimer.singleShot(50, QCoreApplication.quit)
+            return {'status': 'ok', 'action': 'stopping'}
         else:raise ValueError('不支持的操作')
         return self.status()
 
@@ -232,32 +298,51 @@ class Agent(QObject):
         elif action=='launch':launch_command(binding['executable'],binding.get('arguments',''))
         else:self.actions.media(action)
 
-    def replay_record(self):
+    def replay_record(self, title=None):
+        if self.replay_busy:return {'status':'busy'}
         now=time.monotonic()
-        if now-getattr(self,'last_replay',0.)<1.0:return
+        if now-getattr(self,'last_replay',0.)<1.0:return {'status':'busy'}
         self.last_replay=now
         # 1. 优先使用本地 4K 极清硬件编码回放缓冲区
-        if hasattr(self, 'replay_engine') and self.replay_engine.is_running():
-            path = self.replay_engine.save_replay()
-            if path:
-                if hasattr(self, 'haptic_engine'):
-                    self.haptic_engine.trigger_feedback('replay_saved')
-                self.server.broadcast({'type':'replay_record','status':'success','path':path})
-                return
+        if self.config.get('replay_buffer_enabled', False) and hasattr(self, 'replay_engine'):
+            if not self.replay_engine.is_running():
+                self.replay_engine.start()
+            self.replay_busy = True
+            def worker():
+                try:self.replay_finished.emit(self.replay_engine.save_replay(title) or '', '')
+                except Exception as exc:self.replay_finished.emit('', str(exc))
+            self.executor.submit(worker)
+            return {'status':'saving'}
+        if self.config.get('gamebar_shield_enabled', False):
+            self.log('系统录制已屏蔽，请先开启后台回放')
+            return {'status':'disabled'}
         # 2. 未启用或切片未就绪时平滑回退触发系统 Windows Game Bar (Win+Alt+G)
         try:
-            self.actions.shortcut('Win+Alt+G')
+            self.engine._dispatch({'action':'shortcut','value':'Win+Alt+G'})
             self.log('已触发系统回放录制 (Win+Alt+G)')
             self.server.broadcast({'type':'replay_record','status':'success','mode':'system'})
+            return {'status':'requested','mode':'system'}
         except Exception as exc:
             self.log('回放录制触发失败：'+str(exc))
 
+    def on_replay_finished(self, path, error):
+        self.replay_busy = False
+        if path:
+            self.haptic_engine.trigger_feedback('replay_saved')
+            self.log('回放已保存：' + Path(path).name)
+        else:
+            self.log('回放保存失败：' + error if error else '回放尚未就绪，请稍后重试')
+        self.server.broadcast({'type':'replay_record', 'status':'success' if path else 'not_ready', 'path':path, 'error':error})
+
     def record_toggle(self):
+        if self.config.get('gamebar_shield_enabled', False):
+            self.log('系统录制已屏蔽，可使用后台回放保存录像')
+            return
         now=time.monotonic()
         if now-getattr(self,'last_record_toggle',0.)<1.0:return
         self.last_record_toggle=now
         try:
-            self.actions.shortcut('Win+Alt+R')
+            self.engine._dispatch({'action':'shortcut','value':'Win+Alt+R'})
             self.log('已切换录屏状态 (Win+Alt+R)')
             self.server.broadcast({'type':'record_toggle','status':'success'})
         except Exception as exc:
@@ -286,13 +371,18 @@ class Agent(QObject):
     def close(self):
         if self.closed:return
         self.closed=True;self.timer.stop();self.scan_timer.stop();self.broadcast_timer.stop()
+        # Release input BEFORE waiting for recording workers or other teardown.
+        try:self.release()
+        except Exception as exc:self.log('释放输入失败：'+str(exc))
+        try:self.engine.close()
+        except Exception as exc:self.log('关闭映射失败：'+str(exc))
         if hasattr(self, 'replay_engine'):
             try: self.replay_engine.stop()
             except Exception: pass
         if hasattr(self, 'haptic_engine'):
             try: self.haptic_engine.close()
             except Exception: pass
-        self.release();self.device.close();self.executor.shutdown(wait=True);self.server.close()
+        self.device.close();self.executor.shutdown(wait=True);self.server.close()
 
 
 
@@ -302,18 +392,21 @@ def run(root):
     attach_to_default_desktop()
     root=Path(root);root.mkdir(parents=True,exist_ok=True)
     app=QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
+    existing=request(root,'status',timeout=400)
+    if existing and existing.get('ok'):
+        return 0
+
+    # A second startup must never terminate the process that owns held keys.
+    # QLockFile handles dead PIDs; a live but busy owner keeps its lock.
     lock=QLockFile(str(root/'agent.lock'))
-    lock.setStaleLockTime(2000)
+    lock.setStaleLockTime(0)
     if not lock.tryLock(100):
-        if request(root,'status',role='agent',timeout=200) is not None:
-            return 0
-        try:
-            lock.removeStaleLockFile()
-            (root/'agent.lock').unlink(missing_ok=True)
-        except Exception:
-            pass
-        if not lock.tryLock(100):
-            return 0
-    agent=Agent(root);app.aboutToQuit.connect(agent.close)
-    try:return app.exec()
-    finally:agent.close();lock.unlock()
+        return 1
+    agent=None
+    try:
+        agent=Agent(root)
+        app.aboutToQuit.connect(agent.close)
+        return app.exec()
+    finally:
+        if agent is not None:agent.close()
+        lock.unlock()

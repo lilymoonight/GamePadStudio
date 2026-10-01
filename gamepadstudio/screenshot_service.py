@@ -98,7 +98,102 @@ def update_png_metadata(png_path: Path, metadata: dict):
         pass
 
 
+def _ensure_dpi_awareness():
+    """启用 Windows Per-Monitor V2 DPI 识别，确保像素坐标与物理屏幕 1:1 绝对对齐"""
+    if sys.platform == 'win32':
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
+
+def get_window_process_name(hwnd) -> str:
+    """安全获取指定窗口所属进程名"""
+    if not hwnd or sys.platform != 'win32':
+        return ''
+    pid = wintypes.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    hproc = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)
+    if not hproc:
+        return ''
+    buf = ctypes.create_unicode_buffer(1024)
+    size = wintypes.DWORD(1024)
+    res = ''
+    if ctypes.windll.kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
+        import os
+        res = os.path.basename(buf.value)
+    ctypes.windll.kernel32.CloseHandle(hproc)
+    return res
+
+
+def is_software_or_system_window(hwnd, title: str, pname: str) -> bool:
+    """判断是否为 GamePad Studio 本身、桌面管理器或后台无感系统组件"""
+    p = (pname or '').lower()
+    t = (title or '').lower()
+    if p in ('python.exe', 'pythonw.exe') or 'gamepad' in t or 'dualsense' in t:
+        return True
+    if p in ('explorer.exe', 'taskmgr.exe', 'textinputhost.exe', 'shellexperiencehost.exe', 'searchhost.exe', 'cmd.exe', 'conhost.exe'):
+        return True
+    if t in ('program manager', 'dummylayeredwnd', ''):
+        return True
+    return False
+
+
+def smart_foreground_info():
+    """
+    智能前台识别：若前台窗口是游戏则直接返回；若当前前台是 GamePad Studio 或桌面，
+    则自动穿透扫描 Default 桌面找到真正运行的大型游戏/全屏应用窗口
+    """
+    _ensure_dpi_awareness()
+    fg_hwnd, fg_title = foreground_info()
+    fg_pname = get_window_process_name(fg_hwnd)
+
+    if fg_hwnd and not is_software_or_system_window(fg_hwnd, fg_title, fg_pname):
+        return fg_hwnd, fg_title
+    if fg_title and not fg_hwnd and not is_software_or_system_window(None, fg_title, ""):
+        return None, fg_title
+
+    if sys.platform != 'win32':
+        return None, fg_title or '桌面'
+
+    u = ctypes.windll.user32
+    # 扫描 Default 桌面活跃顶层窗口
+    hdesk = u.OpenDesktopW('Default', 0, False, 0x0100)
+    candidates = []
+    if hdesk:
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def cb(hwnd, lparam):
+            if not u.IsWindowVisible(hwnd):
+                return True
+            rect = wintypes.RECT()
+            u.GetWindowRect(hwnd, ctypes.byref(rect))
+            w = rect.right - rect.left
+            h = rect.bottom - rect.top
+            if w < 640 or h < 480:
+                return True
+            t_buf = ctypes.create_unicode_buffer(512)
+            u.GetWindowTextW(hwnd, t_buf, 512)
+            title = t_buf.value
+            pname = get_window_process_name(hwnd)
+            if not is_software_or_system_window(hwnd, title, pname):
+                candidates.append((hwnd, title, pname, w * h))
+            return True
+        u.EnumDesktopWindows(hdesk, WNDENUMPROC(cb), 0)
+        u.CloseDesktop(hdesk)
+
+    if candidates:
+        # 按窗口物理面积降序，优先锁定全屏/大型游戏
+        candidates.sort(key=lambda x: x[3], reverse=True)
+        return candidates[0][0], candidates[0][1]
+
+    return fg_hwnd, fg_title or '桌面'
+
+
 def foreground_info():
+    _ensure_dpi_awareness()
     if sys.platform != 'win32':
         return None, '桌面'
     u = ctypes.windll.user32
@@ -112,10 +207,13 @@ def foreground_info():
 
 
 def _get_active_monitor_bbox():
+    _ensure_dpi_awareness()
     if sys.platform != 'win32':
         return None
     u = ctypes.windll.user32
-    hwnd, _ = foreground_info()
+    hwnd, _ = smart_foreground_info()
+    if not hwnd:
+        hwnd = u.GetForegroundWindow()
     u.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
     u.MonitorFromWindow.restype = wintypes.HANDLE
 
@@ -131,26 +229,54 @@ def _get_active_monitor_bbox():
     return dict(left=r.left, top=r.top, width=r.right-r.left, height=r.bottom-r.top)
 
 
-def take_screenshot(save_dir, toast_duration_ms=0, mode='monitor'):
+def get_target_monitor_bbox(sct, mode: str = 'game') -> dict:
+    """
+    智能屏幕与目标范围解析：
+    - 'all': 全屏跨屏全景 (例如双 4K 拼接 7680x2160)
+    - 'monitor_1': 物理显示器 1
+    - 'monitor_2': 物理显示器 2
+    - 'game' / 'smart' / 'monitor': 智能侦测游戏所在屏幕，彻底规避录制 GamePad Studio 自身窗口
+    """
+    _ensure_dpi_awareness()
+    if mode == 'all':
+        return sct.monitors[0]
+    elif mode == 'monitor_1':
+        return sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+    elif mode == 'monitor_2':
+        return sct.monitors[2] if len(sct.monitors) > 2 else (sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0])
+
+    active = _get_active_monitor_bbox()
+    if active:
+        return active
+    return sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+
+
+def take_screenshot(save_dir, toast_duration_ms=0, mode='game'):
     folder = Path(save_dir)
     folder.mkdir(parents=True, exist_ok=True)
-    hwnd, title = foreground_info()
+    _ensure_dpi_awareness()
+    hwnd, title = smart_foreground_info()
     clean_title = sanitize_filename(title)
     now = datetime.now()
     path = folder / f'DS_{clean_title}_{now:%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:4]}.png'
     with mss.mss() as capture:
-        bbox = _get_active_monitor_bbox() or capture.monitors[1]
-        if mode == 'all':
-            bbox = capture.monitors[0]
-        elif mode == 'window' and hwnd:
+        if mode == 'window' and hwnd and sys.platform == 'win32':
             rect = wintypes.RECT()
             if ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
                 desktop = capture.monitors[0]
-                left, top = max(rect.left, desktop['left']), max(rect.top, desktop['top'])
-                right = min(rect.right, desktop['left']+desktop['width'])
-                bottom = min(rect.bottom, desktop['top']+desktop['height'])
+                left = max(rect.left, desktop['left'])
+                top = max(rect.top, desktop['top'])
+                right = min(rect.right, desktop['left'] + desktop['width'])
+                bottom = min(rect.bottom, desktop['top'] + desktop['height'])
                 if right > left and bottom > top:
-                    bbox = dict(left=left, top=top, width=right-left, height=bottom-top)
+                    bbox = dict(left=left, top=top, width=right - left, height=bottom - top)
+                else:
+                    bbox = get_target_monitor_bbox(capture, mode)
+            else:
+                bbox = get_target_monitor_bbox(capture, mode)
+        else:
+            bbox = get_target_monitor_bbox(capture, mode)
+
         shot = capture.grab(bbox)
         mss.tools.to_png(shot.rgb, shot.size, output=str(path))
     metadata = dict(title=title, created=now.isoformat(), width=shot.width, height=shot.height,
@@ -162,20 +288,69 @@ def take_screenshot(save_dir, toast_duration_ms=0, mode='monitor'):
 
 def list_captures(folder):
     rows = []
-    for path in sorted(Path(folder).glob('*.png'), key=lambda p: p.stat().st_mtime, reverse=True):
-        data = extract_png_metadata(path)
-        if not data:
+    folder_path = Path(folder)
+    if not folder_path.exists():
+        return rows
+
+    candidates = list(folder_path.glob('*.png')) + list(folder_path.glob('*.mp4'))
+    for path in sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True):
+        if path.suffix.lower() == '.mp4':
             sidecar = path.with_suffix('.json')
-            try:
-                data = json.loads(sidecar.read_text(encoding='utf-8'))
-            except (OSError, ValueError):
-                data = {}
-        rows.append({**data, 'path': str(path), 'title': data.get('title', path.stem), 'favorite': bool(data.get('favorite'))})
+            data = {}
+            if sidecar.exists():
+                try:
+                    data = json.loads(sidecar.read_text(encoding='utf-8'))
+                except (OSError, ValueError):
+                    data = {}
+            thumb = path.with_suffix('.jpg')
+            raw_title = data.get('title') or path.stem.replace("DS_", "").replace("_replay", "")
+            size_mb = round(path.stat().st_size / (1024 * 1024), 1)
+            rows.append({
+                **data,
+                'path': str(path),
+                'thumb_path': str(thumb) if thumb.is_file() else str(path),
+                'title': f"🎬 {raw_title}",
+                'raw_title': raw_title,
+                'created': datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+                'favorite': bool(data.get('favorite')),
+                'is_video': True,
+                'size_mb': size_mb,
+                'width': 3840,
+                'height': 2160,
+            })
+        else:
+            data = extract_png_metadata(path)
+            if not data:
+                sidecar = path.with_suffix('.json')
+                try:
+                    data = json.loads(sidecar.read_text(encoding='utf-8'))
+                except (OSError, ValueError):
+                    data = {}
+            rows.append({
+                **data,
+                'path': str(path),
+                'thumb_path': str(path),
+                'title': data.get('title', path.stem),
+                'favorite': bool(data.get('favorite')),
+                'is_video': False
+            })
     return rows
 
 
 def set_favorite(path, favorite):
     p = Path(path)
+    if p.suffix.lower() == '.mp4':
+        sidecar = p.with_suffix('.json')
+        data = {}
+        if sidecar.exists():
+            try:
+                data = json.loads(sidecar.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                data = {}
+        data['favorite'] = favorite
+        sidecar.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+        return
+
     meta = extract_png_metadata(p)
     if meta:
         meta['favorite'] = favorite
@@ -193,6 +368,7 @@ def set_favorite(path, favorite):
 def delete_capture(path):
     p = Path(path)
     sidecar = p.with_suffix('.json')
+    thumb = p.with_suffix('.jpg')
     deleted = False
     try:
         if p.exists():
@@ -203,6 +379,11 @@ def delete_capture(path):
     try:
         if sidecar.exists():
             sidecar.unlink()
+    except OSError:
+        pass
+    try:
+        if thumb.exists():
+            thumb.unlink()
     except OSError:
         pass
     return deleted

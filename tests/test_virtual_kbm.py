@@ -1,318 +1,207 @@
+import os
+os.environ['QT_QPA_PLATFORM']='offscreen'
 import time
-from gamepadstudio.virtual_kbm import (
-    VirtualKbmEngine,
-    NIKKI_PRESET_CONFIG,
-    GENERAL_PRESET_CONFIG,
-    NIKKI_SCHEME_NAME,
-    format_action_display,
-)
+import pytest
+from PySide6.QtWidgets import QApplication, QScrollArea
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from gamepadstudio.virtual_kbm import VirtualMouseThread, NIKKI_PRESET_CONFIG, GENERAL_PRESET_CONFIG
+from gamepadstudio.virtual_kbm_ui import VirtualKbmPage, TYPING_BLOCK_ROWS, NAV_BLOCK_ROWS, NUMPAD_BLOCK_GRID
+from gamepadstudio.mapping_ui import BindingDialog, KeySequenceField
+from gamepadstudio.mapping_engine import convert_scheme, validate_mappings, output_tokens
+from tests.mapping_fixtures import MappingOwner
 
 
-class MockActions:
-    def __init__(self):
-        self.shortcuts = []
-        self.holds = []
-        self.held_keys = set()
-        self.mouse_buttons = []
-        self.held_mouse = set()
-        self.mouse_moves = []
-        self.game_focused = True
-
-    def is_nikki_game_focused(self):
-        return self.game_focused
-
-    def shortcut(self, val):
-        self.shortcuts.append(val)
-
-    def hold(self, val, down):
-        self.holds.append((val, down))
-        if down:
-            self.held_keys.add(val)
-        else:
-            self.held_keys.discard(val)
-
-    def mouse_button(self, btn, down):
-        self.mouse_buttons.append((btn, down))
-        if down:
-            self.held_mouse.add(btn)
-        else:
-            self.held_mouse.discard(btn)
-
-    def move_mouse(self, dx, dy):
-        self.mouse_moves.append((dx, dy))
+@pytest.fixture
+def view(tmp_path):
+    app=QApplication.instance() or QApplication([])
+    owner=MappingOwner(tmp_path); page=VirtualKbmPage(owner); owner.page=page
+    yield owner,page
+    page.close();owner.close()
 
 
-def test_virtual_kbm_preset_loading():
-    mock = MockActions()
-    engine = VirtualKbmEngine(mock)
+def test_all_legacy_preset_bindings_are_valid_and_explicit():
+    for scheme in (NIKKI_PRESET_CONFIG,GENERAL_PRESET_CONFIG):
+        mapping=validate_mappings(convert_scheme(scheme))
+        assert mapping['LS:up']['short']['value']=='W'
+        assert mapping['LS:outer']['short']['value']=='Shift'
+        assert mapping['RT']['short']['action']=='mouse_hold'
+        assert '0+9' in mapping
+
+
+def test_continuous_mouse_stops_and_thread_joins():
+    class Actions:
+        moves=[]
+        def move_mouse(self,x,y): self.moves.append((x,y))
+    a=Actions();thread=VirtualMouseThread(a);thread.start()
     try:
-        assert engine.scheme["name"] == NIKKI_SCHEME_NAME
-        assert engine.scheme["buttons"]["RT"] == "mouse:left"
-        assert engine.scheme["buttons"]["LT"] == "mouse:right"
-        assert engine.scheme["buttons"]["0"] == "Space"
-        assert engine.scheme["chords"]["LB + 0"] == "1"
-    finally:
-        engine.close()
+        thread.update_stick(1,0,is_desktop=True)
+        deadline=time.monotonic()+1
+        while not a.moves and time.monotonic()<deadline: time.sleep(.005)
+        assert sum(x for x,y in a.moves)>0
+        thread.update_stick(0,0);time.sleep(.02);before=len(a.moves);time.sleep(.02)
+        assert len(a.moves)==before
+    finally: thread.stop();thread.join(timeout=1)
+    assert not thread.is_alive()
 
 
-def test_virtual_kbm_instant_mouse_clicks():
-    mock = MockActions()
-    engine = VirtualKbmEngine(mock)
-    engine.scheme["enabled"] = True
+def test_fixed_108_key_panel_and_valid_numpad_keys(view):
+    owner,page=view
+    count=sum(1 for rows in (TYPING_BLOCK_ROWS,NAV_BLOCK_ROWS) for row in rows for key,*_ in row if not key.startswith('__'))+len(NUMPAD_BLOCK_GRID)
+    assert count==108
+    assert len(page.keycaps)==116
+    for key in page.keycaps:
+        if key!='Fn': assert page.key_token(key)
+    assert page.findChildren(QScrollArea)
+
+
+def test_clicking_keyboard_or_mouse_uses_same_binding_editor(view):
+    owner,page=view
+    page.keycaps['Space'].left_clicked.emit('Space','Space')
+    assert owner.edits[-1]==(('0',),{'new':True,'output':'Space'})
+    page.keycaps['mouse:left'].left_clicked.emit('mouse:left','left')
+    assert owner.edits[-1]==(('0',),{'new':True,'output':'mouse:left'})
+    owner.mapping_change({'op':'binding','trigger':'0+9','mapping':{'short':{'action':'hold','value':'Ctrl+Space'}}})
+    page.edit_output('Space','Space')
+    assert owner.edits[-1]==(('0+9',),{})
+    assert page.keycaps['Ctrl'].badges and page.keycaps['Space'].badges
+
+
+def test_actual_output_feedback_is_distinct_from_binding_badges_and_clears(view):
+    owner,page=view
+    owner.mapping_change({'op':'binding','trigger':'0','mapping':{'short':{'action':'hold','value':'Ctrl+Space'}}})
+    assert page.keycaps['Space'].badges and not page.keycaps['Space'].is_pressed
+    page.update_feedback({'outputs':['key:17','key:32','mouse:left'],'active':['0']},True)
+    assert page.keycaps['Space'].is_pressed and page.keycaps['Ctrl'].is_pressed and page.keycaps['mouse:left'].is_pressed
+    assert page.bindings.active=={'0'}
+    page.update_feedback({},False)
+    assert not any(cap.is_pressed for cap in page.keycaps.values())
+
+
+@pytest.mark.parametrize('first,second',[(9,0),(0,9),(10,12),(12,10)])
+def test_editor_captures_simultaneous_chord_regardless_of_order(view,first,second):
+    owner,page=view
+    dialog=BindingDialog(owner,'0',{},output='Ctrl+S'); dialog.timer.stop()
     try:
-        # Pull RT (axis 5 = 0.8) -> Immediate mouse:left down
-        engine.update({'axes': [0, 0, 0, 0, 0, 0.8], 'buttons': []})
-        assert ('left', True) in mock.mouse_buttons
-        assert 'left' in engine.active_mouse_buttons
-
-        # Release RT (axis 5 = 0.0) -> Immediate mouse:left up
-        engine.update({'axes': [0, 0, 0, 0, 0, 0.0], 'buttons': []})
-        assert ('left', False) in mock.mouse_buttons
-        assert 'left' not in engine.active_mouse_buttons
-
-        # Pull LT (axis 4 = 0.8) -> Immediate mouse:right down
-        engine.update({'axes': [0, 0, 0, 0, 0.8, 0], 'buttons': []})
-        assert ('right', True) in mock.mouse_buttons
-        assert 'right' in engine.active_mouse_buttons
-
-        # Release LT -> Immediate mouse:right up
-        engine.update({'axes': [0, 0, 0, 0, 0.0, 0], 'buttons': []})
-        assert ('right', False) in mock.mouse_buttons
-        assert 'right' not in engine.active_mouse_buttons
-    finally:
-        engine.close()
+        dialog.start_capture();owner.snapshot={'buttons':[]};dialog.poll()
+        owner.snapshot={'buttons':[first]};dialog.poll()
+        owner.snapshot={'buttons':[first,second]};dialog.poll()
+        owner.snapshot={'buttons':[second]};dialog.poll()
+        owner.snapshot={'buttons':[]};dialog.poll()
+        assert dialog.trigger()=='+'.join(map(str,sorted((first,second))))
+        assert not dialog.capturing
+        assert dialog.value()['short']['value']=='Ctrl+S'
+    finally: dialog.close()
 
 
-def test_virtual_kbm_nikki_chords_switching():
-    mock = MockActions()
-    engine = VirtualKbmEngine(mock)
-    engine.scheme["enabled"] = True
+def test_editor_does_not_merge_sequential_inputs_and_captures_trigger(view):
+    owner,page=view;dialog=BindingDialog(owner);dialog.timer.stop()
     try:
-        # Hold LB (button 9) and press A (button 0) -> suit 1
-        engine.update({'axes': [0]*6, 'buttons': [9]})
-        engine.update({'axes': [0]*6, 'buttons': [9, 0]})
-        assert mock.shortcuts[-1] == '1'
-
-        # Release A, press B (1) -> suit 2
-        engine.update({'axes': [0]*6, 'buttons': [9, 1]})
-        assert mock.shortcuts[-1] == '2'
-
-        # Release B, press X (2) -> suit 3
-        engine.update({'axes': [0]*6, 'buttons': [9, 2]})
-        assert mock.shortcuts[-1] == '3'
-
-        # Release X, press Y (3) -> suit 4
-        engine.update({'axes': [0]*6, 'buttons': [9, 3]})
-        assert mock.shortcuts[-1] == '4'
-    finally:
-        engine.close()
+        dialog.start_capture();owner.snapshot={'buttons':[]};dialog.poll()
+        owner.snapshot={'buttons':[0]};dialog.poll()
+        owner.snapshot={'buttons':[9]};dialog.poll()
+        owner.snapshot={'buttons':[]};dialog.poll()
+        assert dialog.trigger()=='0'
+        dialog.start_capture();dialog.poll()
+        owner.snapshot={'buttons':[0],'axes':[0,0,0,0,0,.8]};dialog.poll()
+        owner.snapshot={'buttons':[]};dialog.poll()
+        assert dialog.trigger()=='0+RT'
+    finally:dialog.close()
 
 
-def test_virtual_kbm_wasd_movement():
-    mock = MockActions()
-    engine = VirtualKbmEngine(mock)
-    engine.scheme["enabled"] = True
+def test_keyboard_capture_supports_modifiers_and_two_ordinary_keys(view):
+    owner,page=view;field=KeySequenceField();field.start_recording()
+    QTest.keyPress(field,Qt.Key_Control);QTest.keyPress(field,Qt.Key_Shift);QTest.keyPress(field,Qt.Key_S)
+    QTest.keyRelease(field,Qt.Key_S);QTest.keyRelease(field,Qt.Key_Shift);QTest.keyRelease(field,Qt.Key_Control)
+    assert field.text()=='Ctrl+Shift+S' and not field.recording
+    field.start_recording();QTest.keyPress(field,Qt.Key_W);QTest.keyPress(field,Qt.Key_Space)
+    QTest.keyRelease(field,Qt.Key_W);QTest.keyRelease(field,Qt.Key_Space)
+    assert field.text()=='W+Space'
+
+
+def test_long_hold_can_be_edited_and_all_selectors_share_profile(view):
+    owner,page=view
+    dialog=BindingDialog(owner,'LT',{'short':{'action':'hold','value':'Ctrl+S'},'long':{'action':'hold','value':'Shift+W'}})
     try:
-        # Push Left Stick Up slight -> W
-        engine.update({'axes': [0.0, -0.6, 0, 0, 0, 0], 'buttons': []})
-        assert mock.held_keys == {'W'}
-
-        # Push Left Stick Up full -> W + Shift (sprint)
-        engine.update({'axes': [0.0, -1.0, 0, 0, 0, 0], 'buttons': []})
-        assert mock.held_keys == {'W', 'Shift'}
-
-        # Neutral -> Release all
-        engine.update({'axes': [0.0, 0.0, 0, 0, 0, 0], 'buttons': []})
-        assert len(mock.held_keys) == 0
-    finally:
-        engine.close()
+        assert dialog.value()['long']=={'action':'hold','value':'Shift+W'}
+        assert dialog.value()['short']=={'action':'hold','value':'Ctrl+S'}
+        page.scheme_combo.setCurrentText('桌面导航')
+        assert owner.config['active_profile']=='桌面导航'
+        assert owner.store.mappings['0']['short']['value']=='Enter'
+    finally:dialog.close()
 
 
-def test_format_action_display():
-    assert "鼠标左键" in format_action_display("mouse:left")
-    assert "鼠标右键" in format_action_display("mouse:right")
-    assert "Space" in format_action_display("Space")
-    assert format_action_display("") == "未绑定"
+def test_mouse_stick_unblocked_in_preview_and_auto_desktop_mode():
+    from gamepadstudio.mapping_engine import MappingRuntime
+    class MockActions:
+        def __init__(self):
+            self.moves = []
+        def move_mouse(self, dx, dy):
+            self.moves.append((dx, dy))
+        def is_nikki_game_focused(self):
+            return False
 
-
-def test_virtual_kbm_continuous_mouse_physics():
-    mock = MockActions()
-    engine = VirtualKbmEngine(mock)
-    engine.scheme["enabled"] = True
+    actions = MockActions()
+    runtime = MappingRuntime(actions, lambda *_: None, start_mouse=True)
     try:
-        # Push Right Stick right (axis 2 = 1.0) and hold for 100ms
-        for _ in range(6):
-            engine.update({'axes': [0, 0, 1.0, 0, 0, 0], 'buttons': []})
-            time.sleep(0.016)
+        config = {
+            'active_profile': 'test_p',
+            'profile_options': {'test_p': {'right_stick_mouse': True, 'mouse': {'mode': 'game'}}},
+            'profiles': {'test_p': {}},
+        }
+        state = {'axes': [0.0, 0.0, 0.75, 0.5, 0.0, 0.0], 'buttons': []}
 
-        # Ensure continuous mouse movement deltas were generated
-        assert len(mock.mouse_moves) > 0
-        total_dx = sum(dx for dx, dy in mock.mouse_moves)
-        assert total_dx > 50, f"Expected substantial continuous dx, got {total_dx}"
+        # 即使 preview=True，摇杆移动鼠标也绝不能被阻断
+        runtime.update(state, config, enabled=True, preview=True)
+        assert runtime.mouse_thread.stick_x == 0.75
+        assert runtime.mouse_thread.stick_y == 0.5
+        # 非游戏窗口前台时，自动激活桌面指针模式 (is_desktop=True)
+        assert runtime.mouse_thread.is_desktop is True
     finally:
-        engine.close()
+        runtime.mouse_thread.stop()
+        runtime.mouse_thread.join(timeout=1.0)
 
 
-def test_virtual_kbm_lt_aim_and_chord_interplay():
-    mock = MockActions()
-    engine = VirtualKbmEngine(mock)
-    engine.scheme["enabled"] = True
-    try:
-        # 1. Pull LT without face buttons -> aim (mouse:right down)
-        engine.update({'axes': [0, 0, 0, 0, 0.9, 0], 'buttons': []})
-        assert ('right', True) in mock.mouse_buttons
+def test_keycap_short_and_long_press_text_distinction(view):
+    owner, page = view
+    cap = page.keycaps['Space']
+    cap.set_mapping_info([
+        {'trigger': 'A', 'gesture': 'short'},
+        {'trigger': 'LB', 'gesture': 'long'},
+    ], capturing=False)
 
-        # 2. While holding LT, press A (0) -> fire Outfit 5 (chord LT+0 -> 5)
-        # Should cleanly release mouse:right and fire shortcut 5
-        engine.update({'axes': [0, 0, 0, 0, 0.9, 0], 'buttons': [0]})
-        assert ('right', False) in mock.mouse_buttons
-        assert '5' in mock.shortcuts
+    assert 'A' in cap.short_bindings
+    assert 'LB' in cap.long_bindings
+    assert '短' in cap.badges[0]
+    assert '长' in cap.badges[1]
 
-        # 3. Release A (0) while still holding LT -> chord consumed, no re-aiming
-        engine.update({'axes': [0, 0, 0, 0, 0.9, 0], 'buttons': []})
-
-        # 4. Release LT completely
-        engine.update({'axes': [0, 0, 0, 0, 0.0, 0], 'buttons': []})
-        assert 'LT' not in engine.consumed_modifiers
-    finally:
-        engine.close()
+    # 验证键帽重绘无异常
+    cap.repaint()
 
 
-def test_virtual_kbm_smart_launcher_click():
-    mock = MockActions()
-    engine = VirtualKbmEngine(mock)
-    engine.scheme["enabled"] = True
-    try:
-        # 1. Launcher / Desktop context: is_nikki_game_focused = False
-        mock.game_focused = False
-        
-        # Press A (button 0) on launcher -> triggers mouse:left (click) instead of Space
-        engine.update({'axes': [0]*6, 'buttons': [0]})
-        assert ('left', True) in mock.mouse_buttons
-        assert 'left' in engine.active_mouse_buttons
-        assert ('Space', True) not in mock.holds
+def test_canvas_dynamic_key_size_scaling(view):
+    owner, page = view
+    cap_space = page.keycaps['Space']
+    old_w = cap_space.width()
 
-        # Release A on launcher -> releases mouse:left
-        engine.update({'axes': [0]*6, 'buttons': []})
-        assert ('left', False) in mock.mouse_buttons
-        assert 'left' not in engine.active_mouse_buttons
+    # 模拟视口放大至 4K/超宽屏
+    page.recompute_key_sizes(72, 68)
+    assert cap_space.width() > old_w
+    assert cap_space.height() == 68
 
-        # RT also works as mouse:left on launcher
-        engine.update({'axes': [0, 0, 0, 0, 0, 0.8], 'buttons': []})
-        assert ('left', True) in mock.mouse_buttons
-        engine.update({'axes': [0, 0, 0, 0, 0, 0.0], 'buttons': []})
-        assert ('left', False) in mock.mouse_buttons
-
-        # 2. In-Game context: is_nikki_game_focused = True
-        mock.game_focused = True
-        mock.mouse_buttons.clear()
-        mock.holds.clear()
-
-        # Press A (button 0) in game -> triggers Space (Jump)
-        engine.update({'axes': [0]*6, 'buttons': [0]})
-        assert ('Space', True) in mock.holds
-        assert ('left', True) not in mock.mouse_buttons
-
-        # Release A in game -> releases Space
-        engine.update({'axes': [0]*6, 'buttons': []})
-        assert ('Space', False) in mock.holds
-
-        # Pull RT in game -> triggers mouse:left (Attack)
-        engine.update({'axes': [0, 0, 0, 0, 0, 0.8], 'buttons': []})
-        assert ('left', True) in mock.mouse_buttons
-        engine.update({'axes': [0, 0, 0, 0, 0, 0.0], 'buttons': []})
-        assert ('left', False) in mock.mouse_buttons
-    finally:
-        engine.close()
+    # 模拟视口缩小
+    page.recompute_key_sizes(46, 44)
+    assert cap_space.width() < old_w
+    assert cap_space.height() == 44
 
 
-def test_general_preset_desktop_clicking():
-    mock = MockActions()
-    engine = VirtualKbmEngine(mock)
-    engine.load_scheme(GENERAL_PRESET_CONFIG)
-    engine.scheme["enabled"] = True
-    try:
-        # A button (0) is directly mapped to mouse:left
-        engine.update({'axes': [0]*6, 'buttons': [0]})
-        assert ('left', True) in mock.mouse_buttons
-        engine.update({'axes': [0]*6, 'buttons': []})
-        assert ('left', False) in mock.mouse_buttons
+def test_binding_list_collapsed_by_default_to_maximize_keyboard_space(view):
+    owner, page = view
+    # 默认折叠隐藏，主区域留给全画幅键盘
+    assert page.bindings.isHidden()
+    page.toggle_bindings_list()
+    assert not page.bindings.isHidden()
+    page.toggle_bindings_list()
+    assert page.bindings.isHidden()
 
-        # B button (1) is directly mapped to mouse:right
-        engine.update({'axes': [0]*6, 'buttons': [1]})
-        assert ('right', True) in mock.mouse_buttons
-        engine.update({'axes': [0]*6, 'buttons': []})
-        assert ('right', False) in mock.mouse_buttons
-    finally:
-        engine.close()
-
-
-def test_trigger_label_and_inverted_mapping():
-    from gamepadstudio.virtual_kbm import get_trigger_label, get_inverted_mapping
-    # PS family
-    assert get_trigger_label("0", "dualsense") == "×"
-    assert get_trigger_label("RT", "dualsense") == "R2"
-    # Xbox family
-    assert get_trigger_label("0", "xbox") == "A"
-    assert get_trigger_label("RT", "xbox") == "RT"
-    # Flight stick / Generic
-    assert get_trigger_label("LS:Up", "generic") == "摇杆↑"
-    assert get_trigger_label("25", "generic") == "键26"
-    assert get_trigger_label("LB + 0", "xbox") == "LB+A"
-
-    scheme = {
-        "buttons": {"0": "Space", "RT": "mouse:left", "1": "Shift"},
-        "chords": {"LB + 0": "1"}
-    }
-    inv = get_inverted_mapping(scheme)
-    assert inv["Space"] == ["0"]
-    assert inv["mouse:left"] == ["RT"]
-    assert inv["1"] == ["LB + 0"]
-
-
-def test_virtual_kbm_ui_layout_and_interactive_capture(tmp_path):
-    from PySide6.QtWidgets import QApplication
-    from gamepadstudio.virtual_kbm_ui import VirtualKbmPage
-    from gamepadstudio.studio_core import ConfigStore
-
-    app = QApplication.instance() or QApplication([])
-    mock = MockActions()
-    engine = VirtualKbmEngine(mock)
-    store = ConfigStore(tmp_path)
-
-    page = VirtualKbmPage(engine, store=store)
-    try:
-        # Check standard keycaps exist
-        assert "Space" in page.keycaps
-        assert "W" in page.keycaps
-        assert "mouse:left" in page.keycaps
-        assert "Esc" in page.keycaps
-        assert "F12" in page.keycaps
-
-        # 1. User clicks 'Space' -> enters capturing state
-        page.on_keycap_clicked("Space", "Space (空格)")
-        assert page.is_capturing is True
-        assert page.capturing_target == "Space"
-        assert page.keycaps["Space"].is_capturing is True
-
-        # 2. Controller input arrives: button 0 (A / Cross) pressed
-        page.handle_device_input({'buttons': [0], 'axes': [0.0]*6})
-        # Capture should complete and exit
-        assert page.is_capturing is False
-        assert page.schemes[page.current_scheme_name]["buttons"]["0"] == "Space"
-        assert "0" in page.keycaps["Space"].badges or any("A" in b or "×" in b for b in page.keycaps["Space"].badges)
-
-        # 3. User clicks 'mouse:left' -> pulls RT (axes[5] = 0.8)
-        page.on_keycap_clicked("mouse:left", "🖱️ 鼠标左键")
-        assert page.is_capturing is True
-        page.handle_device_input({'buttons': [], 'axes': [0, 0, 0, 0, 0, 0.85]})
-        assert page.is_capturing is False
-        assert page.schemes[page.current_scheme_name]["buttons"]["RT"] == "mouse:left"
-
-        # 4. Right click on 'Space' keycap -> clears binding
-        page.on_keycap_right_clicked("Space", "Space (空格)")
-        assert "0" not in page.schemes[page.current_scheme_name]["buttons"]
-
-    finally:
-        engine.close()
 

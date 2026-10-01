@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 os.environ['QT_QPA_PLATFORM']='offscreen'
 from PySide6.QtWidgets import QApplication, QDialog
 from PySide6.QtCore import Qt
@@ -16,6 +15,28 @@ def test_remote_gui_signal_connection_and_close(tmp_path,monkeypatch):
     window.close();app.processEvents();assert window.closed
 
 
+def test_controller_refresh_keeps_shared_settings_store(tmp_path, monkeypatch):
+    from gamepadstudio.studio_core import ConfigStore
+    monkeypatch.setattr('gamepadstudio.studio.request', lambda *a, **kw: {'ok':True})
+    monkeypatch.setattr('gamepadstudio.ipc.request', lambda *a, **kw: {'ok':True})
+    app = QApplication.instance() or QApplication([])
+    window = Studio(tmp_path)
+    try:
+        original_store = window.store
+        fresh = ConfigStore(tmp_path)
+        fresh.data['gamebar_shield_enabled'] = True
+        fresh.save()
+        window.update_controller_ui(dict(instance_id=1, family='xbox', controller_type=2,
+                                         name='Fixture', available_buttons=list(range(16)),
+                                         buttons=[], axes=[0.]*6, led=False, rumble=False,
+                                         touchpad=False, touch=[], power=-1))
+        assert window.store is original_store is window.virtual_kbm_page.store
+        window.store.save()
+        assert ConfigStore(tmp_path).data['gamebar_shield_enabled'] is True
+    finally:
+        window.cleanup(); window.hide()
+
+
 def test_gui_pages_capture_and_persistent_mapping(tmp_path,monkeypatch):
     class Disconnected:
         available=[]
@@ -23,10 +44,7 @@ def test_gui_pages_capture_and_persistent_mapping(tmp_path,monkeypatch):
         def read(self):return None
         def close(self):pass
     monkeypatch.setattr('gamepadstudio.studio.Device',Disconnected)
-    app=QApplication.instance() or QApplication([])
-    if Path('C:/Windows/Fonts/msyh.ttc').is_file():
-        QFontDatabase.addApplicationFont('C:/Windows/Fonts/msyh.ttc')
-    app.setStyleSheet(STYLE)
+    app=QApplication.instance() or QApplication([]); QFontDatabase.addApplicationFont('C:/Windows/Fonts/msyh.ttc'); app.setStyleSheet(STYLE)
     window=Studio(tmp_path,standalone=True); window.show(); app.processEvents()
     assert window.snapshot is None or 'name' in window.snapshot
     for index in range(6):

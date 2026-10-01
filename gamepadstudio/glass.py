@@ -25,6 +25,7 @@ TOKENS = {
     # Warm dark graphite & matte metal surfaces
     'void':         '#181615',     # matte industrial chassis background
     'base':         '#1d1b19',     # sub-panel level
+    'surface_lo':   '#1d1b19',     # low-contrast sub-surface level
     'surface':      '#252220',     # milled graphite module panel
     'elevated':     '#2e2b28',     # tactile button & input blocks
     'overlay':      '#3e3935',     # active / hovered control surface
@@ -37,6 +38,7 @@ TOKENS = {
     'ink_2':        '#c4beae',     # laser-etched secondary readout
     'ink_3':        '#8c8577',     # dial scale & ruler markings
     'ink_dim':      '#5e5950',     # subtle placeholder / inactive
+    'muted':        '#8c8577',     # secondary muted text alias
 
     # Teenage Engineering Iconic Accents
     'accent':       '#ff5722',     # TE Punchy Safety Orange
@@ -550,6 +552,7 @@ PATHS = {
     'sparkle':'<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/>',
     'touchpad':'<rect x="3" y="6" width="18" height="12" rx="4"/><path d="M12 6v5m-4 7h8"/>',
     'monitor':'<rect x="2" y="3" width="20" height="14" rx="3.5"/><path d="M8 21h8m-4-4v4"/>',
+    'globe':'<circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
 }
 
 
@@ -667,18 +670,20 @@ class Indicator(QLabel):
         color = TOKENS['ink_dim']
         symbol = 'info'
         if self.kind == 'connection':
-            good = '已连接' in text or '运行中' in text
+            good = any(k in text for k in ('已连接', '运行中', 'Connected', 'Running'))
             symbol = 'connected' if good else 'disconnected'
             color = TOKENS['green'] if good else TOKENS['ink_dim']
         elif self.kind == 'power':
-            symbol = ('bolt' if '外接' in text else
-                      'battery_low' if '低' in text else
-                      'battery_mid' if '中等' in text else 'battery')
-            color = (TOKENS['amber'] if '低' in text else
-                     TOKENS['accent'] if '外接' in text else
+            symbol = ('bolt' if any(k in text for k in ('外接', 'External')) else
+                      'battery_low' if any(k in text for k in ('低', 'Low', 'Critical')) else
+                      'battery_mid' if any(k in text for k in ('中等', 'Medium')) else 'battery')
+            color = (TOKENS['amber'] if any(k in text for k in ('低', 'Low', 'Critical')) else
+                     TOKENS['accent'] if any(k in text for k in ('外接', 'External')) else
                      TOKENS['green'])
-            if '未' in text or '未知' in text:
+            if any(k in text for k in ('未', '未知', 'Unknown', 'Disconnected')):
                 symbol = 'info'
+        self.symbol = symbol
+        self.color = color
         self.setPixmap(glyph(symbol, color).pixmap(20, 20))
 
 

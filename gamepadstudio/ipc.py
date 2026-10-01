@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, QTimer, Signal, QLockFile
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 
@@ -16,42 +16,167 @@ def default_root():
     old_dir = local_appdata / 'DualSenseStudio'
     if not new_dir.exists() and old_dir.exists():
         return old_dir
+    if new_dir.exists() and old_dir.exists():
+        old_cfg = old_dir / 'studio.json'
+        new_cfg = new_dir / 'studio.json'
+        if old_cfg.is_file() and (not new_cfg.is_file() or old_cfg.stat().st_mtime > new_cfg.stat().st_mtime):
+            try:
+                import shutil
+                shutil.copy2(old_cfg, new_cfg)
+            except Exception:
+                pass
     return new_dir
 
 
-def endpoint(root, role='agent'):
+def endpoint(root, role='agent', legacy=False):
     session=ctypes.c_ulong()
     ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(),ctypes.byref(session))
     identity=f'{Path(root).resolve()}|{os.environ.get("USERNAME","")}|{session.value}'.casefold()
-    return 'GamePadStudio-'+role+'-'+hashlib.sha256(identity.encode()).hexdigest()[:20]
+    prefix = 'DualSenseStudio-' if legacy else 'GamePadStudio-'
+    return prefix+role+'-'+hashlib.sha256(identity.encode()).hexdigest()[:20]
 
 
 def command_line(root, *args):
     if getattr(sys,'frozen',False):
         command=[sys.executable]
     else:
-        python=Path(sys.executable).with_name('pythonw.exe')
-        command=[str(python),str(Path(__file__).resolve().parents[1]/'main.py')]
+        project_root = Path(__file__).resolve().parents[1]
+        venv_pythonw = project_root / '.venv' / 'Scripts' / 'pythonw.exe'
+        if venv_pythonw.exists():
+            python = venv_pythonw
+        else:
+            python = Path(sys.executable).with_name('pythonw.exe')
+        command = [str(python), str(project_root / 'main.py')]
     return [*command,'--data-dir',str(Path(root).resolve()),*args]
 
 
 def spawn(root,*args):
+    flags = subprocess.CREATE_NO_WINDOW
+    if sys.platform == 'win32':
+        flags |= getattr(subprocess, 'DETACHED_PROCESS', 0x00000008)
+        flags |= getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x00000200)
     return subprocess.Popen(command_line(root,*args),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW,close_fds=True)
+                            stderr=subprocess.DEVNULL,creationflags=flags,close_fds=True)
 
 
 def request(root, command, role='agent', timeout=1200, **values):
-    socket=QLocalSocket();socket.connectToServer(endpoint(root,role))
-    if not socket.waitForConnected(timeout):return None
-    socket.write((json.dumps({'command':command,**values})+'\n').encode());socket.flush()
-    data=bytearray()
-    while socket.waitForReadyRead(timeout):
-        data.extend(bytes(socket.readAll()))
-        while b'\n' in data:
-            line,_,rest=data.partition(b'\n');data=bytearray(rest)
-            result=json.loads(line)
-            if result.get('type')=='reply':socket.disconnectFromServer();return result
-    socket.abort();return None
+    for legacy in (False, True):
+        socket=QLocalSocket();socket.connectToServer(endpoint(root,role,legacy=legacy))
+        if socket.waitForConnected(timeout):
+            socket.write((json.dumps({'command':command,**values})+'\n').encode());socket.flush()
+            data=bytearray()
+            while socket.waitForReadyRead(timeout):
+                data.extend(bytes(socket.readAll()))
+                while b'\n' in data:
+                    line,_,rest=data.partition(b'\n');data=bytearray(rest)
+                    result=json.loads(line)
+                    if result.get('type')=='reply':socket.disconnectFromServer();return result
+            socket.abort()
+    return None
+
+
+def read_lock_pid(lock_path: Path) -> int:
+    """从 QLockFile 锁文件中提取持有进程 PID"""
+    try:
+        if lock_path.exists():
+            content = lock_path.read_text(encoding='utf-8', errors='ignore').strip()
+            if content:
+                first_line = content.splitlines()[0].strip()
+                if first_line.isdigit():
+                    return int(first_line)
+    except Exception:
+        pass
+    return 0
+
+
+def is_process_alive(pid: int) -> bool:
+    """判断指定 PID 进程是否依然存活"""
+    if pid <= 0:
+        return False
+    if sys.platform == 'win32':
+        try:
+            hproc = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not hproc:
+                return False
+            exit_code = ctypes.c_ulong()
+            ret = ctypes.windll.kernel32.GetExitCodeProcess(hproc, ctypes.byref(exit_code))
+            ctypes.windll.kernel32.CloseHandle(hproc)
+            return bool(ret and exit_code.value == 259)
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+
+def terminate_pid(pid: int, timeout_ms: int = 800) -> bool:
+    """强行终止残留孤儿进程并等待其释放内核句柄与手柄占用"""
+    if pid <= 0 or pid == os.getpid():
+        return False
+    if sys.platform == 'win32':
+        # 1. 尝试 Win32 API 直接终止
+        try:
+            hproc = ctypes.windll.kernel32.OpenProcess(0x0001 | 0x00100000, False, pid)
+            if hproc:
+                ctypes.windll.kernel32.TerminateProcess(hproc, 1)
+                ctypes.windll.kernel32.WaitForSingleObject(hproc, timeout_ms)
+                ctypes.windll.kernel32.CloseHandle(hproc)
+                if not is_process_alive(pid):
+                    return True
+        except Exception:
+            pass
+
+        # 2. 若 API 终止失败 (如权限受限或句柄锁定)，回退至 taskkill 强制终止
+        try:
+            import subprocess
+            subprocess.run(['taskkill', '/F', '/PID', str(pid)], capture_output=True, timeout=2)
+            time.sleep(0.1)
+            return not is_process_alive(pid)
+        except Exception:
+            pass
+    else:
+        try:
+            import signal
+            os.kill(pid, signal.SIGKILL)
+            return True
+        except Exception:
+            pass
+    return False
+
+
+def cleanup_stale_agent(root: Path):
+    """Remove a dead process's lock; never kill a live input owner on startup."""
+    root = Path(root).resolve()
+    lock_path = root / 'agent.lock'
+    old_pid = read_lock_pid(lock_path)
+    if old_pid and (old_pid == os.getpid() or is_process_alive(old_pid)):
+        return False
+    lock = QLockFile(str(lock_path))
+    lock.setStaleLockTime(0)
+    return not lock_path.exists() or lock.removeStaleLockFile()
+
+
+def cleanup_stale_ui(root: Path):
+    """检测并清理之前残留或卡死的旧 Studio 界面进程与孤儿锁"""
+    root = Path(root).resolve()
+    lock_path = root / 'studio.lock'
+    old_pid = read_lock_pid(lock_path)
+    if old_pid and old_pid != os.getpid() and is_process_alive(old_pid):
+        try:
+            request(root, 'exit', role='ui', timeout=300)
+            time.sleep(0.1)
+        except Exception:
+            pass
+        if is_process_alive(old_pid):
+            terminate_pid(old_pid, timeout_ms=500)
+    try:
+        if lock_path.exists():
+            lock_path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 class LocalServer(QObject):
@@ -106,7 +231,10 @@ class AgentClient(QObject):
         self.timer=QTimer(self);self.timer.timeout.connect(self.try_connect);self.timer.start(1000);self.try_connect()
 
     def try_connect(self):
-        if self.socket.state()==QLocalSocket.UnconnectedState:self.socket.connectToServer(endpoint(self.root))
+        if self.socket.state()==QLocalSocket.UnconnectedState:
+            self.socket.connectToServer(endpoint(self.root))
+            if self.socket.state()==QLocalSocket.UnconnectedState:
+                self.socket.connectToServer(endpoint(self.root, legacy=True))
 
     def online(self):
         self.connected=True;self.send('status')

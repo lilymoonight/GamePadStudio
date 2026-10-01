@@ -136,8 +136,8 @@ def test_small_window_instruments_paint_and_fit_with_sweep(tmp_path,monkeypatch)
         window.tester.sweep.setChecked(True); window.poll(); app.processEvents()
         assert window.tester.snapshot()['raw_positions'][0] == (-.025,.032)
         area = window.stack.widget(3)
-        assert area.horizontalScrollBar().maximum() <= 20
-        assert area.verticalScrollBar().maximum() <= 20
+        assert area.horizontalScrollBar().maximum() <= 15
+        assert area.verticalScrollBar().maximum() == 0
         # The complete schematic must paint, including the active face key.
         image = window.tester.diagram.grab().toImage()
         blues = sum(1 for x in range(0,image.width(),2) for y in range(0,image.height(),2)

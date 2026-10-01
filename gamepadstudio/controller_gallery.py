@@ -4,8 +4,9 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QLineEdit, QComboBox, QScrollArea, QDialog, QSizePolicy)
 from .controller_photo import ControllerPhoto, PHOTOS
-from .controller_catalog import CATALOG
+from .controller_catalog import CATALOG, get_catalog_entry
 from .glass import GlassPanel, IconButton, Indicator, glyph, TOKENS, token_color, tag_style
+from .i18n import tr, get_language
 
 
 def text(value, kind=None):
@@ -93,7 +94,7 @@ class ControllerGallery(QWidget):
         bar.setSpacing(10)
 
         self.filter = QComboBox(self)
-        self.filter.addItems(['全部手柄', '已连接', '我的收藏'])
+        self.filter.addItems([tr('全部手柄'), tr('已连接'), tr('我的收藏')])
         self.filter.setFixedHeight(32)
         self.filter.setMinimumWidth(110)
         self.filter.setMaximumWidth(130)
@@ -103,7 +104,7 @@ class ControllerGallery(QWidget):
 
         # Search Bar
         self.search = QLineEdit()
-        self.search.setPlaceholderText('搜索手柄型号...')
+        self.search.setPlaceholderText(tr('搜索手柄型号...'))
         self.search.setFixedWidth(240)
         self.search.setFixedHeight(32)
         self.search.setClearButtonEnabled(True)
@@ -114,7 +115,7 @@ class ControllerGallery(QWidget):
         self.search.addAction(glyph('search', TOKENS['ink_3']), QLineEdit.LeadingPosition)
         bar.addWidget(self.search)
 
-        refresh_btn = IconButton('refresh', '重新扫描设备', on_scan, 32)
+        refresh_btn = IconButton('refresh', tr('重新扫描设备'), on_scan, 32)
         refresh_btn.setStyleSheet(
             f'border-radius: {TOKENS["r_sm"]}px; background: {TOKENS["elevated"]}; border: 1px solid {TOKENS["border_hi"]};'
         )
@@ -157,7 +158,7 @@ class ControllerGallery(QWidget):
             line.setContentsMargins(0, 0, 0, 0)
             current = device['instance_id'] == active
             indicator = Indicator()
-            indicator.setText('已连接' if current else '可切换')
+            indicator.setText(tr('已连接') if current else tr('可切换'))
             line.addWidget(indicator)
             name = text(device['name'])
             name.setStyleSheet(f'font-weight: 600; color: {TOKENS["ink"]}; font-size: 13px;')
@@ -165,11 +166,11 @@ class ControllerGallery(QWidget):
             name.setToolTip(device['name'])
             line.addWidget(name, 1)
             if not device['supported']:
-                hint = IconButton('info', '未识别，尝试 XInput 模式')
+                hint = IconButton('info', tr('未识别，尝试 XInput 模式'))
                 line.addWidget(hint)
             else:
                 choose = IconButton(
-                    'arrow', '管理' if current else '切换到此手柄',
+                    'arrow', tr('管理') if current else tr('切换到此手柄'),
                     lambda checked=False, i=device['instance_id'], c=current: self.on_manage() if c else self.on_select(i)
                 )
                 line.addWidget(choose)
@@ -213,7 +214,7 @@ class ControllerGallery(QWidget):
         ]
 
         for index, family in enumerate(families):
-            info = CATALOG[family]
+            info = get_catalog_entry(family)
             box = ProductCard(lambda k=family: self.open_family(k))
             box.setAccessibleName(info['name'])
             body = QVBoxLayout(box)
@@ -227,13 +228,13 @@ class ControllerGallery(QWidget):
             head.addStretch()
 
             if family in connected:
-                conn_badge = QLabel('  已连接  ')
+                conn_badge = QLabel(f"  {tr('已连接')}  ")
                 conn_badge.setStyleSheet(tag_style(TOKENS['green'], 0.18, 0.40))
                 head.addWidget(conn_badge)
 
             is_fav = family in self.favorites
             favorite = IconButton(
-                'heart', '取消收藏' if is_fav else '收藏',
+                'heart', tr('取消收藏') if is_fav else tr('收藏'),
                 lambda checked=False, k=family: self.toggle_favorite(k), 28
             )
             favorite.setCheckable(True)
@@ -260,20 +261,20 @@ class ControllerGallery(QWidget):
             title_v.addWidget(sub_lbl)
             foot.addLayout(title_v, 1)
 
-            details = IconButton('arrow', '进入配置 ' + info['name'], lambda checked=False, k=family: self.open_family(k), 32)
+            details = IconButton('arrow', tr('进入配置 ') + info['name'], lambda checked=False, k=family: self.open_family(k), 32)
             details.setStyleSheet(f'background: {TOKENS["elevated"]}; border-radius: {TOKENS["r_sm"]}px; border: 1px solid {TOKENS["border"]};')
             foot.addWidget(details)
             body.addLayout(foot)
 
             if family == 'generic':
-                example = text('8BitDo · 示例', 'caption')
+                example = text(tr('8BitDo · 示例'), 'caption')
                 body.addWidget(example)
 
             box.setToolTip(info['note'])
             self.grid.addWidget(box, index // self.columns, index % self.columns)
 
         if not families:
-            empty = text('未找到匹配的手柄设备', 'muted')
+            empty = text(tr('未找到匹配的手柄设备'), 'muted')
             empty.setAlignment(Qt.AlignCenter)
             self.grid.addWidget(empty, 0, 0, 1, self.columns)
 
@@ -282,7 +283,7 @@ class ControllerGallery(QWidget):
         self.grid.setRowStretch((len(families) + self.columns - 1) // self.columns, 1)
 
     def detail_dialog(self, family):
-        info = CATALOG[family]
+        info = get_catalog_entry(family)
         dialog = QDialog(self)
         dialog.setWindowTitle(info['name'])
         dialog.resize(580, 430)
@@ -293,7 +294,7 @@ class ControllerGallery(QWidget):
         head = QHBoxLayout()
         head.addWidget(text(info['name'], 'heading'))
         head.addStretch()
-        head.addWidget(IconButton('close', '关闭', dialog.accept))
+        head.addWidget(IconButton('close', tr('关闭'), dialog.accept))
         layout.addLayout(head)
 
         art = ControllerPhoto(family)
@@ -304,7 +305,7 @@ class ControllerGallery(QWidget):
         footer.addWidget(text('8BitDo Ultimate 2C · 示例' if family == 'generic' else info['brand'], 'muted'))
         footer.addStretch()
         footer.addWidget(IconButton('info', info['note']))
-        footer.addWidget(IconButton('external', '官方产品页', lambda: QDesktopServices.openUrl(QUrl(PHOTOS[family]['page']))))
+        footer.addWidget(IconButton('external', tr('官方产品页'), lambda: QDesktopServices.openUrl(QUrl(PHOTOS[family]['page']))))
         layout.addLayout(footer)
 
         for device in self.devices:
@@ -316,7 +317,7 @@ class ControllerGallery(QWidget):
                 row = QHBoxLayout()
                 row.addWidget(text(device['name']))
                 row.addStretch()
-                row.addWidget(IconButton('arrow', '管理', activate))
+                row.addWidget(IconButton('arrow', tr('管理'), activate))
                 layout.addLayout(row)
         return dialog
 

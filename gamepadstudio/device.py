@@ -28,6 +28,7 @@ class Device:
             'SDL_SetHintWithPriority': ([C.c_char_p, C.c_char_p,C.c_int], C.c_int),
             'SDL_Init': ([C.c_uint32], C.c_int), 'SDL_QuitSubSystem': ([C.c_uint32], None),
             'SDL_PumpEvents': ([], None), 'SDL_PollEvent': ([C.c_void_p], C.c_int),
+            'SDL_JoystickUpdate': ([], None), 'SDL_GameControllerUpdate': ([], None),
             'SDL_NumJoysticks': ([], C.c_int), 'SDL_IsGameController': ([C.c_int], C.c_int),
             'SDL_JoystickGetDeviceVendor': ([C.c_int], C.c_uint16),
             'SDL_JoystickGetDeviceProduct': ([C.c_int], C.c_uint16),
@@ -50,6 +51,9 @@ class Device:
             'SDL_GameControllerHasButton': ([C.c_void_p,C.c_int], C.c_int),
             'SDL_GameControllerGetNumTouchpads': ([C.c_void_p], C.c_int),
             'SDL_GameControllerOpen': ([C.c_int], C.c_void_p),
+            'SDL_GameControllerAddMapping': ([C.c_char_p], C.c_int),
+            'SDL_GameControllerMapping': ([C.c_void_p], C.c_void_p),
+            'SDL_free': ([C.c_void_p], None),
             'SDL_GameControllerClose': ([C.c_void_p], None),
             'SDL_GameControllerGetAttached': ([C.c_void_p], C.c_int),
             'SDL_GameControllerName': ([C.c_void_p], C.c_char_p),
@@ -71,12 +75,20 @@ class Device:
             fn.argtypes, fn.restype = args, result
         for name in [b'SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS', b'SDL_JOYSTICK_HIDAPI', b'SDL_JOYSTICK_HIDAPI_PS5', b'SDL_JOYSTICK_HIDAPI_PS5_RUMBLE']:
             self.lib.SDL_SetHint(name, b'1')
-        self.lib.SDL_SetHintWithPriority(b'SDL_GAMECONTROLLER_USE_BUTTON_LABELS',b'0',2)
+        # Set RAWINPUT to 0 so HIDAPI / DirectInput operates under HidHide application whitelist.
+        # This completely hides physical hardware from games while allowing GamePad Studio exclusive access.
+        self.lib.SDL_SetHint(b'SDL_JOYSTICK_RAWINPUT', b'0')
+        self.lib.SDL_SetHintWithPriority(b'SDL_GAMECONTROLLER_USE_BUTTON_LABELS', b'0', 2)
         if self.lib.SDL_Init(0x2200) != 0:
             raise RuntimeError(self.lib.SDL_GetError().decode())
         self.event = C.create_string_buffer(128)
 
     def enumerate_devices(self):
+        try:
+            self.lib.SDL_JoystickUpdate()
+            self.lib.SDL_GameControllerUpdate()
+        except Exception:
+            pass
         self.lib.SDL_PumpEvents()
         rows=[]
         for i in range(self.lib.SDL_NumJoysticks()):
@@ -97,8 +109,9 @@ class Device:
 
     def scan(self):
         self.enumerate_devices()
+        current_ids = {r['instance_id'] for r in self.available}
         is_attached = False
-        if self.handle:
+        if self.handle and self.instance_id in current_ids:
             if getattr(self, 'is_raw_joystick', False):
                 is_attached = bool(self.lib.SDL_JoystickGetAttached(self.handle))
             else:
@@ -118,6 +131,7 @@ class Device:
         if row.get('is_gamecontroller', True):
             handle=self.lib.SDL_GameControllerOpen(row['index'])
             if not handle:raise RuntimeError(self.lib.SDL_GetError().decode('utf-8','replace'))
+            self._complete_xbox_share_mapping(handle, row)
             actual=self.lib.SDL_JoystickInstanceID(self.lib.SDL_GameControllerGetJoystick(handle))
             if actual!=instance_id:
                 self.lib.SDL_GameControllerClose(handle);raise RuntimeError('设备列表已变化，请重试')
@@ -143,6 +157,26 @@ class Device:
             self.metadata.update(available_buttons=list(range(num_buttons)),
                                  num_axes=num_axes, num_hats=num_hats,
                                  touchpad=False, led=False, rumble=True)
+
+    def _complete_xbox_share_mapping(self, handle, row):
+        # SDL2's generic Windows Raw Input mapping omits b11 (Share) on
+        # Xbox Series Bluetooth HID 045e:0b13. Do not guess for other pads.
+        guid = row.get('profile_key', '').rsplit(':', 1)[-1]
+        if not (row.get('vendor') == 0x045e and row.get('product') == 0x0b13
+                and guid.endswith('7200')):
+            return
+        joystick = self.lib.SDL_GameControllerGetJoystick(handle)
+        if self.lib.SDL_JoystickNumButtons(joystick) < 12 or self.lib.SDL_GameControllerHasButton(handle, 15):
+            return
+        ptr = self.lib.SDL_GameControllerMapping(handle)
+        if not ptr:
+            return
+        try:
+            mapping = C.string_at(ptr).decode('utf-8')
+        finally:
+            self.lib.SDL_free(ptr)
+        if 'misc1:' not in mapping:
+            self.lib.SDL_GameControllerAddMapping((mapping.rstrip(',') + ',misc1:b11,').encode('utf-8'))
 
     def read(self):
         self.lib.SDL_PumpEvents()

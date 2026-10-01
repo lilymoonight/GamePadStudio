@@ -1,4 +1,5 @@
 import os
+import pytest
 os.environ['QT_QPA_PLATFORM']='offscreen'
 from PySide6.QtWidgets import QApplication
 from gamepadstudio.agent import Agent
@@ -21,6 +22,80 @@ class ActionsStub:
     def shortcut(self,value):
         self.shortcuts.append(value)
     def release_all(self):self.held.clear()
+
+
+def test_pause_survives_restart_until_explicit_resume(tmp_path):
+    from gamepadstudio.studio_core import ConfigStore
+    app=QApplication.instance() or QApplication([])
+    agent=Agent(tmp_path,DeviceStub(),ActionsStub())
+    agent.handle({'command':'pause'})
+    assert ConfigStore(tmp_path).data['mapping_enabled'] is False
+    agent.close()
+    restarted=Agent(tmp_path,DeviceStub(),ActionsStub())
+    try:
+        assert not restarted.enabled
+        restarted.handle({'command':'resume'})
+        assert restarted.enabled and ConfigStore(tmp_path).data['mapping_enabled'] is True
+    finally:restarted.close()
+
+
+def test_runtime_release_failure_still_attempts_native_release_and_stays_paused(tmp_path,monkeypatch):
+    from gamepadstudio.studio_core import ConfigStore
+    app=QApplication.instance() or QApplication([])
+    output=ActionsStub();agent=Agent(tmp_path,DeviceStub(),output)
+    original=agent.engine.reset
+    def refused(*a,**kw):raise OSError('simulated key-up failure')
+    monkeypatch.setattr(agent.engine,'reset',refused)
+    output.held.add('Alt')
+    try:
+        with pytest.raises(OSError):agent.handle({'command':'pause'})
+        assert not output.held and not agent.enabled
+        assert ConfigStore(tmp_path).data['mapping_enabled'] is False
+        with pytest.raises(OSError):agent.handle({'command':'resume'})
+        assert not agent.enabled
+    finally:
+        monkeypatch.setattr(agent.engine,'reset',original);agent.close()
+
+
+def test_close_releases_input_before_waiting_for_recorder(tmp_path,monkeypatch):
+    app=QApplication.instance() or QApplication([])
+    output=ActionsStub();agent=Agent(tmp_path,DeviceStub(),output)
+    output.held.add('Alt')
+    def recorder_stop():assert not output.held
+    monkeypatch.setattr(agent.replay_engine,'stop',recorder_stop)
+    agent.close()
+
+
+def test_xbox_system_buttons_work_in_kbm_without_system_overlay(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    app = QApplication.instance() or QApplication([])
+    device = DeviceStub()
+    device.state.update(instance_id=1, family='xbox', profile_key='xb', available_buttons=list(range(16)))
+    agent = Agent(tmp_path, device, ActionsStub())
+    captures, launches = [], []
+    agent.capture = lambda: captures.append(True)
+    monkeypatch.setattr('gamepadstudio.agent.spawn', lambda *args: launches.append(args))
+    try:
+        agent.poll()
+        agent.config['gamebar_shield_enabled'] = True
+        agent.poll()  # establish the updated effective mapping while neutral
+        for key in (15, 5):
+            device.state['buttons'] = [key]; agent.poll()
+            device.state['buttons'] = []; agent.poll()
+        assert captures == [True]
+        assert len(launches) == 1
+        assert not agent.actions.shortcuts
+        # Explicit user bindings (even 'none') take precedence over the defaults.
+        agent.store.mappings['15'] = {'short':{'action':'none'}}
+        device.state['buttons'] = [15]; agent.poll()
+        device.state['buttons'] = []; agent.poll()
+        assert captures == [True]
+        agent.config['replay_buffer_enabled'] = False
+        assert agent.handle({'command':'save_replay'})['status'] == 'disabled'
+        agent.record_toggle()
+        assert not agent.actions.shortcuts
+    finally:
+        agent.close()
 
 
 
@@ -97,16 +172,16 @@ def test_create_button_long_press_triggers_replay_record(tmp_path):
         assert agent.store.mappings['4']['long']['action'] == 'replay_record'
 
         now = 100.0
-        agent.engine.update({4}, agent.store.mappings, now)
+        agent.engine.update({'buttons':[4]}, agent.config, now=now)
         assert not captures and not actions.shortcuts
         # Exceed threshold (0.65s) -> fires long press
-        agent.engine.update({4}, agent.store.mappings, now + 0.70)
-        assert actions.shortcuts == ['Win+Alt+G']
+        agent.engine.update({'buttons':[4]}, agent.config, now=now + 0.70)
+        agent.executor.submit(lambda: None).result(timeout=2)
+        assert 'Win+Alt+G' in actions.held and not actions.shortcuts
         assert not captures
 
         # Release does not fire short
-        agent.engine.update(set(), agent.store.mappings, now + 0.80)
+        agent.engine.update({'buttons':[]}, agent.config, now=now + 0.80)
         assert not captures
     finally:
         agent.close()
-

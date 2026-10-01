@@ -10,7 +10,7 @@ from .screenshot_service import take_screenshot
 
 
 def run() -> None:
-    parser = argparse.ArgumentParser(description="GamePad Studio 手柄工作台")
+    parser = argparse.ArgumentParser(description="DualSense 手柄截图")
     parser.add_argument("--config", type=str, default=None, help="配置文件路径(.ini)")
     # 将 CLI 默认设为 None，以便与配置文件/环境变量合并
     parser.add_argument("--button", type=int, default=None, help="截图按钮编号")

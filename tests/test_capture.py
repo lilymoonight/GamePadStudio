@@ -63,3 +63,27 @@ def test_delete_capture(tmp_path, monkeypatch):
     # Deleting already deleted file returns False
     assert service.delete_capture(path) is False
 
+
+def test_list_and_delete_mp4_captures(tmp_path):
+    vid = tmp_path / 'DS_测试游戏_20260929_120000_replay.mp4'
+    vid.write_bytes(b'\x00' * 2048)
+    thumb = tmp_path / 'DS_测试游戏_20260929_120000_replay.jpg'
+    thumb.write_bytes(b'\x01' * 512)
+
+    rows = service.list_captures(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]['is_video'] is True
+    assert '测试游戏' in rows[0]['title']
+    assert rows[0]['thumb_path'] == str(thumb)
+
+    # Favorite MP4
+    service.set_favorite(str(vid), True)
+    updated = service.list_captures(tmp_path)
+    assert updated[0]['favorite'] is True
+
+    # Delete MP4 and thumbnail
+    assert service.delete_capture(str(vid)) is True
+    assert not vid.exists()
+    assert not thumb.exists()
+    assert len(service.list_captures(tmp_path)) == 0
+

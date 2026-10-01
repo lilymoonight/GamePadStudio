@@ -16,12 +16,12 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QFrame, QLabe
     QDialog, QFormLayout, QKeySequenceEdit, QFileDialog, QDialogButtonBox, QSlider, QCheckBox,
     QSystemTrayIcon, QMenu, QInputDialog, QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QSizeGrip)
 
-from .ipc import AgentClient, RemoteDevice, LocalServer, request, spawn, default_root, autostart_enabled, set_autostart
+from .ipc import AgentClient, RemoteDevice, LocalServer, request, spawn, default_root, autostart_enabled, set_autostart, cleanup_stale_agent, cleanup_stale_ui
 from .studio_core import ConfigStore, GestureEngine, BUTTONS, ACTION_NAMES
 from .device import Device
 from .actions import WindowsActions, parse_keys, launch_command
-from .kbm_mapper import NIKKI_PROFILE_NAME, NikkiKbmEngine
-from .virtual_kbm import VirtualKbmEngine
+from .mapping_engine import MappingRuntime, effective_mappings, binding_label
+from .mapping_ui import BindingDialog, BindingList
 from .virtual_kbm_ui import VirtualKbmPage
 from .controller_photo import ControllerPhoto, ControllerInput, PHOTOS, photo_health
 from .input_tester import InputTester
@@ -32,6 +32,8 @@ from .glass import (TOKENS, tag_style, token, token_color, STYLE, GlassWindow, G
                     IconButton, Indicator, Toggle, glyph, app_icon,
                     SquircleBadge, AppleRow, AppleGroup, LedSwatch)
 from .te_widgets import DotMatrixDisplay, SpeakerGrille, RotaryKnob, RockerSwitch
+from .i18n import (tr, tr_button, tr_profile, get_language, set_language,
+                   init_language, get_language_preference)
 
 
 
@@ -84,74 +86,28 @@ class CaptureWorker(QThread):
         except Exception as exc: self.failed.emit(str(exc))
 
 
-class MappingDialog(QDialog):
-    def __init__(self, parent, number, mapping):
-        names=getattr(parent,'button_names',BUTTONS)
-        super().__init__(parent); self.setWindowTitle('编辑映射 · '+names[number]); self.setMinimumWidth(540)
-        self.fields = {}
-        layout=QVBoxLayout(self); layout.setContentsMargins(26,24,26,24); layout.setSpacing(16)
-        layout.addWidget(label(names[number], 'heading'))
-        
-        for gesture, title in [('short','短按'),('long','长按')]:
-            box, content=card(); content.addWidget(label(title,'section'))
-            combo=QComboBox()
-            for action,name in ACTION_NAMES.items():
-                if gesture == 'long' and action == 'hold': continue
-                combo.addItem(name,action)
-            content.addWidget(combo)
-            keys=QKeySequenceEdit(); keys.setMaximumSequenceLength(1); content.addWidget(keys)
-            path=QLineEdit(); path.setPlaceholderText('选择应用'); content.addWidget(path)
-            browse=button('选择程序…',lambda checked=False,p=path:self.browse(p)); content.addWidget(browse)
-            arguments=QLineEdit(); arguments.setPlaceholderText('启动参数（可选）'); content.addWidget(arguments)
-            binding=mapping.get(gesture, {'action':'none'})
-            combo.setCurrentIndex(max(0,combo.findData(binding.get('action','none'))))
-            keys.setKeySequence(QKeySequence(binding.get('value','')))
-            path.setText(binding.get('executable','')); arguments.setText(binding.get('arguments',''))
-            def update_fields(index=0,c=combo,k=keys,p=path,a=arguments,b=browse):
-                k.setVisible(c.currentData() in ('shortcut','hold'))
-                for widget in (p,a,b): widget.setVisible(c.currentData() == 'launch')
-                self.adjustSize()
-            combo.currentIndexChanged.connect(update_fields); update_fields()
-            self.fields[gesture]=(combo,keys,path,arguments); layout.addWidget(box)
-        self.setToolTip('键盘映射不会屏蔽游戏接收到的原始手柄输入。')
-        controls=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel)
-        controls.button(QDialogButtonBox.Save).setText('保存映射'); controls.button(QDialogButtonBox.Cancel).setText('取消')
-        controls.accepted.connect(self.validate); controls.rejected.connect(self.reject); layout.addWidget(controls)
-
-    def browse(self, field):
-        path,_=QFileDialog.getOpenFileName(self,'选择程序','','程序 (*.exe);;所有文件 (*)')
-        if path: field.setText(path)
-
-    def validate(self):
-        try:
-            for combo,keys,path,args in self.fields.values():
-                if combo.currentData() in ('shortcut','hold'):
-                    parse_keys(keys.keySequence().toString(QKeySequence.PortableText))
-                if combo.currentData() == 'launch' and not Path(path.text()).is_file():
-                    raise ValueError('请选择存在的可执行文件')
-            self.accept()
-        except ValueError as exc: QMessageBox.warning(self,'检查映射',str(exc))
-
-    def value(self):
-        return {g:dict(action=c.currentData(),value=k.keySequence().toString(QKeySequence.PortableText),executable=p.text(),arguments=a.text()) for g,(c,k,p,a) in self.fields.items()}
+MappingDialog = BindingDialog
 
 
 class Studio(GlassWindow):
-    def __init__(self, root, standalone=False):
+    def __init__(self, root, standalone=False, lang=None):
         super().__init__()
         root=Path(root).resolve(); self.remote=not standalone; self.closed=False
         self.store=ConfigStore(root); self.config=self.store.data
+        self.lang_pref = lang
+        init_language(lang or self.config.get('language', 'auto'))
         self.setWindowTitle('GamePad Studio'); self.setWindowIcon(app_icon()); self.resize(1200,780); self.setMinimumSize(960,640)
         self.client=AgentClient(root,self) if self.remote else None
         self.device=RemoteDevice(self.client) if self.remote else Device()
         if not self.remote:self.device.preferred_key=self.config.get('preferred_controller','')
-        self.actions=WindowsActions(); self.engine=GestureEngine(self.dispatch,self.config['long_press'])
-        self.nikki_engine=NikkiKbmEngine(self.actions,on_chord=self.notify)
-        self.virtual_kbm_engine=VirtualKbmEngine(self.actions,on_notice=self.notify)
+        self.actions=WindowsActions()
+        self.engine=MappingRuntime(self.actions, self.dispatch, start_mouse=not self.remote)
         if self.remote:
             self.client.event.connect(self.agent_event)
-            if request(root,'status',timeout=150) is None: spawn(root,'--agent')
-        self.snapshot=None; self.previous_connected=False; self.enabled=True; self.last_capture=0; self.worker=None
+            if request(root,'status',timeout=200) is None:
+                cleanup_stale_agent(root)
+                spawn(root,'--agent')
+        self.snapshot=None; self.previous_connected=False; self.enabled=bool(self.config.get('mapping_enabled',True)); self.last_capture=0; self.worker=None
         self.device_identity=object();self.button_names=button_labels('dualsense');self.mapping_boxes={}
         self.last_touch=None; self.last_buttons=set(); self.quitting=False; self.learn=False
         self.log_rows=[]; self.nav={}; self.mapping_labels={}; self.recent_labels=[]
@@ -173,7 +129,7 @@ class Studio(GlassWindow):
         brand.setIcon(app_icon())
         brand.setIconSize(QSize(42, 42))
         brand.setCursor(Qt.PointingHandCursor)
-        brand.setToolTip('GamePad Studio · 手柄控制中心 (返回概览)')
+        brand.setToolTip(tr('GamePad Studio · 手柄控制中心 (返回概览)'))
         brand.clicked.connect(lambda: self.navigate(0))
         side.addWidget(brand, 0, Qt.AlignHCenter)
 
@@ -182,8 +138,8 @@ class Studio(GlassWindow):
         dock_layout.setContentsMargins(0, 0, 0, 0)
         dock_layout.setSpacing(8)
 
-        for i, title in [(5, '控制器库'), (0, '设备概览'), (6, '虚拟键鼠'), (1, '按键配置'), (2, '截图图库'), (3, '硬件遥测')]:
-            b = IconButton({5: 'grid', 0: 'controller', 6: 'keyboard', 1: 'mapping', 2: 'photos', 3: 'wave'}[i],
+        for i, title in [(5, tr('控制器库')), (0, tr('设备概览')), (1, tr('按键配置')), (6, tr('虚拟键鼠')), (2, tr('截图图库')), (3, tr('硬件遥测'))]:
+            b = IconButton({5: 'grid', 0: 'controller', 1: 'mapping', 6: 'keyboard', 2: 'photos', 3: 'wave'}[i],
                            title, lambda checked=False, j=i: self.navigate(j), 44)
             b.setObjectName('nav')
             b.setIconSize(QSize(22, 22))
@@ -194,13 +150,13 @@ class Studio(GlassWindow):
         side.addWidget(dock)
         side.addStretch()
 
-        settings = IconButton('settings', '系统设置', lambda: self.navigate(4), 44)
+        settings = IconButton('settings', tr('系统设置'), lambda: self.navigate(4), 44)
         settings.setObjectName('nav')
         settings.setCheckable(True)
         side.addWidget(settings, 0, Qt.AlignHCenter)
         self.nav[4] = settings
 
-        help_button = IconButton('help', '使用指南', self.show_help, 44)
+        help_button = IconButton('help', tr('使用指南'), self.show_help, 44)
         help_button.setObjectName('nav')
         side.addWidget(help_button, 0, Qt.AlignHCenter)
 
@@ -218,7 +174,7 @@ class Studio(GlassWindow):
         header.setContentsMargins(2, 0, 0, 2)
         header.setSpacing(10)
 
-        self.page_heading = label('设备概览', 'heading')
+        self.page_heading = label(tr('设备概览'), 'heading')
         self.page_heading.setAttribute(Qt.WA_TransparentForMouseEvents)
         header.addWidget(self.page_heading)
         header.addStretch()
@@ -231,7 +187,7 @@ class Studio(GlassWindow):
         capsule_layout.setSpacing(8)
 
         self.status_badge = Indicator()
-        self.status_badge.setText('未连接')
+        self.status_badge.setText(tr('未连接'))
         capsule_layout.addWidget(self.status_badge)
 
         sep1 = QFrame()
@@ -240,7 +196,7 @@ class Studio(GlassWindow):
         sep1.setStyleSheet(f'color: {_border_hi}; max-height: 18px;')
         capsule_layout.addWidget(sep1)
 
-        self.pause_button = IconButton('pause', '暂停手柄映射', self.toggle_pause, 28)
+        self.pause_button = IconButton('pause', tr('暂停手柄映射'), self.toggle_pause, 28)
         capsule_layout.addWidget(self.pause_button)
 
         sep2 = QFrame()
@@ -248,16 +204,16 @@ class Studio(GlassWindow):
         sep2.setStyleSheet(f'color: {_border_hi}; max-height: 18px;')
         capsule_layout.addWidget(sep2)
 
-        self.capture_button = IconButton('camera', '即时截屏 (Create / F12)', self.capture, 28)
+        self.capture_button = IconButton('camera', tr('即时截屏 (Create / F12)'), self.capture, 28)
         self.capture_button.setObjectName('primary')
         self.capture_button.set_symbol('camera', '#ffffff')
         capsule_layout.addWidget(self.capture_button)
         header.addWidget(capsule)
 
         header.addSpacing(6)
-        for symbol, title, action in [('minimize', '最小化', self.showMinimized),
-                                      ('maximize', '最大化 / 还原', chrome.toggle_maximized),
-                                      ('close', '关闭窗口', self.close)]:
+        for symbol, title, action in [('minimize', tr('最小化'), self.showMinimized),
+                                      ('maximize', tr('最大化 / 还原'), chrome.toggle_maximized),
+                                      ('close', tr('关闭窗口'), self.close)]:
             control = IconButton(symbol, title, action, 28)
             control.setObjectName('close' if symbol == 'close' else 'window')
             control.setIconSize(QSize(14, 14))
@@ -269,7 +225,7 @@ class Studio(GlassWindow):
         from .controller_gallery import ControllerGallery
         self.controllers=ControllerGallery(self.select_controller,lambda values:self.setting('controller_favorites',values),self.rescan_controllers,lambda:self.navigate(0),self.config['controller_favorites'])
         self.stack.addWidget(self.controllers)
-        self.virtual_kbm_page = VirtualKbmPage(self.virtual_kbm_engine, store=self.store)
+        self.virtual_kbm_page = VirtualKbmPage(self, store=self.store)
         self.stack.addWidget(self.virtual_kbm_page)
         foot=QHBoxLayout();self.notice=label('','muted');foot.addWidget(self.notice,1);foot.addWidget(QSizeGrip(self));content.addLayout(foot)
         self.notice_timer=QTimer(self);self.notice_timer.setSingleShot(True);self.notice_timer.timeout.connect(lambda:self.notice.setText(''))
@@ -299,7 +255,7 @@ class Studio(GlassWindow):
         title_box.setSpacing(4)
         self.controller_eyebrow = label('HARDWARE WORKSTATION', 'eyebrow')
         title_box.addWidget(self.controller_eyebrow)
-        self.controller_heading = label('DualSense 无线控制器', 'productTitle')
+        self.controller_heading = label(CATALOG.get('dualsense', {}).get('name', 'DualSense 无线控制器'), 'productTitle')
         title_box.addWidget(self.controller_heading)
 
         # Clean pro workstation header (no redundant marketing text)
@@ -316,7 +272,7 @@ class Studio(GlassWindow):
         pwr_layout.setSpacing(6)
         self.device_details = Indicator('power')
         pwr_layout.addWidget(self.device_details)
-        self.power_label = label('未连接', 'muted')
+        self.power_label = label(tr('未连接'), 'muted')
         self.power_label.setObjectName('metric')
         pwr_layout.addWidget(self.power_label)
         top_deck.addLayout(pwr_layout)
@@ -337,6 +293,8 @@ class Studio(GlassWindow):
         mid_rack.addWidget(self.matrix, 1)
 
         h.addLayout(mid_rack, 1)
+        self.home_input_feedback = label('等待输入', 'muted', True)
+        h.addWidget(self.home_input_feedback)
 
         self.photo_caption = label(PHOTOS['dualsense']['caption'], 'muted')
         self.photo_caption.hide()
@@ -362,20 +320,20 @@ class Studio(GlassWindow):
         self.profile_combo.currentTextChanged.connect(self.change_profile)
         self.profile_combo.setFixedSize(112, 28)
         self.profile_combo.setMaxVisibleItems(10)
-        row_profile = AppleRow('controller', BADGE_COLOR, '配置预设', '', self.profile_combo)
-        row_profile.setToolTip('按键映射方案与预设配置切换')
+        row_profile = AppleRow('controller', BADGE_COLOR, tr('配置预设'), '', self.profile_combo)
+        row_profile.setToolTip(tr('按键映射方案与预设配置切换'))
         right_panel.add_row(row_profile)
 
-        self.rumble_button = button('脉冲测试', self.rumble, icon='wave', pill=True)
+        self.rumble_button = button(tr('脉冲测试'), self.rumble, icon='wave', pill=True)
         self.rumble_button.setFixedSize(112, 28)
-        row_rumble = AppleRow('wave', BADGE_COLOR, '触觉反馈', '', self.rumble_button)
-        row_rumble.setToolTip('双马达触觉脉冲与响应测试')
+        row_rumble = AppleRow('wave', BADGE_COLOR, tr('触觉反馈'), '', self.rumble_button)
+        row_rumble.setToolTip(tr('双马达触觉脉冲与响应测试'))
         right_panel.add_row(row_rumble)
 
-        nav_mapping_btn = button('编辑按键 ›', lambda: self.navigate(1), pill=True)
+        nav_mapping_btn = button(tr('编辑按键 ›'), lambda: self.navigate(1), pill=True)
         nav_mapping_btn.setFixedSize(112, 28)
-        row_map = AppleRow('mapping', BADGE_COLOR, '按键映射', '', nav_mapping_btn)
-        row_map.setToolTip('自定义按键键位与长按/短按宏映射')
+        row_map = AppleRow('mapping', BADGE_COLOR, tr('按键映射'), '', nav_mapping_btn)
+        row_map.setToolTip(tr('自定义按键键位与长按/短按宏映射'))
         right_panel.add_row(row_map)
 
         # Section 2: Shortcuts & Dispatch
@@ -384,23 +342,23 @@ class Studio(GlassWindow):
         hdr2.setStyleSheet(f"color: {TOKENS['ink_3']}; font-size: 10px; font-weight: 700; letter-spacing: 0.8px; padding: 14px 16px 4px 16px;")
         right_panel.vbox.addWidget(hdr2)
 
-        self.capture_action_btn = button('查看图库 ›', lambda: self.navigate(2), pill=True)
+        self.capture_action_btn = button(tr('查看图库 ›'), lambda: self.navigate(2), pill=True)
         self.capture_action_btn.setFixedSize(112, 28)
-        self.row_capture = AppleRow('camera', BADGE_COLOR, '截图', '', self.capture_action_btn)
+        self.row_capture = AppleRow('camera', BADGE_COLOR, tr('截图'), '', self.capture_action_btn)
         self.capture_heading = self.row_capture.title_label
         self.create_hint = QLabel()
         right_panel.add_row(self.row_capture)
 
-        self.guide_action_btn = button('系统菜单 ›', lambda: self.navigate(1), pill=True)
+        self.guide_action_btn = button(tr('系统菜单 ›'), lambda: self.navigate(1), pill=True)
         self.guide_action_btn.setFixedSize(112, 28)
-        self.row_guide = AppleRow('controller', BADGE_COLOR, 'Xbox 导航', '', self.guide_action_btn)
+        self.row_guide = AppleRow('controller', BADGE_COLOR, tr('Xbox 导航'), '', self.guide_action_btn)
         self.guide_heading = self.row_guide.title_label
         self.guide_hint = QLabel()
         right_panel.add_row(self.row_guide)
 
-        self.touch_action_btn = button('手势映射 ›', lambda: self.navigate(1), pill=True)
+        self.touch_action_btn = button(tr('手势映射 ›'), lambda: self.navigate(1), pill=True)
         self.touch_action_btn.setFixedSize(112, 28)
-        self.row_touchpad = AppleRow('touchpad', BADGE_COLOR, '触摸板', '', self.touch_action_btn)
+        self.row_touchpad = AppleRow('touchpad', BADGE_COLOR, tr('触摸板'), '', self.touch_action_btn)
         right_panel.add_row(self.row_touchpad)
 
         row.addWidget(right_panel, 3)
@@ -414,11 +372,11 @@ class Studio(GlassWindow):
         heading = QHBoxLayout()
         head_v = QVBoxLayout()
         head_v.setSpacing(2)
-        head_v.addWidget(label('CAPTURES BUFFER // 缓冲与最近保存', 'eyebrow'))
-        head_v.addWidget(label('近期截图', 'section'))
+        head_v.addWidget(label('CAPTURES BUFFER // ' + tr('缓冲与最近保存'), 'eyebrow'))
+        head_v.addWidget(label(tr('近期截图'), 'section'))
         heading.addLayout(head_v)
         heading.addStretch()
-        all_btn = button('查看完整图库 ›', lambda: self.navigate(2))
+        all_btn = button(tr('查看完整图库 ›'), lambda: self.navigate(2))
         all_btn.setObjectName('nav')
         heading.addWidget(all_btn)
         b.addLayout(heading)
@@ -439,22 +397,23 @@ class Studio(GlassWindow):
         tools.setSpacing(10)
         self.mapping_profile = label('主机体验', 'section')
         self.mapping_profile.hide()
-        tools.addWidget(label('当前配置预设：', 'muted'))
+        tools.addWidget(label(tr('当前核心配置：'), 'muted'))
         self.mapping_combo = QComboBox()
-        self.mapping_combo.setMinimumWidth(210)
+        self.mapping_combo.setMinimumWidth(170)
         self.mapping_combo.currentTextChanged.connect(self.change_profile)
         tools.addWidget(self.mapping_combo)
         tools.addStretch()
-        self.learn_button = button('动态识别按键', self.start_learning, icon='controller')
+        self.learn_button = button(tr('识别按键'), self.start_learning, icon='controller')
         self.learn_button.setCheckable(True)
         tools.addWidget(self.learn_button)
-        tools.addWidget(button('恢复默认配置', self.reset_profile, icon='refresh'))
-        tools.addWidget(button('新建配置预设', self.duplicate_profile, icon='plus'))
-        self.delete_profile_btn = button('删除配置预设', self.delete_profile, icon='trash')
+        tools.addWidget(button(tr('恢复默认'), self.reset_profile, icon='refresh'))
+        tools.addWidget(button(tr('新建'), self.duplicate_profile, icon='plus'))
+        self.delete_profile_btn = button(tr('删除'), self.delete_profile, icon='trash')
         tools.addWidget(self.delete_profile_btn)
         layout.addLayout(tools)
 
         workspace = QWidget()
+        workspace.setMinimumHeight(350)
         columns = QHBoxLayout(workspace)
         columns.setContentsMargins(0, 0, 0, 0)
         columns.setSpacing(16)
@@ -466,7 +425,7 @@ class Studio(GlassWindow):
         self.mapping_model = label('DualSense', 'productTitle')
         body.addWidget(self.mapping_model)
         self.mapping_art = ControllerInput()
-        self.mapping_art.setMinimumSize(280, 205)
+        self.mapping_art.setMinimumSize(280, 100)
         self.mapping_art.button_clicked.connect(self.select_mapping)
         body.addWidget(self.mapping_art, 1)
 
@@ -481,13 +440,13 @@ class Studio(GlassWindow):
 
         head_sel = QVBoxLayout()
         head_sel.setSpacing(2)
-        head_sel.addWidget(label('SELECTED INPUT // 当前按键', 'eyebrow'))
-        self.selected_label = label('× 交叉', 'section')
+        head_sel.addWidget(label('SELECTED INPUT // ' + tr('当前按键'), 'eyebrow'))
+        self.selected_label = label(self.button_names.get(0, '× 交叉'), 'section')
         self.selected_label.setObjectName('productTitle')
         head_sel.addWidget(self.selected_label)
         detail.addLayout(head_sel, 1)
 
-        self.mapping_edit = button('配置动作...', lambda: self.edit_mapping(self.selected_key), primary=True, icon='edit', pill=True)
+        self.mapping_edit = button(tr('配置动作...'), lambda: self.edit_mapping(self.selected_key), primary=True, icon='edit', pill=True)
         detail.addWidget(self.mapping_edit)
         body.addLayout(detail)
 
@@ -496,7 +455,7 @@ class Studio(GlassWindow):
         gestures.setSpacing(18)
         self.mapping_short = label('', 'muted', True)
         self.mapping_long = label('', 'muted', True)
-        for title, summary in [('SHORT PRESS // 短按', self.mapping_short), ('LONG PRESS // 长按', self.mapping_long)]:
+        for title, summary in [('SHORT PRESS // ' + tr('短按'), self.mapping_short), ('LONG PRESS // ' + tr('长按'), self.mapping_long)]:
             g_col = QVBoxLayout()
             g_col.setSpacing(3)
             g_col.setContentsMargins(0, 2, 0, 2)
@@ -549,8 +508,12 @@ class Studio(GlassWindow):
         inputs = scroll(rows)
         inputs.setMinimumWidth(300)
         columns.addWidget(inputs, 5)
-        layout.addWidget(workspace, 1)
-        self.stack.addWidget(page)
+        layout.addWidget(workspace, 3)
+        self.mapping_feedback = label('等待输入', 'muted')
+        layout.addWidget(self.mapping_feedback)
+        self.binding_list = BindingList(self)
+        layout.addWidget(self.binding_list, 1)
+        self.stack.addWidget(scroll(page))
 
     def build_gallery(self):
         page = QWidget()
@@ -558,15 +521,15 @@ class Studio(GlassWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         bar = QHBoxLayout()
         bar.setSpacing(10)
-        self.only_favorites = IconButton('heart', '仅看收藏', size=32)
+        self.only_favorites = IconButton('heart', tr('仅看收藏'), size=32)
         self.only_favorites.setCheckable(True)
         self.only_favorites.toggled.connect(self.refresh_gallery)
         self.only_favorites.setStyleSheet(f'background: {TOKENS["elevated"]}; border: 1px solid {TOKENS["border_hi"]}; border-radius: {TOKENS["r_sm"]}px;')
 
-        folder_btn = IconButton('folder', '打开截图文件夹', self.open_capture_folder, 32)
+        folder_btn = IconButton('folder', tr('打开截图文件夹'), self.open_capture_folder, 32)
         folder_btn.setStyleSheet(f'background: {TOKENS["elevated"]}; border: 1px solid {TOKENS["border_hi"]}; border-radius: {TOKENS["r_sm"]}px;')
 
-        self.clean_captures_btn = IconButton('trash', '清理未收藏截图', self.clean_unfavorited_captures, 32)
+        self.clean_captures_btn = IconButton('trash', tr('清理未收藏截图'), self.clean_unfavorited_captures, 32)
         self.clean_captures_btn.setObjectName('icon_danger')
         self.clean_captures_btn.setStyleSheet(f'background: {TOKENS["elevated"]}; border: 1px solid {TOKENS["border_hi"]}; border-radius: {TOKENS["r_sm"]}px;')
 
@@ -580,7 +543,7 @@ class Studio(GlassWindow):
         bar.addWidget(self.gallery_info)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText('搜索截图文件...')
+        self.search.setPlaceholderText(tr('搜索截图文件...'))
         self.search.setFixedWidth(240)
         self.search.setFixedHeight(32)
         self.search.setStyleSheet(
@@ -600,7 +563,7 @@ class Studio(GlassWindow):
 
     def build_test(self):
         self.events = QListWidget()
-        self.events.setWindowTitle('活动记录')
+        self.events.setWindowTitle(tr('活动记录'))
         self.events.resize(640, 400)
         self.events.setParent(self, Qt.Dialog)
         self.events.hide()
@@ -615,18 +578,28 @@ class Studio(GlassWindow):
 
         # 1. 截图服务与存储
         cap = AppleGroup()
-        hdr_cap = QLabel('  01 // CAPTURE ENGINE · 截图服务与存储')
+        hdr_cap = QLabel('  01 // CAPTURE ENGINE · ' + tr('截图服务与存储'))
         hdr_cap.setObjectName('eyebrow')
         hdr_cap.setStyleSheet(f"color: {TOKENS['accent']}; font-size: 10.5px; font-weight: 700; padding: 8px 16px 2px 16px;")
         cap.vbox.addWidget(hdr_cap)
 
         self.mode_combo = QComboBox()
-        for name, value in [('当前活动显示器', 'monitor'), ('当前活动窗口', 'window'), ('全部连接显示器', 'all')]:
+        for name, value in [
+            (tr('🎮 智能游戏屏幕 (自动探测锁定)'), 'game'),
+            (tr('🖥️ 双屏全景全录制 (全部显示器 7680x2160)'), 'all'),
+            (tr('🖥️ 显示器 1 (主屏幕)'), 'monitor_1'),
+            (tr('🖥️ 显示器 2 (副屏幕)'), 'monitor_2'),
+            (tr('🪟 当前活动独立窗口'), 'window'),
+        ]:
             self.mode_combo.addItem(name, value)
-        self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(self.config['capture_mode'])))
+        cur_mode = self.config.get('capture_mode', 'game')
+        if cur_mode == 'monitor':
+            cur_mode = 'game'
+        idx = self.mode_combo.findData(cur_mode)
+        self.mode_combo.setCurrentIndex(max(0, idx))
         self.mode_combo.currentIndexChanged.connect(lambda: self.setting('capture_mode', self.mode_combo.currentData()))
-        self.mode_combo.setMinimumWidth(150)
-        cap.add_row(AppleRow('camera', (TOKENS['accent'], TOKENS['accent_lo']), '捕获目标范围', '设定活动显示器或独立活动窗口', self.mode_combo))
+        self.mode_combo.setMinimumWidth(210)
+        cap.add_row(AppleRow('camera', (TOKENS['accent'], TOKENS['accent_lo']), tr('捕获目标屏幕与范围'), tr('智能锁定游戏屏幕或双屏跨屏全景录制'), self.mode_combo))
 
         folder_row = QWidget()
         f_layout = QHBoxLayout(folder_row)
@@ -636,13 +609,13 @@ class Studio(GlassWindow):
         f_v = QVBoxLayout()
         f_v.setContentsMargins(0, 0, 0, 0)
         f_v.setSpacing(2)
-        f_title = label('截图存储路径', 'section')
+        f_title = label(tr('截图存储路径'), 'section')
         f_v.addWidget(f_title)
         self.folder_label = label(self.config['save_dir'], 'muted')
         self.folder_label.setObjectName('metric')
         f_v.addWidget(self.folder_label)
         f_layout.addLayout(f_v, 1)
-        self.folder_button = button('更改目录...', self.choose_folder, pill=True)
+        self.folder_button = button(tr('更改目录...'), self.choose_folder, pill=True)
         f_layout.addWidget(self.folder_button)
         cap.add_row(folder_row)
 
@@ -654,12 +627,12 @@ class Studio(GlassWindow):
         c_tv = QVBoxLayout()
         c_tv.setContentsMargins(0, 0, 0, 0)
         c_tv.setSpacing(2)
-        c_title = label('防抖冷却间隔', 'section')
+        c_title = label(tr('防抖冷却间隔'), 'section')
         c_tv.addWidget(c_title)
-        c_desc = label('连击防误触时间阈值', 'muted')
+        c_desc = label(tr('连击防误触时间阈值'), 'muted')
         c_desc.setObjectName('caption')
         c_tv.addWidget(c_desc)
-        cool_val = label(f"{self.config['cooldown']:.2f} 秒")
+        cool_val = label(f"{self.config['cooldown']:.2f} " + tr('秒'))
         cool_val.setStyleSheet(f"background: transparent; font: 12px 'Cascadia Code', monospace; font-weight: 700; color: {TOKENS['amber']}; padding: 0 2px;")
         cool_slider = QSlider(Qt.Horizontal)
         cool_slider.setRange(10, 200)
@@ -670,7 +643,7 @@ class Studio(GlassWindow):
         cool_knob = RotaryKnob("COOLDOWN", 0.10, 2.00, self.config['cooldown'], "s", TOKENS['amber'], 46)
         def on_cool_change(v):
             sec = v / 100
-            cool_val.setText(f"{sec:.2f} 秒")
+            cool_val.setText(f"{sec:.2f} " + tr('秒'))
             cool_knob.setValue(sec)
             self.setting('cooldown', sec)
         cool_slider.valueChanged.connect(on_cool_change)
@@ -679,22 +652,30 @@ class Studio(GlassWindow):
         cap.add_row(cool_row)
 
         # 机械快门声音反馈开关
-        self.shutter_sound_box = Toggle('启用')
+        self.shutter_sound_box = Toggle(tr('启用'))
         self.shutter_sound_box.setChecked(bool(self.config.get('capture_sound_enabled', True)))
         self.shutter_sound_box.toggled.connect(lambda v: self.setting('capture_sound_enabled', v))
-        cap.add_row(AppleRow('wave', (TOKENS['amber'], TOKENS['accent_lo']), '机械快门音效反馈', '截图成功时通过系统播放清脆的高保真相机机械快门声', self.shutter_sound_box))
+        cap.add_row(AppleRow('wave', (TOKENS['amber'], TOKENS['accent_lo']), tr('机械快门音效反馈'), tr('截图成功时通过系统播放清脆的高保真相机机械快门声'), self.shutter_sound_box))
 
         # 截图手柄触觉微脉冲开关
-        self.shutter_haptics_box = Toggle('启用')
+        self.shutter_haptics_box = Toggle(tr('启用'))
         self.shutter_haptics_box.setChecked(bool(self.config.get('capture_haptics_enabled', True)))
         self.shutter_haptics_box.toggled.connect(lambda v: self.setting('capture_haptics_enabled', v))
-        cap.add_row(AppleRow('controller', (TOKENS['purple'], TOKENS['accent_lo']), '掌心触觉脉冲反馈', '截图成功瞬间手柄给予 60ms 两段式物理快门轻触确认', self.shutter_haptics_box))
+        cap.add_row(AppleRow('controller', (TOKENS['purple'], TOKENS['accent_lo']), tr('掌心触觉脉冲反馈'), tr('截图成功瞬间手柄给予 60ms 两段式物理快门轻触确认'), self.shutter_haptics_box))
+
+        # 屏蔽 Windows 截图与 Game Bar 弹窗开关
+        from .gamebar_shield import is_gamebar_shield_active
+        self.gamebar_shield_box = Toggle(tr('启用'))
+        init_shield = bool(self.config.get('gamebar_shield_enabled', False))
+        self.gamebar_shield_box.setChecked(init_shield)
+        self.gamebar_shield_box.toggled.connect(self.on_toggle_gamebar_shield)
+        cap.add_row(AppleRow('shield', (TOKENS['purple'], TOKENS['accent_lo']), tr('屏蔽 Windows 截图与 Game Bar 弹窗'), tr('关闭 Windows 的手柄游戏栏与游戏录制响应'), self.gamebar_shield_box))
 
         grid.addWidget(cap, 0, 0)
 
         # 2. 硬件交互与反馈
         hardware = AppleGroup()
-        hdr_hw = QLabel('  02 // HAPTICS & ILLUMINATION · 硬件交互与反馈')
+        hdr_hw = QLabel('  02 // HAPTICS & ILLUMINATION · ' + tr('硬件交互与反馈'))
         hdr_hw.setObjectName('eyebrow')
         hdr_hw.setStyleSheet(f"color: {TOKENS['amber']}; font-size: 10.5px; font-weight: 700; padding: 8px 16px 2px 16px;")
         hardware.vbox.addWidget(hdr_hw)
@@ -707,9 +688,9 @@ class Studio(GlassWindow):
         l_v = QVBoxLayout()
         l_v.setContentsMargins(0, 0, 0, 0)
         l_v.setSpacing(2)
-        l_title = label('LED 状态光条', 'section')
+        l_title = label(tr('LED 状态光条'), 'section')
         l_v.addWidget(l_title)
-        l_desc = label('手柄呼吸光条发光色调', 'muted')
+        l_desc = label(tr('手柄呼吸光条发光色调'), 'muted')
         l_desc.setObjectName('caption')
         l_v.addWidget(l_desc)
         l_layout.addLayout(l_v, 1)
@@ -734,9 +715,9 @@ class Studio(GlassWindow):
         r_tv = QVBoxLayout()
         r_tv.setContentsMargins(0, 0, 0, 0)
         r_tv.setSpacing(2)
-        r_title = label('双马达振动强度', 'section')
+        r_title = label(tr('双马达振动强度'), 'section')
         r_tv.addWidget(r_title)
-        r_desc = label('触觉反馈马达输出力度', 'muted')
+        r_desc = label(tr('触觉反馈马达输出力度'), 'muted')
         r_desc.setObjectName('caption')
         r_tv.addWidget(r_desc)
         rumble_val = label(f"{round(self.config['rumble'] * 100)}%")
@@ -747,7 +728,7 @@ class Studio(GlassWindow):
         r_tv.addWidget(rumble_slider)
         r_layout.addLayout(r_tv, 1)
 
-        self.feedback_rumble = button('脉冲测试', self.rumble, primary=True, icon='wave', pill=True)
+        self.feedback_rumble = button(tr('脉冲测试'), self.rumble, primary=True, icon='wave', pill=True)
         r_layout.addWidget(self.feedback_rumble)
 
         rumble_knob = RotaryKnob("RUMBLE", 0.0, 1.0, self.config['rumble'], "%", TOKENS['accent'], 46)
@@ -761,10 +742,10 @@ class Studio(GlassWindow):
         r_layout.addWidget(rumble_knob)
         hardware.add_row(rumble_row)
 
-        self.touch_mouse_box = Toggle('启用')
+        self.touch_mouse_box = Toggle(tr('启用'))
         self.touch_mouse_box.setChecked(self.config['touch_mouse'])
         self.touch_mouse_box.toggled.connect(lambda value: self.setting('touch_mouse', value))
-        hardware.add_row(AppleRow('touchpad', (TOKENS['green'], TOKENS['green']), '触摸板手势扩展', '双指轻扫模拟 Windows 鼠标指针', self.touch_mouse_box))
+        hardware.add_row(AppleRow('touchpad', (TOKENS['green'], TOKENS['green']), tr('触摸板手势扩展'), tr('双指轻扫模拟 Windows 鼠标指针'), self.touch_mouse_box))
 
         # 触觉拟真引擎与波形调校
         haptic_row = QWidget()
@@ -775,16 +756,16 @@ class Studio(GlassWindow):
         h_tv = QVBoxLayout()
         h_tv.setContentsMargins(0, 0, 0, 0)
         h_tv.setSpacing(2)
-        h_title = label('触觉拟真引擎 (Haptic Engine)', 'section')
+        h_title = label(tr('触觉拟真引擎 (Haptic Engine)'), 'section')
         h_tv.addWidget(h_title)
-        h_desc = label('微秒级双音圈多段触觉波形合成 (快门/棘轮/冲击/心跳)', 'muted')
+        h_desc = label(tr('微秒级双音圈多段触觉波形合成 (快门/棘轮/冲击/心跳)'), 'muted')
         h_desc.setObjectName('caption')
         h_tv.addWidget(h_desc)
         h_layout.addLayout(h_tv, 1)
 
-        self.test_haptic_shutter = button('快门触觉', lambda: self.test_haptic_pattern('shutter'), pill=True)
-        self.test_haptic_impact = button('冲击阻尼', lambda: self.test_haptic_pattern('impact'), pill=True)
-        self.test_haptic_heart = button('心跳律动', lambda: self.test_haptic_pattern('heartbeat'), pill=True)
+        self.test_haptic_shutter = button(tr('快门触觉'), lambda: self.test_haptic_pattern('shutter'), pill=True)
+        self.test_haptic_impact = button(tr('冲击阻尼'), lambda: self.test_haptic_pattern('impact'), pill=True)
+        self.test_haptic_heart = button(tr('心跳律动'), lambda: self.test_haptic_pattern('heartbeat'), pill=True)
         h_layout.addWidget(self.test_haptic_shutter)
         h_layout.addWidget(self.test_haptic_impact)
         h_layout.addWidget(self.test_haptic_heart)
@@ -794,7 +775,7 @@ class Studio(GlassWindow):
 
         # 3. 输入手势设定与文档
         general = AppleGroup()
-        hdr_gen = QLabel('  03 // GESTURES & AUTOMATION · 手势与高级设置')
+        hdr_gen = QLabel('  03 // GESTURES & AUTOMATION · ' + tr('手势与高级设置'))
         hdr_gen.setObjectName('eyebrow')
         hdr_gen.setStyleSheet(f"color: {TOKENS['green']}; font-size: 10.5px; font-weight: 700; padding: 8px 16px 2px 16px;")
         general.vbox.addWidget(hdr_gen)
@@ -807,12 +788,12 @@ class Studio(GlassWindow):
         lp_tv = QVBoxLayout()
         lp_tv.setContentsMargins(0, 0, 0, 0)
         lp_tv.setSpacing(2)
-        lp_title = label('长按手势识别阈值', 'section')
+        lp_title = label(tr('长按手势识别阈值'), 'section')
         lp_tv.addWidget(lp_title)
-        lp_desc = label('按住按键达到设定时长触发二次宏动作', 'muted')
+        lp_desc = label(tr('按住按键达到设定时长触发二次宏动作'), 'muted')
         lp_desc.setObjectName('caption')
         lp_tv.addWidget(lp_desc)
-        lp_val = label(f"{self.config['long_press']:.2f} 秒")
+        lp_val = label(f"{self.config['long_press']:.2f} " + tr('秒'))
         lp_val.setStyleSheet(f"background: transparent; font: 12px 'Cascadia Code', monospace; font-weight: 700; color: {TOKENS['chalk']}; padding: 0 2px;")
         lp_slider = QSlider(Qt.Horizontal)
         lp_slider.setRange(30, 150)
@@ -823,7 +804,7 @@ class Studio(GlassWindow):
         lp_knob = RotaryKnob("LONG PRESS", 0.30, 1.50, self.config['long_press'], "s", TOKENS['chalk'], 46)
         def on_lp_change(v):
             sec = v / 100
-            lp_val.setText(f"{sec:.2f} 秒")
+            lp_val.setText(f"{sec:.2f} " + tr('秒'))
             lp_knob.setValue(sec)
             self.setting('long_press', sec)
         lp_slider.valueChanged.connect(on_lp_change)
@@ -831,13 +812,30 @@ class Studio(GlassWindow):
         lp_layout.addWidget(lp_knob)
         general.add_row(lp_row)
 
-        help_btn = button('查阅指南 ›', self.show_help, pill=True)
-        general.add_row(AppleRow('help', (TOKENS['accent'], TOKENS['accent_lo']), '使用指南与硬件支持', '查阅全型号支持与高级特性说明', help_btn))
+        self.lang_combo = QComboBox()
+        self.lang_combo.addItem('跟随系统 (System Default)', 'auto')
+        self.lang_combo.addItem('English (US)', 'en')
+        self.lang_combo.addItem('简体中文 (Simplified Chinese)', 'zh')
+        cur_pref = self.lang_pref or self.config.get('language', 'auto')
+        idx = self.lang_combo.findData(cur_pref)
+        if idx >= 0:
+            self.lang_combo.setCurrentIndex(idx)
+        def on_lang_change(index):
+            val = self.lang_combo.currentData()
+            self.setting('language', val)
+            set_language(val)
+            self.notify(tr('界面语言已更新，部分设置重启后生效'))
+        self.lang_combo.currentIndexChanged.connect(on_lang_change)
+        self.lang_combo.setMinimumWidth(180)
+        general.add_row(AppleRow('globe', (TOKENS['purple'], TOKENS['accent_lo']), tr('界面语言 / Language'), tr('界面语言与国际化设置'), self.lang_combo))
+
+        help_btn = button(tr('查阅指南 ›'), self.show_help, pill=True)
+        general.add_row(AppleRow('help', (TOKENS['accent'], TOKENS['accent_lo']), tr('使用指南与硬件支持'), tr('查阅全型号支持与高级特性说明'), help_btn))
         grid.addWidget(general, 1, 0)
 
         # 4. 常驻服务与自启
         background = AppleGroup()
-        hdr_bg = QLabel('  04 // RUNTIME & DAEMON · 系统服务与开机启动')
+        hdr_bg = QLabel('  04 // RUNTIME & DAEMON · ' + tr('系统服务与开机启动'))
         hdr_bg.setObjectName('eyebrow')
         hdr_bg.setStyleSheet(f"color: {TOKENS['cyan']}; font-size: 10.5px; font-weight: 700; padding: 8px 16px 2px 16px;")
         background.vbox.addWidget(hdr_bg)
@@ -850,40 +848,40 @@ class Studio(GlassWindow):
         ag_tv = QVBoxLayout()
         ag_tv.setContentsMargins(0, 0, 0, 0)
         ag_tv.setSpacing(2)
-        ag_title = label('常驻映射监听进程 (Agent)', 'section')
+        ag_title = label(tr('常驻映射监听进程 (Agent)'), 'section')
         ag_tv.addWidget(ag_title)
-        ag_desc = label('后台超低延迟按键拦截与手势守护服务', 'muted')
+        ag_desc = label(tr('后台超低延迟按键拦截与手势守护服务'), 'muted')
         ag_desc.setObjectName('caption')
         ag_tv.addWidget(ag_desc)
         ag_layout.addLayout(ag_tv, 1)
 
         self.agent_status = Indicator()
-        self.agent_status.setText('正在连接')
+        self.agent_status.setText(tr('正在连接'))
         ag_layout.addWidget(self.agent_status)
-        self.agent_toggle = button('停止服务', self.toggle_agent, pill=True)
+        self.agent_toggle = button(tr('停止服务'), self.toggle_agent, pill=True)
         ag_layout.addWidget(self.agent_toggle)
         background.add_row(ag_row)
 
-        self.autostart = Toggle('启用')
+        self.autostart = Toggle(tr('启用'))
         self.autostart.setChecked(autostart_enabled())
         self.autostart.toggled.connect(self.toggle_autostart)
-        background.add_row(AppleRow('autostart', (TOKENS['green'], TOKENS['green']), '系统开机自动启动', 'Windows 登录后在后台安静自启运行', self.autostart))
+        background.add_row(AppleRow('autostart', (TOKENS['green'], TOKENS['green']), tr('系统开机自动启动'), tr('Windows 登录后在后台安静自启运行'), self.autostart))
         grid.addWidget(background, 1, 1)
 
         # 5. 4K 极清硬件加速回放录制 (HEVC / AV1 Replay Buffer)
         replay_group = AppleGroup()
-        hdr_replay = QLabel('  05 // 4K INSTANT REPLAY BUFFER · HEVC / AV1 标杆极清即时回放')
+        hdr_replay = QLabel('  05 // 4K INSTANT REPLAY BUFFER · ' + tr('HEVC / AV1 标杆极清即时回放'))
         hdr_replay.setObjectName('eyebrow')
         hdr_replay.setStyleSheet(f"color: {TOKENS['purple']}; font-size: 10.5px; font-weight: 700; padding: 8px 16px 2px 16px;")
         replay_group.vbox.addWidget(hdr_replay)
 
-        self.replay_toggle = Toggle('启用')
+        self.replay_toggle = Toggle(tr('启用'))
         self.replay_toggle.setChecked(bool(self.config.get('replay_buffer_enabled', False)))
         def on_replay_toggle(enabled):
             self.setting('replay_buffer_enabled', enabled)
             self._update_replay_hud()
         self.replay_toggle.toggled.connect(on_replay_toggle)
-        replay_group.add_row(AppleRow('wave', (TOKENS['purple'], TOKENS['accent_lo']), '4K 极清回放缓存', '开启后长按 Create 键保存本地极清 MP4（若关闭则联动系统 Game Bar）', self.replay_toggle))
+        replay_group.add_row(AppleRow('wave', (TOKENS['purple'], TOKENS['accent_lo']), tr('4K 极清回放缓存'), tr('开启后长按 Create 键保存本地极清 MP4（若关闭则联动系统 Game Bar）'), self.replay_toggle))
 
         rep_min_row = QWidget()
         rm_layout = QHBoxLayout(rep_min_row)
@@ -893,14 +891,14 @@ class Studio(GlassWindow):
         rm_tv = QVBoxLayout()
         rm_tv.setContentsMargins(0, 0, 0, 0)
         rm_tv.setSpacing(2)
-        rm_title = label('最大回看时间 (滑动窗口)', 'section')
+        rm_title = label(tr('最大回看时间 (纯内存滑动窗口)'), 'section')
         rm_tv.addWidget(rm_title)
-        rm_desc = label('常驻内存/磁盘环形缓冲区保留的最长历史片段', 'muted')
+        rm_desc = label(tr('100% 纯内存环形缓冲区保留的最长历史片段（零磁盘写入损耗）'), 'muted')
         rm_desc.setObjectName('caption')
         rm_tv.addWidget(rm_desc)
 
         cur_min = int(self.config.get('replay_buffer_minutes', 5))
-        self.replay_min_label = label(f"{cur_min} 分钟")
+        self.replay_min_label = label(f"{cur_min} " + tr('分钟'))
         self.replay_min_label.setStyleSheet(f"background: transparent; font: 12px 'Cascadia Code', monospace; font-weight: 700; color: {TOKENS['accent']}; padding: 0 2px;")
         
         self.replay_slider = QSlider(Qt.Horizontal)
@@ -910,7 +908,7 @@ class Studio(GlassWindow):
         rm_layout.addLayout(rm_tv, 1)
 
         def on_min_change(v):
-            self.replay_min_label.setText(f"{v} 分钟")
+            self.replay_min_label.setText(f"{v} " + tr('分钟'))
             self.setting('replay_buffer_minutes', v)
             self._update_replay_hud()
         self.replay_slider.valueChanged.connect(on_min_change)
@@ -924,17 +922,17 @@ class Studio(GlassWindow):
         cd_tv = QVBoxLayout()
         cd_tv.setContentsMargins(0, 0, 0, 0)
         cd_tv.setSpacing(2)
-        cd_title = label('硬件编码器与画质方案', 'section')
+        cd_title = label(tr('硬件编码器与画质方案'), 'section')
         cd_tv.addWidget(cd_title)
-        self.replay_codec_desc = label('选择显卡硬件加速格式与码率', 'muted')
+        self.replay_codec_desc = label(tr('选择显卡硬件加速格式与码率'), 'muted')
         self.replay_codec_desc.setObjectName('caption')
         cd_tv.addWidget(self.replay_codec_desc)
         cd_layout.addLayout(cd_tv, 1)
 
         self.replay_codec_combo = QComboBox()
-        self.replay_codec_combo.addItem('HEVC 标杆极清 (推荐 · 50Mbps)', 'hevc')
-        self.replay_codec_combo.addItem('AV1 次世代极清 (AMF/NVENC · 45Mbps)', 'av1')
-        self.replay_codec_combo.addItem('H.264 兼容模式 (60Mbps)', 'h264')
+        self.replay_codec_combo.addItem(tr('HEVC 标杆极清 (推荐 · 50Mbps)'), 'hevc')
+        self.replay_codec_combo.addItem(tr('AV1 次世代极清 (AMF/NVENC · 45Mbps)'), 'av1')
+        self.replay_codec_combo.addItem(tr('H.264 兼容模式 (60Mbps)'), 'h264')
         cur_codec = self.config.get('replay_codec', 'hevc')
         self.replay_codec_combo.setCurrentIndex(max(0, self.replay_codec_combo.findData(cur_codec)))
         def on_codec_change():
@@ -951,11 +949,11 @@ class Studio(GlassWindow):
         hud_layout.setSpacing(12)
         hud_layout.addWidget(SquircleBadge('controller', (TOKENS['amber'], TOKENS['accent_lo'])))
         
-        self.replay_hud_label = label('正在探测硬件加速状态...', 'muted')
+        self.replay_hud_label = label(tr('正在探测硬件加速状态...'), 'muted')
         self.replay_hud_label.setStyleSheet(f"font: 11.5px 'Cascadia Code', monospace; color: {TOKENS['ink_2']}; font-weight: 600;")
         hud_layout.addWidget(self.replay_hud_label, 1)
 
-        save_rep_btn = button('立即保存当前回放', self.trigger_manual_replay, pill=True)
+        save_rep_btn = button(tr('立即保存当前回放'), self.trigger_manual_replay, pill=True)
         hud_layout.addWidget(save_rep_btn)
         replay_group.add_row(hud_row)
 
@@ -971,30 +969,42 @@ class Studio(GlassWindow):
 
     def _update_replay_hud(self):
         try:
-            from .replay_service import calculate_estimated_ram_gb, detect_hardware_encoder
+            from .replay_service import calculate_estimated_ram_gb
             minutes = int(self.config.get('replay_buffer_minutes', 5))
             codec = self.config.get('replay_codec', 'hevc')
             bitrate = int(self.config.get('replay_bitrate_mbps', 50))
             ram_gb = calculate_estimated_ram_gb(minutes, bitrate)
-            enc = detect_hardware_encoder(codec)
+            replay_status = self.client.status.get('replay', {}) if self.remote else {}
+            enc = replay_status.get('encoder') or ('待启动' if get_language() == 'zh' else 'Not started')
             enabled = self.config.get('replay_buffer_enabled', False)
-            status_text = "🟢 [已启用·实时录制中]" if enabled else "⚪ [未启用·回退系统 Game Bar]"
+            if not enabled:
+                status_text = '回放已关闭' if get_language() == 'zh' else 'Replay disabled'
+            elif replay_status.get('running'):
+                status_text = '回放录制中' if get_language() == 'zh' else 'Replay recording'
+            else:
+                status_text = '等待录制启动' if get_language() == 'zh' else 'Waiting for recording'
+            overhead_txt = f"{minutes} " + tr('分钟') + ("纯内存预估" if get_language() == 'zh' else " est. RAM")
+            hw_core = "硬件核心" if get_language() == 'zh' else "GPU Engine"
             self.replay_hud_label.setText(
-                f"{status_text}  |  {codec.upper()} {bitrate}Mbps  |  {minutes}分钟预估开销: ~{ram_gb:.2f} GB  |  硬件核心: {enc}"
+                f"{status_text}  |  {codec.upper()} {bitrate}Mbps  |  {overhead_txt}: ~{ram_gb:.2f} GB (0 磁盘损耗)  |  {hw_core}: {enc}"
             )
         except Exception:
             pass
 
     def trigger_manual_replay(self):
         if self.remote:
-            res = self.client.send('save_replay')
-            if res and res.get('path'):
-                self.notify(f"回放已保存: {res['path']}")
-            else:
-                self.notify("已触发系统回放录制 (Win+Alt+G)")
+            self.client.send('save_replay')
+            self.notify(tr("正在生成 4K 极清精彩回放录像..."))
         else:
+            if hasattr(self, 'replay_engine'):
+                if not self.replay_engine.is_running():
+                    self.replay_engine.start()
+                path = self.replay_engine.save_replay()
+                if path:
+                    self.notify(f"🎬 {tr('精彩回放已保存')}: {Path(path).name}")
+                    return
             self.actions.shortcut('Win+Alt+G')
-            self.notify("已触发系统回放录制 (Win+Alt+G)")
+            self.notify(tr("已触发系统回放录制 (Win+Alt+G)"))
 
     def test_haptic_pattern(self, pattern: str):
         if self.remote:
@@ -1003,11 +1013,55 @@ class Studio(GlassWindow):
             if hasattr(self, 'haptic_engine'):
                 self.haptic_engine.trigger_feedback(pattern)
         names = {'shutter': '快门触觉微脉冲', 'impact': '重度撞击阻尼', 'heartbeat': '心跳仿真律动'}
-        self.notify(f"已触发触觉波形：{names.get(pattern, pattern)}")
+        self.notify(tr('已触发触觉波形：') + tr(names.get(pattern, pattern)))
 
+    def on_toggle_gamebar_shield(self, checked: bool):
+        from .gamebar_shield import set_gamebar_shield
+        if self.remote:
+            result = request(self.store.root, 'set_gamebar_shield', enabled=checked, timeout=4000)
+            if result and result.get('ok') and 'applied' in result:
+                msg = result['message']
+                latest = ConfigStore(self.store.root)
+                self.store.data.clear(); self.store.data.update(latest.data)
+                self.store._baseline = copy.deepcopy(latest.data)
+            else:
+                msg = tr('后台未能应用设置，请重启后台后重试')
+        else:
+            _, msg = set_gamebar_shield(self.store, checked)
+        self.notify(msg)
+        enabled = self.config.get('gamebar_shield_enabled', False)
+        self.gamebar_shield_box.blockSignals(True)
+        self.gamebar_shield_box.setChecked(enabled)
+        self.gamebar_shield_box.blockSignals(False)
+
+        # 保持虚拟键鼠工作台内的快捷开关联动同步
+        if hasattr(self, 'virtual_kbm_page') and hasattr(self.virtual_kbm_page, 'gamebar_shield_toggle'):
+            self.virtual_kbm_page.gamebar_shield_toggle.blockSignals(True)
+            self.virtual_kbm_page.gamebar_shield_toggle.setChecked(self.config.get('gamebar_shield_enabled', False))
+            self.virtual_kbm_page.gamebar_shield_toggle.blockSignals(False)
 
     def show_help(self):
-        QMessageBox.information(self,'帮助','在手柄图库中选择设备。当前一次只为所选手柄执行映射，切换或断开时释放按键。\n\nPS：Create / Share 截图。Xbox：独立 Share 截图；未提供 Share 时保留原始按键，可自定义映射。Switch：优先 Capture，否则使用 −。\n\n预设按型号保存。点击映射页的手柄按键或按键列表，再点编辑。恢复默认只影响当前预设。\n\n后台随登录运行，关闭窗口不影响映射。键盘映射不屏蔽原始输入，Xbox 键的系统功能由 Windows 管理。游戏触觉和自适应扳机取决于游戏支持。\n\n产品图片来自品牌官网，通用手柄使用标注的示例机型。')
+        title = tr('使用指南')
+        if get_language() == 'en':
+            msg = (
+                "Select a gamepad in the Controller Library. GamePad Studio maps one active controller at a time, "
+                "releasing pressed keys upon switching or disconnecting.\n\n"
+                "• PlayStation: Create / Share takes instant screenshots.\n"
+                "• Xbox: Dedicated Share button captures screenshots; if absent, native input is preserved.\n"
+                "• Switch: Capture button takes screenshots (or − minus if unmapped).\n\n"
+                "Profiles are preserved per controller family. Click any controller button or key tile, then click Edit to configure.\n\n"
+                "The background daemon runs on startup and mappings persist after closing this window. "
+                "Virtual KBM and keyboard mappings do not block native input unless hardware cloaking (HidHide) is active."
+            )
+        else:
+            msg = (
+                "在手柄图库中选择设备。当前一次只为所选手柄执行映射，切换或断开时释放按键。\n\n"
+                "PS：Create / Share 截图。Xbox：独立 Share 截图；未提供 Share 时保留原始按键，可自定义映射。Switch：优先 Capture，否则使用 −。\n\n"
+                "预设按型号保存。点击映射页的手柄按键或按键列表，再点编辑。恢复默认只影响当前预设。\n\n"
+                "后台随登录运行，关闭窗口不影响映射。键盘映射不屏蔽原始输入，Xbox 键的系统功能由 Windows 管理。游戏触觉和自适应扳机取决于游戏支持。\n\n"
+                "产品图片来自品牌官网，通用手柄使用标注的示例机型。"
+            )
+        QMessageBox.information(self, title, msg)
 
     def select_controller(self,instance):
         try:
@@ -1030,13 +1084,15 @@ class Studio(GlassWindow):
         if state:
             self.controller_heading.setText(CATALOG[family]['name']);self.controller_heading.setToolTip(state['name'])
             if self.remote:
-                self.store=ConfigStore(self.store.root);self.config=self.store.data
+                latest = ConfigStore(self.store.root)
+                self.store.data.clear(); self.store.data.update(latest.data)
+                self.store._baseline = copy.deepcopy(latest.data)
             else:self.store.activate_controller(state);self.store.save()
         else:
             self.controller_heading.setText(CATALOG[family]['name'])
-            self.controller_heading.setToolTip('上次使用的型号 · 当前未连接')
+            self.controller_heading.setToolTip(tr('上次使用的型号 · 当前未连接'))
         self.art.set_family(family);self.mapping_art.set_family(family);self.photo_caption.setText(PHOTOS[family]['caption'])
-        self.mapping_model.setText(CATALOG[family]['name']);self.mapping_model.setToolTip(state['name'] if state else '上次使用的型号 · 当前未连接')
+        self.mapping_model.setText(CATALOG[family]['name']);self.mapping_model.setToolTip(state['name'] if state else tr('上次使用的型号 · 当前未连接'))
         for combo in (self.profile_combo,self.mapping_combo):
             combo.blockSignals(True);combo.clear();combo.addItems(self.store.profiles_for(state));combo.setCurrentText(self.config['active_profile']);combo.blockSignals(False)
         if state:
@@ -1055,31 +1111,31 @@ class Studio(GlassWindow):
             box.setAccessibleName(self.button_names[key]);box.setToolTip(self.button_names[key])
             if key in available:self.mapping_grid.addWidget(box,position//2,position%2);position+=1
         self.mapping_grid.setRowStretch((position+1)//2,1)
-        self.mapping_edit.setEnabled(bool(state));self.learn_button.setEnabled(bool(state))
+        self.mapping_edit.setEnabled(True);self.learn_button.setEnabled(True)
         self.select_mapping(self.selected_key if self.selected_key in available else next(iter(sorted(available)),0))
-        for button in self.led_buttons:button.setEnabled(bool(state and state['led']));button.setToolTip('灯条颜色' if state and state['led'] else '设备未提供灯条控制')
+        for button in self.led_buttons:button.setEnabled(bool(state and state['led']));button.setToolTip(tr('灯条颜色') if state and state['led'] else tr('设备未提供灯条控制'))
         self.feedback_rumble.setEnabled(bool(state and state['rumble']))
         self.touch_mouse_box.setEnabled(bool(state and state.get('touchpad',False)))
-        self.touch_mouse_box.setToolTip('触摸板鼠标' if state and state.get('touchpad') else '设备未提供触摸板')
+        self.touch_mouse_box.setToolTip(tr('触摸板鼠标') if state and state.get('touchpad') else tr('设备未提供触摸板'))
 
         # Update Guide key and Touchpad row dynamically according to controller family
         if hasattr(self, 'guide_heading'):
             if family == 'xbox':
-                self.guide_heading.setText('Xbox 导航')
+                self.guide_heading.setText(tr('Xbox 导航'))
                 if hasattr(self, 'row_guide'):
-                    self.row_guide.setToolTip('Xbox 导航键：短按呼出 Game Bar，长按切换任务')
+                    self.row_guide.setToolTip(tr('Xbox 导航键：短按呼出 Game Bar，长按切换任务'))
             elif family == 'switch':
-                self.guide_heading.setText('Home 导航')
+                self.guide_heading.setText(tr('Home 导航'))
                 if hasattr(self, 'row_guide'):
-                    self.row_guide.setToolTip('Switch Home 键：短按返回主界面，长按快捷菜单')
+                    self.row_guide.setToolTip(tr('Switch Home 键：短按返回主界面，长按快捷菜单'))
             elif family in ('dualsense', 'dualshock4'):
-                self.guide_heading.setText('PS 导航')
+                self.guide_heading.setText(tr('PS 导航'))
                 if hasattr(self, 'row_guide'):
-                    self.row_guide.setToolTip('PlayStation 系统键：呼出控制中心与多任务切换')
+                    self.row_guide.setToolTip(tr('PlayStation 系统键：呼出控制中心与多任务切换'))
             else:
-                self.guide_heading.setText('系统导航')
+                self.guide_heading.setText(tr('系统导航'))
                 if hasattr(self, 'row_guide'):
-                    self.row_guide.setToolTip('通用手柄 Guide 键：呼出系统快捷主控')
+                    self.row_guide.setToolTip(tr('通用手柄 Guide 键：呼出系统快捷主控'))
 
         # Update Eyebrow dynamically (concise serial header, zero marketing text)
         specs = {
@@ -1105,25 +1161,39 @@ class Studio(GlassWindow):
         try:
             set_autostart(self.store.root,enabled)
             if enabled and self.remote and not self.client.connected:spawn(self.store.root,'--agent')
-            self.notify('登录启动已开启' if enabled else '登录启动已关闭')
+            self.notify(tr('登录启动已开启') if enabled else tr('登录启动已关闭'))
         except OSError as exc:
-            self.autostart.blockSignals(True); self.autostart.setChecked(not enabled); self.autostart.blockSignals(False); self.notify('设置失败：'+str(exc))
+            self.autostart.blockSignals(True); self.autostart.setChecked(not enabled); self.autostart.blockSignals(False); self.notify(tr('设置失败：')+str(exc))
 
     def toggle_agent(self):
         if not self.remote:return
         if self.client.connected:self.client.send('stop')
-        else:spawn(self.store.root,'--agent');self.notify('后台启动中')
+        else:spawn(self.store.root,'--agent');self.notify(tr('后台启动中'))
 
     def agent_event(self,message):
         kind=message.get('type')
+        if kind=='state' and hasattr(self,'replay_hud_label'):
+            replay = message.get('replay', {})
+            signature = (replay.get('running'), replay.get('encoder'))
+            if signature != getattr(self, '_replay_hud_signature', None):
+                self._replay_hud_signature = signature
+                self._update_replay_hud()
         if kind=='notice' and hasattr(self,'notice'):self.notify(message['message'])
         elif kind=='capture':
             self.capture_button.setEnabled(True)
             if message.get('path'):self.captured(message['path'])
+        elif kind=='replay_record':
+            path = message.get('path')
+            if path:
+                self.notify(f"🎬 {tr('精彩回放已保存')}: {Path(path).name}")
+            elif message.get("mode") == "system":
+                self.notify(tr("已触发系统回放录制 (Win+Alt+G)"))
+            else:
+                self.notify(message.get("error") or "回放尚未就绪")
         elif kind=='buttons' and self.learn:
             valid=[b for b in message['buttons'] if b in BUTTONS]
             if valid:self.end_learning();QTimer.singleShot(0,lambda:self.edit_mapping(valid[0]))
-        elif kind=='reply' and not message.get('ok',True):self.notify(message.get('error','操作失败'))
+        elif kind=='reply' and not message.get('ok',True):self.notify(message.get('error', tr('操作失败') if get_language() == 'zh' else 'Operation failed'))
         elif kind=='state' and hasattr(self, 'virtual_kbm_page') and self.virtual_kbm_page.is_capturing:
             dev = message.get('device')
             if dev:
@@ -1140,7 +1210,7 @@ class Studio(GlassWindow):
 
     def navigate(self,index):
         headings = ['设备概览','按键配置','截图图库','硬件遥测','系统设置','控制器库','虚拟键鼠']
-        self.stack.setCurrentIndex(index); self.page_heading.setText(headings[index] if index < len(headings) else 'GamePad Studio')
+        self.stack.setCurrentIndex(index); self.page_heading.setText(tr(headings[index]) if index < len(headings) else 'GamePad Studio')
         for i,b in self.nav.items(): b.setChecked(i==index)
         if index==2: self.refresh_gallery()
         if hasattr(self, 'virtual_kbm_page'):
@@ -1156,7 +1226,7 @@ class Studio(GlassWindow):
         self.activateWindow()
 
     def notify(self,text):
-        if not text.startswith(('按下','已连接','手柄已断开')):
+        if not text.startswith(('按下', 'Pressed', '已连接', 'Connected', '手柄已断开', 'Gamepad disconnected')):
             self.notice.setText(text);self.notice_timer.start(4500)
         self.events.insertItem(0, f'{datetime.now():%H:%M:%S}   {text}')
         while self.events.count()>100: self.events.takeItem(100)
@@ -1171,42 +1241,53 @@ class Studio(GlassWindow):
 
     def scan(self):
         try: self.device.scan()
-        except Exception as exc: self.notify('设备扫描失败：'+str(exc))
+        except Exception as exc: self.notify(tr('设备扫描失败：')+str(exc))
 
     def testing_protected(self):
         return self.stack.currentIndex()==3 and self.isVisible() and not self.isMinimized() and self.tester.protect.isChecked()
+
+    def preview_requested(self):
+        return self.stack.currentIndex() in (1,6) and self.isActiveWindow() and self.virtual_kbm_page.preview_toggle.isChecked()
 
     def poll(self):
         try:
             state=self.device.read(); self.snapshot=state; connected=state is not None
             identity=(state.get('instance_id'),state.get('family')) if state else None
-            profile_changed=self.remote and self.client.status.get('profile',self.config['active_profile'])!=self.config['active_profile']
+            profile_changed=self.remote and (self.client.status.get('profile',self.config['active_profile'])!=self.config['active_profile'] or self.client.status.get('mapping_revision',0)!=self.config.get('mapping_revision',0))
+            if profile_changed:
+                latest=ConfigStore(self.store.root);self.store.data.clear();self.store.data.update(latest.data);self.store._baseline=copy.deepcopy(latest.data)
             if identity!=self.device_identity or profile_changed:
-                self.engine.reset();self.actions.release_all();self.nikki_engine.reset();self.last_buttons=set();self.device_identity=identity
+                self.engine.reset();self.actions.release_all();self.last_buttons=set();self.device_identity=identity
                 self.update_controller_ui(state)
             self.controllers.set_devices(self.device.available,state.get('instance_id') if state else None)
             if self.remote:
                 online=self.client.connected; self.enabled=self.client.status.get('enabled',False)
-                self.agent_status.setText('运行中' if online else '已停止'); self.agent_toggle.setText('停止后台' if online else '启动后台')
-                self.pause_button.setEnabled(online);self.pause_button.setText('暂停映射' if self.enabled else '恢复映射');self.pause_button.set_symbol('pause' if self.enabled else 'play')
+                self.agent_status.setText(tr('运行中') if online else tr('已停止')); self.agent_toggle.setText(tr('停止后台') if online else tr('启动后台'))
+                self.pause_button.setEnabled(online);self.pause_button.setText(tr('暂停映射') if self.enabled else tr('恢复映射'));self.pause_button.set_symbol('pause' if self.enabled else 'play')
                 self.capture_button.setEnabled(online and not self.client.status.get('capturing',False))
-                if online and (self.learn or QApplication.activeModalWidget() is not None or self.testing_protected()):
+                preview = self.preview_requested()
+                now=time.monotonic()
+                if online and (preview != getattr(self,'last_preview',False) or (preview and now-getattr(self,'preview_lease_time',0)>.25)):
+                    self.client.send('preview',seconds=.75 if preview else 0)
+                    self.preview_lease_time=now;self.last_preview=preview
+                is_kbm_capturing = hasattr(self, 'virtual_kbm_page') and getattr(self.virtual_kbm_page, 'is_capturing', False)
+                if online and (self.learn or is_kbm_capturing or QApplication.activeModalWidget() is not None or self.testing_protected()):
                     now=time.monotonic()
                     if now-getattr(self,'last_suspend',0)>.5:
                         self.client.send('suspend',seconds=2);self.last_suspend=now
             if connected != self.previous_connected:
-                self.engine.reset(); self.actions.release_all(); self.nikki_engine.reset(); self.last_touch=None
+                self.engine.reset(); self.actions.release_all(); self.last_touch=None
                 self.previous_connected=connected
-                self.notify('已连接 '+state['name'] if connected else '手柄已断开，等待重新连接')
+                self.notify(tr('已连接 ') + state['name'] if connected else tr('手柄已断开，等待重新连接'))
                 if connected and state['led'] and not self.remote: self.device.led(self.config['led'])
-            self.status_badge.setText('●  已连接' if connected else '○  等待连接')
-            self.side_status.setText('●  已连接' if connected else '○  未连接')
+            self.status_badge.setText(tr('●  已连接') if connected else tr('○  等待连接'))
+            self.side_status.setText(tr('●  已连接') if connected else tr('○  未连接'))
             self.rumble_button.setEnabled(bool(state and state['rumble']))
             self.tester.update_state(state,collect=self.stack.currentIndex()==3 and self.isVisible() and not self.isMinimized())
             self.mapping_art.update_state(state)
             if hasattr(self, 'matrix'):
                 if state:
-                    p_simple = {-1:'未报告',0:'极低',1:'低',2:'中等',3:'充足',4:'外接'}.get(state.get('power'), '未知')
+                    p_simple = {-1:'未报告',0:'极低',1:'低',2:'中等',3:'充足',4:'外接'}.get(state.get('power'), '未知') if get_language() == 'zh' else {-1:'N/A',0:'CRIT',1:'LOW',2:'MED',3:'FULL',4:'EXT'}.get(state.get('power'), 'UNK')
                     self.matrix.set_lines([
                         ('DEVICE', state['name'][:12].upper()),
                         ('POWER', p_simple),
@@ -1220,13 +1301,32 @@ class Studio(GlassWindow):
                         ('POLL', '1000 HZ'),
                         ('STATUS', 'WAITING')
                     ])
+            if self.remote:
+                feedback = self.client.status.get('mapping', {}) if self.client.connected else {}
+            else:
+                feedback = self.engine.feedback() if state else {}
+            self.virtual_kbm_page.set_device_state(state)
+            self.virtual_kbm_page.update_feedback(feedback, bool(state), self.client.status.get('suspended',False) if self.remote else QApplication.activeModalWidget() is not None)
+            self.binding_list.feedback(feedback)
+            events = feedback.get('events',[])
+            if events:
+                from .mapping_engine import trigger_label
+                last=events[-1]
+                message=trigger_label(last['trigger'],(state or {}).get('family','dualsense'))+' '+('长按' if last.get('gesture')=='long' else '短按')+' → '+last.get('action','')
+                message=('安全试按 · ' if feedback.get('preview') else '')+message
+                self.mapping_feedback.setText(message); self.home_input_feedback.setText(message)
+            elif not state:
+                self.mapping_feedback.setText('等待输入'); self.home_input_feedback.setText('等待输入')
             if not state:
-                self.device_details.setText('未连接'); self.power_label.setText('未连接'); self.engine.reset(); self.nikki_engine.reset(); self.last_buttons=set()
+                self.engine.update(None, self.config, enabled=False)
+                self.device_details.setText(tr('未连接')); self.power_label.setText(tr('未连接')); self.engine.reset(); self.last_buttons=set()
                 return
-            power={-1:'电量未报告',0:'电量极低',1:'电量低',2:'电量中等',3:'电量充足',4:'外接供电'}
-            p_text = power.get(state['power'],'电量未知')
+            power={-1:tr('电量未报告'),0:tr('电量极低'),1:tr('电量低'),2:tr('电量中等'),3:tr('电量充足'),4:tr('外接供电')}
+            p_text = power.get(state['power'], tr('电量未知'))
             self.device_details.setText(p_text); self.power_label.setText(p_text)
             buttons=set(state['buttons']); new=buttons-self.last_buttons; self.last_buttons=buttons
+            if hasattr(self, 'virtual_kbm_page'):
+                self.virtual_kbm_page.set_device_state(state)
             if hasattr(self, 'virtual_kbm_page') and self.virtual_kbm_page.is_capturing:
                 self.virtual_kbm_page.handle_device_input(state)
                 return
@@ -1235,35 +1335,24 @@ class Studio(GlassWindow):
                 if number in BUTTONS: QTimer.singleShot(0,lambda:self.edit_mapping(number))
                 return
             if not self.remote and self.enabled and not self.learn and not self.testing_protected() and QApplication.activeModalWidget() is None:
-                if hasattr(self, 'virtual_kbm_engine') and self.virtual_kbm_engine.scheme.get("enabled", True):
-                    self.virtual_kbm_engine.update(state)
-                elif self.config.get('active_profile') == NIKKI_PROFILE_NAME:
-                    remaining = self.nikki_engine.update(state, self.store.mappings)
-                    self.engine.update(remaining, self.store.mappings)
-                else:
-                    self.engine.update(buttons,self.store.mappings)
-                    touch=state['touch']
-                    if self.config['touch_mouse'] and touch and self.last_touch:
-                        dx,dy=(touch[0]-self.last_touch[0])*1600,(touch[1]-self.last_touch[1])*900
-                        if abs(dx)<250 and abs(dy)<250: self.actions.move_mouse(dx,dy)
-                    self.last_touch=touch or None
+                self.engine.update(state, self.config, preview=self.preview_requested())
             else:
-                self.engine.reset(); self.nikki_engine.reset()
-                if hasattr(self, 'virtual_kbm_engine'): self.virtual_kbm_engine.reset()
+                self.engine.reset()
                 self.last_touch=None
             if new:
-                self.notify('按下 '+' / '.join(self.button_names.get(k,str(k)) for k in sorted(new)))
+                self.notify(tr('按下 ') + ' / '.join(self.button_names.get(k,str(k)) for k in sorted(new)))
         except Exception as exc:
             self.enabled=False
-            try: self.engine.reset(); self.actions.release_all(); self.nikki_engine.reset()
+            try: self.engine.reset(); self.actions.release_all()
             except Exception: pass
-            self.pause_button.setText('恢复映射');self.pause_button.set_symbol('play'); self.notify('映射已暂停：'+str(exc))
+            self.pause_button.setText(tr('恢复映射'));self.pause_button.set_symbol('play'); self.notify(tr('映射已暂停：')+str(exc))
 
     def dispatch(self,binding,down=True):
         action=binding.get('action','none')
         if action=='hold': self.actions.hold(binding.get('value',''),down); return
         if not down or action=='none': return
         if action=='capture': self.capture()
+        elif action=='replay_record': self.trigger_manual_replay()
         elif action in ('gallery','home'):
             self.navigate(2 if action=='gallery' else 0); self.show_home()
         elif action=='shortcut': self.actions.shortcut(binding['value'])
@@ -1273,149 +1362,165 @@ class Studio(GlassWindow):
     def toggle_pause(self):
         if self.remote:
             self.client.send('pause' if self.enabled else 'resume');return
-        self.engine.reset(); self.actions.release_all(); self.nikki_engine.reset(); self.enabled=not self.enabled
-        self.pause_button.setText('暂停映射' if self.enabled else '恢复映射');self.pause_button.set_symbol('pause' if self.enabled else 'play'); self.notify('映射已恢复' if self.enabled else '映射已暂停 · 设备监测继续运行')
+        enable=not self.enabled
+        self.enabled=False;self.config['mapping_enabled']=False;self.store.save()
+        try:self.engine.reset()
+        finally:self.actions.release_all()
+        self.config['mapping_enabled']=enable;self.store.save();self.enabled=enable
+        self.pause_button.setText(tr('暂停映射') if self.enabled else tr('恢复映射'));self.pause_button.set_symbol('pause' if self.enabled else 'play'); self.notify(tr('映射已恢复') if self.enabled else tr('映射已暂停 · 设备监测继续运行'))
 
     def change_profile(self,name):
-        if name not in self.config['profiles']: return
-        self.engine.reset(); self.actions.release_all(); self.nikki_engine.reset(); self.store.remember_profile(self.snapshot,name); self.store.save(); self.refresh_mappings(); self.notify('已切换配置：'+name)
-        if not self.snapshot:self.update_controller_ui(None)
-        if self.remote:self.client.send('reload')
+        if not name or name not in self.config['profiles'] or name == self.config['active_profile']: return
+        if self.mapping_change({'op': 'select', 'profile': name}):
+            if not self.snapshot: self.update_controller_ui(None)
 
     def duplicate_profile(self):
-        name,ok=QInputDialog.getText(self,'另存为预设','配置名称')
+        name,ok=QInputDialog.getText(self,tr('另存为预设'),tr('配置名称'))
         if ok and name.strip():
             name=name.strip()
-            if name in self.config['profiles']: QMessageBox.warning(self,'名称重复','请使用不同的配置名称。'); return
-            self.config['profiles'][name]=copy.deepcopy(self.store.mappings)
-            if self.snapshot:self.config['profile_families'][name]=self.snapshot['family']
-            self.profile_combo.addItem(name);self.change_profile(name)
+            if name in self.config['profiles']: QMessageBox.warning(self,tr('名称重复'),tr('请使用不同的配置名称。')); return
+            self.mapping_change({'op':'create', 'profile':name})
 
     def reset_profile(self):
         if not self.snapshot:return
         name=self.config['active_profile']
-        if QMessageBox.question(self,'恢复默认',f'恢复“{name}”的默认映射？')!=QMessageBox.Yes:return
+        msg = f"恢复“{name}”的默认映射？" if get_language() == 'zh' else f"Reset default mappings for '{tr_profile(name)}'?"
+        if QMessageBox.question(self,tr('恢复默认'),msg)!=QMessageBox.Yes:return
         self.engine.reset();self.actions.release_all()
-        self.config['profiles'][name]=controller_defaults(self.snapshot['family'],self.snapshot.get('available_buttons'))
-        self.store.save();self.refresh_mappings();self.notify('已恢复默认映射')
-        if self.remote:self.client.send('reload')
+        self.mapping_change({'op':'reset', 'profile':name})
 
     def delete_profile(self, *args):
         name = self.config['active_profile']
         family_profiles = self.store.profiles_for(self.snapshot)
         if len(family_profiles) <= 1:
             QMessageBox.information(
-                self, '无法删除配置',
-                f'当前设备至少需要保留一个配置预设（当前为“{name}”）。\n\n如需重置按键设定，请点击“恢复默认配置”；如需建立新配置，请点击“另存为新预设”。'
+                self, tr('无法删除配置'),
+                tr('当前设备至少需要保留一个配置预设（当前为“{name}”）。\n\n如需重置按键设定，请点击“恢复默认配置”；如需建立新配置，请点击“另存为新预设”。', name=tr_profile(name))
             )
             return
         reply = QMessageBox.question(
-            self, '删除配置预设',
-            f'确定要永久删除配置预设“{name}”吗？\n删除后不可恢复。',
+            self, tr('删除配置预设'),
+            tr('确定要永久删除配置预设“{name}”吗？\n删除后不可恢复。', name=tr_profile(name)),
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply != QMessageBox.Yes:
             return
-        fallback = self.store.delete_profile(name, self.snapshot)
-        if fallback:
-            self.engine.reset()
-            self.actions.release_all()
-            self.refresh_mappings()
-            self.notify(f'已删除配置预设：{name}')
-            if self.remote:
-                self.client.send('reload')
+        self.mapping_change({'op':'delete', 'profile':name})
 
     @staticmethod
     def compact_binding(action):
         kind=action.get('action','none')
+        if kind in ('mouse_hold','mouse_click','wheel'):return binding_label(action)
         if kind in ('shortcut','hold'):return action.get('value','')
-        return {'none':'原始输入','capture':'截图','gallery':'图库','home':'控制中心',
+        base = {'none':'原始输入','capture':'截图','gallery':'图库','home':'控制中心',
                 'replay_record':'回放录制','record_toggle':'录屏'}.get(kind,ACTION_NAMES.get(kind,'原始输入'))
+        return tr(base)
 
     def select_mapping(self,key):
         self.selected_key=key
         for number,(box,_) in self.mapping_boxes.items():box.setChecked(number==key)
         self.mapping_art.select_button(key)
         self.selected_label.setText(self.button_names.get(key,str(key)))
-        self.mapping_edit.setText('编辑 '+self.button_names.get(key,str(key)))
-        entry=self.store.mappings.get(str(key),{})
+        self.mapping_edit.setText(tr('编辑 ') + self.button_names.get(key,str(key)))
+        entry=effective_mappings(self.config, self.snapshot).get(str(key),{})
         self.mapping_short.setText(self.compact_binding(entry.get('short',{})))
         self.mapping_long.setText(self.compact_binding(entry.get('long',{})))
 
     def refresh_mappings(self):
-        self.mapping_profile.setText(self.config['active_profile'])
+        self.mapping_profile.setText(tr_profile(self.config['active_profile']))
         for combo in (self.profile_combo,self.mapping_combo):
             combo.blockSignals(True);combo.clear();combo.addItems(self.store.profiles_for(self.snapshot));combo.setCurrentText(self.config['active_profile']);combo.blockSignals(False)
         if hasattr(self, 'delete_profile_btn'):
             can_del = len(self.store.profiles_for(self.snapshot)) > 1
             self.delete_profile_btn.setEnabled(True)
-            self.delete_profile_btn.setToolTip(
-                f'删除当前配置预设：{self.config.get("active_profile", "")}' if can_del
-                else '当前控制器仅剩此一个预设，点击查看说明'
-            )
+            del_tip = (tr('删除当前配置预设：') + tr_profile(self.config.get("active_profile", ""))) if can_del else (tr('当前控制器仅剩此一个预设，点击查看说明') if get_language() == 'zh' else 'Only one profile remaining for this controller; click for details')
+            self.delete_profile_btn.setToolTip(del_tip)
+        if hasattr(self, 'virtual_kbm_page'): self.virtual_kbm_page.refresh_display()
+        self.binding_list.refresh()
         compact=self.compact_binding
         for key,info in self.mapping_labels.items():
-            entry=self.store.mappings.get(str(key),{})
+            entry=effective_mappings(self.config, self.snapshot).get(str(key),{})
             short=compact(entry.get('short',{}));long=compact(entry.get('long',{}))
-            original=short==long=='原始输入';info.setVisible(not original)
+            original=short==long==tr('原始输入');info.setVisible(not original)
             info.setText('' if original else f'{short} / {long}')
-            info.setToolTip(f'短按：{short}\n长按：{long}')
+            info.setToolTip(f"{tr('短按')}：{short}\n{tr('长按')}：{long}")
             self.mapping_boxes[key][0].setToolTip(self.button_names.get(key,str(key))+'\n'+info.toolTip())
         self.select_mapping(self.selected_key)
+        if hasattr(self, 'row_guide'):
+            guide=effective_mappings(self.config,self.snapshot).get('5',{})
+            self.row_guide.setToolTip('短按：'+compact(guide.get('short',{}))+' / 长按：'+compact(guide.get('long',{})))
         family=(self.snapshot.get('family','dualsense') if self.snapshot else
                 self.config.get('profile_families',{}).get(self.config['active_profile'],'dualsense'))
         available=(self.snapshot.get('available_buttons') if self.snapshot else
                    [key for key,(box,_) in self.mapping_boxes.items() if not box.isHidden()])
         key=capture_button(family,available)
-        self.capture_heading.setText(self.button_names[key] if key is not None else '截图')
-        entry=self.store.mappings.get(str(key),{}) if key is not None else {}
-        tip = f"{self.button_names.get(key, '截图')}：短按 {compact(entry.get('short',{}))} / 长按 {compact(entry.get('long',{}))}" if key is not None else '驱动未提供 Share，可在映射中自定义截图按键'
+        self.capture_heading.setText(self.button_names[key] if key is not None else tr('截图'))
+        entry=effective_mappings(self.config, self.snapshot).get(str(key),{}) if key is not None else {}
+        tip = f"{self.button_names.get(key, tr('截图'))}：{tr('短按')} {compact(entry.get('short',{}))} / {tr('长按')} {compact(entry.get('long',{}))}" if key is not None else (tr('驱动未提供 Share，可在映射中自定义截图按键') if get_language() == 'zh' else 'Share button unavailable in driver; custom shortcut configurable in mapping')
         if hasattr(self, 'row_capture'):
             self.row_capture.setToolTip(tip)
         if hasattr(self, 'create_hint'):
-            self.create_hint.setText(compact(entry.get('short',{}))+'  /  '+compact(entry.get('long',{})) if key is not None else '未设置')
+            self.create_hint.setText(compact(entry.get('short',{}))+'  /  '+compact(entry.get('long',{})) if key is not None else (tr('未设置') if get_language() == 'zh' else 'Not Configured'))
             self.create_hint.setToolTip(tip)
         if hasattr(self, 'capture_action_btn'):
             if key is not None:
-                self.capture_action_btn.setText('查看图库 ›')
+                self.capture_action_btn.setText(tr('查看图库 ›'))
                 try: self.capture_action_btn.clicked.disconnect()
                 except Exception: pass
                 self.capture_action_btn.clicked.connect(lambda: self.navigate(2))
             else:
-                self.capture_action_btn.setText('配置按键 ›')
+                self.capture_action_btn.setText(tr('配置按键 ›'))
                 try: self.capture_action_btn.clicked.disconnect()
                 except Exception: pass
                 self.capture_action_btn.clicked.connect(lambda: self.navigate(1))
 
     def start_learning(self):
-        self.engine.reset(); self.learn=True;self.learn_button.setChecked(True); self.learn_button.setText('请按手柄按键…'); self.notify('按下要配置的手柄按键（10 秒内）')
-        QTimer.singleShot(10000,self.end_learning)
+        self.edit_mapping('0', new=True, capture=True)
 
     def end_learning(self):
-        self.learn=False;self.learn_button.setChecked(False); self.learn_button.setText('识别手柄按键')
+        self.learn=False;self.learn_button.setChecked(False); self.learn_button.setText(tr('识别手柄按键'))
 
-    def edit_mapping(self,key):
+    def mapping_change(self, change):
+        try:
+            if self.remote:
+                result = request(self.store.root, 'mapping_change', change=change)
+                if not result or not result.get('ok', True) or 'config' not in result:
+                    raise ValueError((result or {}).get('error', '后台未连接，修改尚未保存'))
+                data = result['config']
+                self.store.data.clear(); self.store.data.update(data)
+                self.store._baseline = copy.deepcopy(data)
+            else:
+                self.engine.reset()
+                self.store.apply_mapping_change(change, self.snapshot)
+            self.refresh_mappings()
+            self.notify('映射已保存')
+            return True
+        except (ValueError, OSError) as exc:
+            self.notify(str(exc)); return False
+
+    def edit_mapping(self, key, new=False, output=None, capture=False):
         if self.remote:self.client.send('suspend',seconds=2)
-        if key not in BUTTONS: return
         self.engine.reset(); self.actions.release_all()
-        dialog=MappingDialog(self,key,self.store.mappings.get(str(key),{}))
-        profile=self.config['active_profile']
-        if dialog.exec()==QDialog.Accepted:
-            self.config['profiles'][profile][str(key)]=dialog.value(); self.store.save(); self.refresh_mappings(); self.notify('映射已保存')
-            if self.remote:self.client.send('reload')
+        mapping = {} if new else effective_mappings(self.config, self.snapshot).get(str(key), {})
+        dialog = BindingDialog(self, key, mapping, output=output, new=new)
+        if capture: dialog.start_capture()
+        if dialog.exec() == QDialog.Accepted:
+            self.mapping_change({'op':'binding', 'profile':dialog.profile,
+                                 'trigger':dialog.trigger(), 'previous_trigger':None if new else str(key), 'mapping':dialog.value()})
+        if self.remote:self.client.send('suspend',seconds=0)
 
     def capture(self):
         if self.remote:
-            if not self.client.send('capture'):self.notify('请先启动后台映射')
+            if not self.client.send('capture'):self.notify(tr('请先启动后台映射'))
             return
         now=time.monotonic()
         if (self.worker and self.worker.isRunning()) or now-self.last_capture<self.config['cooldown']: return
         self.last_capture=now; self.capture_button.setEnabled(False)
-        self.worker=CaptureWorker(self.config['save_dir'],self.config['capture_mode']); self.worker.ready.connect(self.captured); self.worker.failed.connect(lambda error:self.notify('截图失败：'+error)); self.worker.finished.connect(lambda:self.capture_button.setEnabled(True)); self.worker.start()
+        self.worker=CaptureWorker(self.config['save_dir'],self.config['capture_mode']); self.worker.ready.connect(self.captured); self.worker.failed.connect(lambda error:self.notify(tr('截图失败：')+error)); self.worker.finished.connect(lambda:self.capture_button.setEnabled(True)); self.worker.start()
 
     def captured(self,path):
-        self.notify('截图已保存'); self.refresh_gallery()
-        if not self.isActiveWindow(): self.tray.showMessage('精彩瞬间已保存',Path(path).name,QSystemTrayIcon.Information,1800)
+        self.notify(tr('截图已保存')); self.refresh_gallery()
+        if not self.isActiveWindow(): self.tray.showMessage(tr('精彩瞬间已保存'),Path(path).name,QSystemTrayIcon.Information,1800)
 
     @staticmethod
     def clear_layout(layout):
@@ -1425,14 +1530,27 @@ class Studio(GlassWindow):
                 widget=item.widget(); widget.hide(); widget.setParent(None); widget.deleteLater()
 
     def thumbnail(self,row,compact=False):
+        thumb_file = row.get('thumb_path', row['path'])
+        pix = QPixmap(thumb_file) if Path(thumb_file).suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp') else QPixmap()
+        if pix.isNull():
+            pix = QPixmap(280, 150)
+            pix.fill(QColor(TOKENS.get('surface_lo', TOKENS['base'])))
+            painter = QPainter(pix)
+            painter.setPen(QColor(TOKENS['accent']))
+            font = painter.font()
+            font.setPointSize(14)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(pix.rect(), Qt.AlignCenter, "🎬 4K 精彩回放" if row.get('is_video') else "🖼️ 截图")
+            painter.end()
+
         if compact:
             box=GlassPanel(); layout=QHBoxLayout(box); layout.setContentsMargins(10,10,10,10); layout.setSpacing(12)
             image=QPushButton(); image.setFixedSize(112,64); image.setObjectName('icon')
-            pix = QPixmap(row['path'])
             image.setIcon(QIcon(pix)); image.setIconSize(QSize(112,64)); image.clicked.connect(lambda:self.preview(row)); layout.addWidget(image)
             text=QVBoxLayout(); text.setSpacing(4); title=row['title']
             t_lbl = label(title, 'section'); text.addWidget(t_lbl)
-            time_lbl = label(f"拍摄于 {row.get('created','')[11:19]}", 'muted'); time_lbl.setObjectName('caption'); text.addWidget(time_lbl)
+            time_lbl = label(tr('拍摄于 ') + f"{row.get('created','')[11:19]}", 'muted'); time_lbl.setObjectName('caption'); text.addWidget(time_lbl)
             layout.addLayout(text,1)
             return box
         box, b = card()
@@ -1441,20 +1559,25 @@ class Studio(GlassWindow):
         image = QPushButton()
         image.setMinimumHeight(150)
         image.setObjectName('icon')
-        pix = QPixmap(row['path'])
         image.setIcon(QIcon(pix))
         image.setIconSize(QSize(280, 150))
         image.clicked.connect(lambda: self.preview(row))
         b.addWidget(image)
         caption = QHBoxLayout()
         caption.addWidget(label(row['title'], 'section'), 1)
-        image.setToolTip(f"{row.get('created','')[:19].replace('T',' ')} · {row.get('width','?')} × {row.get('height','?')}")
-        fav = IconButton('heart', '取消收藏' if row['favorite'] else '收藏', lambda: self.favorite(row), 32)
+        tip = f"{row.get('created','')[:19].replace('T',' ')}"
+        if row.get('is_video'):
+            tip += f" · {row.get('size_mb', 0)} MB · 点击播放"
+        else:
+            tip += f" · {row.get('width','?')} × {row.get('height','?')}"
+        image.setToolTip(tip)
+        fav = IconButton('heart', tr('取消收藏') if row['favorite'] else tr('收藏'), lambda: self.favorite(row), 32)
         fav.setCheckable(True)
         fav.setChecked(row['favorite'])
         fav.setStyleSheet(f'background: {TOKENS["elevated"]}; border: 1px solid {TOKENS["border_hi"]}; border-radius: {TOKENS["r_sm"]}px;')
         caption.addWidget(fav)
-        del_btn = IconButton('trash', '删除截图', lambda: self.delete_capture_confirm(row), 32)
+        del_text = tr('删除视频') if row.get('is_video') else tr('删除截图')
+        del_btn = IconButton('trash', del_text, lambda: self.delete_capture_confirm(row), 32)
         del_btn.setObjectName('icon_danger')
         del_btn.setStyleSheet(f'background: {TOKENS["elevated"]}; border: 1px solid {TOKENS["border_hi"]}; border-radius: {TOKENS["r_sm"]}px;')
         caption.addWidget(del_btn)
@@ -1463,7 +1586,7 @@ class Studio(GlassWindow):
 
     def refresh_gallery(self,*args):
         try: rows=list_captures(self.config['save_dir'])
-        except OSError as exc: self.notify('无法读取截图目录：'+str(exc)); return
+        except OSError as exc: self.notify(tr('无法读取截图目录：')+str(exc)); return
         columns=2 if self.width()<1150 else 3
         signature=(tuple((r['path'],r['favorite']) for r in rows),self.search.text(),self.only_favorites.isChecked(),columns)
         if getattr(self,'gallery_signature',None)==signature: return
@@ -1472,10 +1595,10 @@ class Studio(GlassWindow):
         for i in range(self.gallery_grid.columnCount()):self.gallery_grid.setColumnStretch(i,0)
         self.clear_layout(self.gallery_grid); self.clear_layout(self.recent_row)
         filtered=[r for r in rows if (not self.only_favorites.isChecked() or r['favorite']) and self.search.text().lower() in (r['title']+r['path']).lower()]
-        self.gallery_info.setText(f"{len(rows)} 张")
+        self.gallery_info.setText(f"{len(rows)} " + tr('张'))
         for i,row in enumerate(filtered[:180]): self.gallery_grid.addWidget(self.thumbnail(row),i//columns,i%columns)
         if not filtered:
-            empty = label('暂无截图', 'muted')
+            empty = label(tr('暂无截图'), 'muted')
             empty.setAlignment(Qt.AlignCenter)
             empty.setStyleSheet(f"color: {TOKENS['ink_3']}; font-size: 15px; font-weight: 500;")
             self.gallery_grid.addWidget(empty, 0, 0, 1, columns, Qt.AlignCenter)
@@ -1488,7 +1611,7 @@ class Studio(GlassWindow):
             self.gallery_grid.setRowStretch((min(len(filtered), 180) + columns - 1) // columns, 1)
         for row in rows[:2]: self.recent_row.addWidget(self.thumbnail(row,True),1)
         if not rows:
-            r_empty = label('暂无截图', 'muted')
+            r_empty = label(tr('暂无截图'), 'muted')
             r_empty.setAlignment(Qt.AlignCenter)
             self.recent_row.addWidget(r_empty, 1)
 
@@ -1498,11 +1621,16 @@ class Studio(GlassWindow):
 
     def favorite(self,row):
         try: set_favorite(row['path'],not row['favorite']); self.refresh_gallery()
-        except OSError as exc: self.notify('收藏失败：'+str(exc))
+        except OSError as exc: self.notify(tr('收藏失败：')+str(exc))
 
     def preview(self, row):
+        if row.get('is_video'):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(row['path']))
+            self.notify(f"🎬 {tr('已调用系统播放器播放精彩回放视频')}: {Path(row['path']).name}")
+            return
+
         dialog = QDialog(self)
-        dialog.setWindowTitle('截图预览')
+        dialog.setWindowTitle(tr('截图预览'))
         dialog.resize(960, 680)
         layout = QVBoxLayout(dialog)
         image = QLabel()
@@ -1513,12 +1641,12 @@ class Studio(GlassWindow):
         layout.addWidget(label(row['title'], 'section'))
         layout.addWidget(label(Path(row['path']).name, 'muted'))
         bar = QHBoxLayout()
-        bar.addWidget(button('复制图像', lambda: QApplication.clipboard().setPixmap(pix), pill=True))
-        bar.addWidget(button('打开原图', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(row['path'])), pill=True))
-        del_btn = button('删除截图', lambda: self.delete_capture_confirm(row, on_deleted=dialog.accept), danger=True, icon='trash')
+        bar.addWidget(button(tr('复制图像'), lambda: QApplication.clipboard().setPixmap(pix), pill=True))
+        bar.addWidget(button(tr('打开原图'), lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(row['path'])), pill=True))
+        del_btn = button(tr('删除截图'), lambda: self.delete_capture_confirm(row, on_deleted=dialog.accept), danger=True, icon='trash')
         bar.addWidget(del_btn)
         bar.addStretch()
-        bar.addWidget(button('关闭', dialog.accept, pill=True))
+        bar.addWidget(button(tr('关闭'), dialog.accept, pill=True))
         layout.addLayout(bar)
         dialog.exec()
 
@@ -1527,10 +1655,12 @@ class Studio(GlassWindow):
             return
         name = Path(row['path']).name
         title = row.get('title', name)
+        is_vid = bool(row.get('is_video'))
+        item_type = tr('回放视频') if is_vid else tr('截图')
         reply = QMessageBox.question(
             self,
-            '删除截图',
-            f'确定要永久删除截图 "{title}" 吗？\n文件：{name}',
+            tr('删除{type}', type=item_type),
+            tr('确定要永久删除{type} "{title}" 吗？\n文件：{name}', type=item_type, title=title, name=name),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -1539,28 +1669,28 @@ class Studio(GlassWindow):
                 if delete_capture(row['path']):
                     self.gallery_signature = None
                     self.refresh_gallery()
-                    self.notify('截图已删除')
+                    self.notify(tr('{type}已删除', type=item_type))
                     if on_deleted:
                         on_deleted()
                 else:
-                    self.notify('截图文件不存在或已被删除')
+                    self.notify(tr('截图文件不存在或已被删除'))
             except OSError as exc:
-                self.notify(f'删除失败：{exc}')
+                self.notify(tr('删除失败：') + str(exc))
 
     def clean_unfavorited_captures(self, *args):
         try:
             rows = list_captures(self.config['save_dir'])
         except OSError as exc:
-            self.notify(f'无法读取截图目录：{exc}')
+            self.notify(tr('无法读取截图目录：') + str(exc))
             return
         unfavorited = [r for r in rows if not r.get('favorite')]
         if not unfavorited:
-            self.notify('没有可清理的未收藏截图')
+            self.notify(tr('没有可清理的未收藏截图'))
             return
         reply = QMessageBox.question(
             self,
-            '清理未收藏截图',
-            f'确定要清理所有未收藏的截图吗？\n将永久删除 {len(unfavorited)} 张截图，已收藏的 {len(rows) - len(unfavorited)} 张截图将被保留。',
+            tr('清理未收藏截图'),
+            tr('确定要清理所有未收藏的截图吗？\n将永久删除 {count} 张截图，已收藏的 {retained} 张截图将被保留。', count=len(unfavorited), retained=len(rows) - len(unfavorited)),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -1574,18 +1704,18 @@ class Studio(GlassWindow):
                     pass
             self.gallery_signature = None
             self.refresh_gallery()
-            self.notify(f'已清理 {count} 张未收藏截图')
+            self.notify(tr('已清理 {count} 张未收藏截图', count=count))
 
     def open_capture_folder(self):
         folder=Path(self.config['save_dir']); folder.mkdir(parents=True,exist_ok=True); QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def choose_folder(self):
-        path=QFileDialog.getExistingDirectory(self,'截图保存位置',self.config['save_dir'])
-        if path: self.setting('save_dir',path); self.folder_label.setText(path);self.folder_button.setText('截图位置：'+path); self.gallery_signature=None; self.refresh_gallery(); self.notify('截图目录已更新')
+        path=QFileDialog.getExistingDirectory(self,tr('截图保存位置'),self.config['save_dir'])
+        if path: self.setting('save_dir',path); self.folder_label.setText(path);self.folder_button.setText(tr('截图位置：')+path); self.gallery_signature=None; self.refresh_gallery(); self.notify(tr('截图目录已更新'))
 
     def rumble(self):
         if self.remote:self.client.send('rumble',strength=self.config['rumble']);return
-        self.notify('已发送 350 ms 振动测试' if self.device.rumble(self.config['rumble']) else '当前设备暂不支持振动或尚未连接')
+        self.notify(tr('已发送 350 ms 振动测试') if self.device.rumble(self.config['rumble']) else tr('当前设备暂不支持振动或尚未连接'))
 
     def test_rumble(self,strength):
         if self.remote:self.client.send('rumble',strength=strength)
@@ -1599,10 +1729,16 @@ class Studio(GlassWindow):
         if self.remote:
             self.setting('led',color);self.client.send('led',color=color);return
         if self.device.led(color):
-            self.setting('led',color); self.notify('灯条颜色已更新')
-        else: self.notify('当前设备暂不支持灯条控制或尚未连接')
+            self.setting('led',color); self.notify(tr('灯条颜色已更新'))
+        else: self.notify(tr('当前设备暂不支持灯条控制或尚未连接'))
 
     def closeEvent(self,event):
+        close_to_tray = bool(self.config.get('close_to_tray', False)) and not getattr(self, 'quitting', False)
+        if close_to_tray and self.tray.isVisible():
+            self.hide()
+            self.notify(tr('GamePad Studio 已最小化至系统托盘'))
+            event.ignore()
+            return
         self.cleanup();event.accept()
 
     def cleanup(self):
@@ -1610,8 +1746,18 @@ class Studio(GlassWindow):
         self.closed=True
         self.timer.stop(); self.scan_timer.stop(); self.gallery_timer.stop()
         self.notice_timer.stop();self.events.close()
-        self.engine.reset(); self.actions.release_all(); self.nikki_engine.reset()
-        if hasattr(self, 'virtual_kbm_engine'): self.virtual_kbm_engine.close()
+        if self.remote:
+            if self.client and self.client.connected:
+                try: self.client.send('preview', seconds=0)
+                except Exception: pass
+                try: self.client.send('stop')
+                except Exception: pass
+            try:
+                request(self.store.root, 'stop', timeout=600)
+            except Exception:
+                pass
+        self.engine.reset(); self.actions.release_all()
+        self.engine.close()
         self.device.close(); self.tray.hide()
         if self.worker and self.worker.isRunning(): self.worker.wait()
 
@@ -1620,12 +1766,13 @@ class Studio(GlassWindow):
 
 
 def run():
-    pages={'home':0,'mappings':1,'gallery':2,'input':3,'settings':4,'controllers':5}
-    parser=argparse.ArgumentParser(description='GamePad Studio 手柄管理软件')
+    pages={'home':0,'mappings':1,'gallery':2,'input':3,'settings':4,'controllers':5,'keyboard':6}
+    parser=argparse.ArgumentParser(description=tr('GamePad Studio 手柄管理软件'))
     parser.add_argument('--data-dir',type=Path,default=None)
     parser.add_argument('--cli',action='store_true',help='使用原命令行截图模式')
     parser.add_argument('--smoke-test',action='store_true',help=argparse.SUPPRESS)
     parser.add_argument('--page',choices=list(pages),default='controllers')
+    parser.add_argument('--lang',choices=['auto','zh','en'],default=None,help=tr('UI 界面语言选择 (auto/zh/en)'))
     args,extra=parser.parse_known_args()
     if args.cli or extra:
         from .cli import run as cli
@@ -1637,18 +1784,25 @@ def run():
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('GamePadStudio.ControllerManager')
     app=QApplication(sys.argv[:1]); app.setApplicationName('GamePad Studio'); app.setStyle('Fusion'); app.setStyleSheet(STYLE)
     lock=QLockFile(str(root/'studio.lock'))
-    lock.setStaleLockTime(2000)
+    lock.setStaleLockTime(1500)
     if not lock.tryLock(100):
-        if request(root,'show',role='ui',page=args.page) is not None:
+        # 尝试唤起已存在的前台界面
+        if request(root,'show',role='ui',page=args.page,timeout=400) is not None:
             return
+        # 若旧界面无响应或卡死，主动清理残留并接管
+        cleanup_stale_ui(root)
         try:
             lock.removeStaleLockFile()
             (root/'studio.lock').unlink(missing_ok=True)
         except Exception:
             pass
-        if not lock.tryLock(100):
-            return
-    window=Studio(root,standalone=args.smoke_test)
+        if not lock.tryLock(200):
+            try:
+                (root/'studio.lock').unlink(missing_ok=True)
+            except Exception:
+                pass
+            lock.tryLock(300)
+    window=Studio(root,standalone=args.smoke_test,lang=args.lang)
     def handle_ui(message):
         if message.get('command')=='exit':QTimer.singleShot(50,window.quit_app)
         elif message.get('command')=='show':window.navigate(pages.get(message.get('page'),0));window.show_home()
@@ -1671,4 +1825,5 @@ def run():
             window.quit_app()
         QTimer.singleShot(1200,smoke_finish)
     window.show(); code=app.exec(); ui_server.close(); lock.unlock(); return code
+
 

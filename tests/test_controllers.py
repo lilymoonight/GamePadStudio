@@ -2,13 +2,30 @@ import ctypes as C
 import pytest
 from gamepadstudio.controller_catalog import family_for,button_labels,controller_defaults,desktop_defaults,axis_labels
 from gamepadstudio.studio_core import ConfigStore
-from gamepadstudio.kbm_mapper import NIKKI_PROFILE_NAME
 from gamepadstudio.device import Device
 
 
 @pytest.mark.parametrize('kind,family',[(1,'xbox'),(2,'xbox'),(4,'dualshock4'),(5,'switch'),(7,'dualsense'),(0,'generic')])
 def test_family_uses_sdl_type(kind,family):
     assert family_for(kind)==family
+
+
+def test_xbox_backend_upgrade_retains_current_profile(tmp_path):
+    store = ConfigStore(tmp_path)
+    old = 'xbox:045e:0b13:0300fa675e040000130b000020057801'
+    new = 'xbox:045e:0b13:0300509d5e040000130b000020057200'
+    store.data['profiles']['My Xbox'] = {'0':{'short':{'action':'hold','value':'Enter'}}}
+    store.data['active_profile'] = 'My Xbox'
+    store.data['controller_profiles'][old] = 'My Xbox'
+    store.data['controller_profiles'][new] = '主机体验'
+    state = dict(family='xbox', profile_key=new, available_buttons=list(range(16)))
+    store.activate_controller(state)
+    assert store.data['active_profile'] == 'My Xbox'
+    assert store.mappings['0']['short']['value'] == 'Enter'
+    # Once migrated, a later deliberate profile selection stays in effect.
+    store.remember_profile(state, '主机体验')
+    store.activate_controller(state)
+    assert store.data['active_profile'] == '主机体验'
 
 
 def test_face_positions_and_capture_fallback():
@@ -58,7 +75,7 @@ def test_xbox_legacy_default_migration_and_profile_isolation(tmp_path):
     state=dict(family='xbox',profile_key='xbox:driver',available_buttons=list(range(15)))
     store.activate_controller(state)
     assert store.mappings=={} and store.data['profiles']['主机体验']==original_ps
-    assert set(store.profiles_for(state)) == {NIKKI_PROFILE_NAME, 'Xbox · 默认', 'Xbox · 桌面'}
+    assert set(store.profiles_for(state)) == {'无限暖暖 · 键鼠全盘接管', 'Xbox · 默认', 'Xbox · 桌面', '3D 动作通用预设', '全能桌面与游戏通用'}
     desktop=store.data['profiles']['Xbox · 桌面']
     assert desktop['0']['short']['value']=='Enter' and '4' not in desktop and '15' not in desktop
     store.mappings['4']={'short':{'action':'shortcut','value':'F12'}};store.save()
