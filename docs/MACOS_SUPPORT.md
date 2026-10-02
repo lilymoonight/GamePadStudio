@@ -80,9 +80,9 @@ Mac 的设备隐身和系统手柄弹窗屏蔽使用所选 SDL 手柄已有的�
 
 Antigravity 官方 2.0 文档提供 `Cmd+L` 聚焦及 `Ctrl+M` 语音启停，并说明转录到输入框。本机真实窗口已确认 `Message input` 标签及 `Cmd+L` 的聚焦结果，但麦克风的可访问性标签仍为 `Record voice memo`；没有真实录音结果或明确停止控件证据时，诊断为 `native_voice_memo`，不把它直接当成已验证的文字听写。Codex 的真实 UI 由本应用的用户测试入口验收；自动 Computer Use 工具禁止控制自身应用，本轮没有绕过该限制。[Antigravity 功能文档](https://antigravity.google/docs/features)、[2.0 语音转写说明](https://antigravity.google/blog/introducing-google-antigravity-2?hl=en)。
 
-DS5 蓝牙不会在本机直接列出标准音频输入。Sony 的标准兼容说明不承诺 Mac 的手柄内置麦克风；开源固件已实现蓝牙 HID 内的 Opus 音频，但原始 HID 路径在本机尚未完成收音验收，不能等同于 macOS 原生支持。[Sony 兼容说明](https://www.playstation.com/en-us/support/hardware/pair-dualsense-controller-bluetooth/)、[DS5Dongle 音频协议](https://github.com/awalol/DS5Dongle/blob/c67c7f685fe8d8cc44f519d27710c5a639a1be7d/src/audio.cpp)。
+DS5 蓝牙不会在本机直接列出标准音频输入。Sony 的标准兼容说明不承诺 Mac 的手柄内置麦克风；蓝牙 HID 中的 Opus 音频可由独立诊断解码，但当前链路无法提供完整的连续语音，不能当成 macOS 原生麦克风。[Sony 兼容说明](https://www.playstation.com/en-us/support/hardware/pair-dualsense-controller-bluetooth/)、[DS5Dongle 音频协议](https://github.com/awalol/DS5Dongle/blob/c67c7f685fe8d8cc44f519d27710c5a639a1be7d/src/audio.cpp)。
 
-已准备独立诊断脚本，默认只读取报告；与映射后台分开运行，不安装虚拟音频设备，不修改系统音频源。实际收音需要明确的 `--enable-mic`，最长 30 秒，结束和异常时尝试关闭麦克风；只有合法 CRC 的音频帧完成 Opus 解码后才保存本地 WAV。关闭失败或通信异常需要报告，不能宣称收音成功。
+已准备独立诊断脚本，默认只读取报告；与映射后台分开运行，不安装虚拟音频设备，不修改系统音频源。实际收音需要明确的 `--enable-mic`，最长 30 秒，结束和异常时尝试关闭麦克风；只有合法 CRC 的音频帧完成 Opus 解码后才保存本地 WAV。WAV 按真实捕获时间保留缺帧区间为静音，JSON 报告音频覆盖率；低于 90% 标为 `INCOMPLETE_AUDIO` 并返回非零状态。录音和报告以仅当前用户可读写的权限保存。关闭失败或通信异常同样报告错误。
 
 ```sh
 # 先关闭 GamePadStudio，连接一只蓝牙 DS5。默认不会启用麦克风。
@@ -91,7 +91,7 @@ DS5 蓝牙不会在本机直接列出标准音频输入。Sony 的标准兼容�
 .venv/bin/python scripts/probe_dualsense_mic.py --enable-mic --seconds 10 --output /tmp/ds5-mic-capture.json
 ```
 
-2026-10-02 本轮只读探测时设备已掉线；用户选择暂不测试麦克风，继续 Mac 适配。没有启用麦克风，没有录音，也没有向 Codex／Antigravity 输入文字。诊断离线验证不代表真实 DS5 收音已通过。
+2026-10-03 实机测试：USB 连接时，macOS 将 DS5 列为音频输入；静音样本 RMS 约 23，说话样本 RMS 约 1,096。切换为蓝牙后，只读探测收到合法的 78 字节报告；开启麦克风 12 秒获得 518 个 CRC 合法、Opus 解码成功的音频包，关闭后复查没有音频标志。但 518 包只代表 5.18 秒声音，原先直接拼接导致播放语速明显加快。修正时间轴后，4 秒复测生成 4.00 秒 WAV，其中仅 168 个 10 毫秒音频包，覆盖率 42%；其余保留静音并明确判为 `INCOMPLETE_AUDIO`。蓝牙总报告率约 64–65 包/秒、音频包约 42 包/秒，而连续 10 毫秒音频需要约 100 包/秒；缺失内容无法靠修正 WAV 采样率恢复。此结果只证明蓝牙 HID 音频可解码，不证明蓝牙语音可用于识别或向 Codex／Antigravity 输入。后续须找到能提供完整音频流的采集路径；需要可靠收音时先用 USB 或 Mac 自身麦克风。
 
 ## 本地验证与打包
 

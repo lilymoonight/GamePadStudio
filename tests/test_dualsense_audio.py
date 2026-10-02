@@ -4,6 +4,7 @@ import ctypes as C
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import sys
 import threading
@@ -117,6 +118,27 @@ def test_real_opus_rejects_wrong_duration_and_corrupt_packet(opus_packets):
         for size in (0, 70, 72):
             with pytest.raises(ValueError, match='71'):
                 decoder.decode(bytes(size))
+
+
+def test_timed_pcm_preserves_missing_capture_intervals():
+    pcm = bytearray()
+    frame = bytes([7]) * 960
+    assert probe.append_at_capture_time(pcm, frame, started=0, arrived=.01) == 0
+    assert probe.append_at_capture_time(pcm, frame, started=0, arrived=.02) == 0
+    assert probe.append_at_capture_time(pcm, frame, started=0, arrived=.05) == 2
+    assert pcm == frame * 2 + bytes(960 * 2) + frame
+    with pytest.raises(ValueError, match='长度'):
+        probe.append_at_capture_time(pcm, b'bad', started=0, arrived=.06)
+
+
+def test_voice_diagnostics_restrict_existing_output_permissions(tmp_path):
+    path = tmp_path / 'voice.wav'
+    path.write_bytes(b'old')
+    path.chmod(0o644)
+    with probe.private_output(path) as output:
+        output.write(b'new')
+    assert path.read_bytes() == b'new'
+    assert os.stat(path).st_mode & 0o777 == 0o600
 
 
 class Function:
@@ -275,8 +297,9 @@ def test_enabled_probe_times_out_and_decodes_only_valid_packets(opus_packets, mo
     transport = TimedTransport([report(), report(), bytes(corrupted), report(packet, flags=2)], clock=clock)
     with audio.OpusDecoder(opus_packets.library) as decoder:
         result, pcm = probe.probe(transport, 1, True, threading.Event(), decoder)
-    assert result['verdict'] == 'DECODED_AUDIO' and result['valid_audio_packets'] == 1
-    assert result['decoded_frames'] == 1 and len(pcm) == 960
+    assert result['verdict'] == 'INCOMPLETE_AUDIO' and result['valid_audio_packets'] == 1
+    assert result['decoded_frames'] == 1 and len(pcm) == 100 * 960
+    assert result['missing_audio_frames'] == 99 and result['audio_coverage'] == .01
     assert result['capture_timed_out'] and result['writer_stopped'] and result['mic_disable_written']
     assert result['mic_enable_written'] and result['speech_verified'] is False
     assert transport.writes[0][4] == 3 and transport.writes[-1][4] == 2
