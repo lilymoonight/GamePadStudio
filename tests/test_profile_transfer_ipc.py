@@ -42,13 +42,22 @@ def pump_until(app, predicate, timeout=5.):
     app.processEvents(QEventLoop.AllEvents, 5)
 
 
-def request_over_socket(app, root, command, **values):
+def request_over_socket(app, root, command, *, process_timeout=10., **values):
     with ThreadPoolExecutor(max_workers=1) as worker:
         process, future = start_request_process(worker, root, command, values)
-        pump_until(app, future.done, timeout=10.)
-        stdout, stderr = future.result()
-        assert process.returncode == 0, stderr
-        return json.loads(stdout)
+        try:
+            pump_until(app, future.done, timeout=process_timeout)
+            stdout, stderr = future.result()
+            assert process.returncode == 0, stderr
+            return json.loads(stdout)
+        finally:
+            # A failed assertion must not strand the executor waiting for a
+            # client process whose socket peer is no longer being pumped.
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
 
 
 def start_request_process(worker, root, command, values):
@@ -316,7 +325,9 @@ def malicious_reply_peer(root):
 def test_request_receiver_rejects_an_oversized_frame_from_a_native_peer(app, tmp_path):
     native, peers, sent = malicious_reply_peer(tmp_path)
     try:
-        result = request_over_socket(app, tmp_path, 'status')
+        # CI can deliver this deliberate 16 MiB frame in many small reads
+        # while other test modules are active on the same runner.
+        result = request_over_socket(app, tmp_path, 'status', process_timeout=30.)
         assert sent and result['ok'] is False and '16 MiB' in result['error']
     finally:
         for peer in peers: peer.abort()

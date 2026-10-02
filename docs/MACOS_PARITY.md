@@ -24,9 +24,10 @@ Windows 与 Mac 共用映射引擎、设备配置和界面；系统输入、进�
 | 游戏／前台应用关联 | 完整 `.exe` 路径选择当前设备预设 | **已实现**：NSWorkspace 完整执行路径；`.app` 解析实际主程序 | 不按猜测名字匹配；手动覆盖、编辑保护、暂停、设备归属和释放语义共用 |
 | 游戏／前台窗口与源进程识别 | 前台窗口、进程路径与大型可见窗口回退 | **已实现**：NSWorkspace 前台身份、CoreGraphics 窗口列表、进程启动时间与路径 | 排除本程序 GUI／后台 PID 和系统窗口；保留第三方 Python 应用。前后身份复验，拒绝 PID／窗口 ID 复用；实际用户窗口未由 CLI 读取 |
 | 截图 `game` / `window` / `all` / `monitor_N` | 游戏所在屏幕、窗口、所有屏幕、指定屏幕 | **已实现**：ScreenCaptureKit 与 SCScreenshotManager | `window` 精确过滤已验证窗口；`game` 跟随最大重叠显示器；指定屏断开失败。Retina 逻辑点／物理像素分离，负坐标和混合缩放拼接；通过模拟及合成图片，真实游戏待验收 |
+| 物理键盘快速截图 | 后台监听 PrintScreen，保存到项目图库 | **已实现 Mac 替代入口**：默认 `Ctrl+Alt+Shift+S`，可在设置中修改或关闭 | Carbon 全局热键按当前截图范围保存；与紧急暂停热键冲突时拒绝，系统截图组合键不会被占用。原生注册／分发／注销由模拟验证，实际按键及屏幕权限待验收；不改变旧映射中 `PrintScreen` 的含义 |
 | 截图／录像历史、元数据、收藏、删除、快门反馈 | 共同本地捕获列表与设备反馈 | **共用实现**；快门声音使用 `afplay` | PNG 与 MP4 取实际像素尺寸；整段录像生成 JPEG 封面、实际时长与音轨元数据，未完成 MP4 不进入图库；真实设备反馈待验收 |
-| 内存回放、时间轴、HEVC／H.264／AV1 选择 | 带逐帧 PTS 的 Matroska 输入，内存 MPEG-TS 缓冲及 MP4 保存；GPU 候选实际探测 | **已实现**：SCK 帧时间戳，实际探测 VideoToolbox 后软件回退 | Mac HEVC／H.264 合成编码解码验证通过；AV1 无当前 VideoToolbox 候选，使用既有软件路径。FPS 是目标，不能保证 4K 达到设置帧率 |
-| 开始／结束整段录像 | 委托 Windows Game Bar 录屏开关 | **已通过离线集成，待实机**：项目内 ManualRecording 服务，独立开始／结束、MP4 完成后反馈 | 不靠模拟 Windows 快捷键；窗口目标锁定、暂停／退出／后台通信与生成成片已用合成源测试；真实游戏与长时间录像待验收 |
+| 内存回放、时间轴、HEVC／H.264／AV1 选择 | 带逐帧 PTS 的 Matroska 输入，内存 MPEG-TS 缓冲及 MP4 保存；GPU 候选实际探测 | **已实现**：SCK 帧时间戳，实际探测 VideoToolbox 后软件回退 | Mac 需提前启用回放缓存并等待画面积累，不能补录启用前的画面；HEVC／H.264 合成编码解码验证通过，AV1 使用软件编码且界面明确标示。FPS 是目标，不能保证 4K 达到设置帧率 |
+| 开始／结束整段录像 | 委托 Windows Game Bar 录屏开关 | **已通过离线集成，待实机**：项目内 ManualRecording 服务，独立开始／结束、MP4 完成后反馈 | `game` 与回放缓存一致，录游戏所在显示器；显式 `window` 锁定原窗口身份。暂停／退出／后台通信与生成成片已用合成源测试；真实游戏与长时间录像待验收 |
 | 系统声音随录像保存 | Game Bar 的系统录音范围与设置由系统决定；项目内回放此前纯视频 | **已通过离线集成，待实机**：SCK 系统 PCM，Matroska 第二轨，同源音画 PTS，再编码 MP4 音轨 | AVWriter 已通过纯合成 FFmpeg 编码／解码、音轨／时长／同步验证；SCK 合成 CMSampleBuffer 转换验证通过。尚未真实采集系统声音；不是手柄麦克风或语音转写 |
 | 多屏／Retina／刷新率 | Windows 物理像素及真实刷新率匹配；异刷新或未知多屏禁止合并录像 | **已实现**：CG points、CGDisplayMode 物理像素／刷新率与每屏 scale，按最大 scale 合成 | 单屏和同刷新率多屏支持；异刷新或未知多屏明确拒绝录制。混合 scale 不按全局固定 Retina 倍率推测 |
 | HDR 内容转换与 SDR 导出 | DXGI FP16 scRGB，实际白点，浮点色调映射后 SDR BT.709；跨 HDR 屏限制 | **已实现受条件约束路径**：macOS 15+ Apple Silicon、SCK RGBA half、线性颜色附件确认、浮点色调映射 | EDR 当前 headroom 与潜在能力分开读取，不编造 Windows 式 SDR nits。合成 Float16 色块转换已验证；实际 HDR 游戏、外接 HDR 屏及跨屏同步待验收；两边都不是原始 HDR 视频导出 |
@@ -54,4 +55,4 @@ HDR 可用性分成屏幕潜在 EDR 能力、当前 EDR headroom、OS／架构�
 
 剩余关键检查是已授权情况下的真实 DS5 操作与键鼠释放、蓝牙／USB 独占及恢复、PS／Home 系统弹窗、目标游戏接受合成输入、真实窗口与多屏截图、包含系统声音的长时录像、HDR 游戏颜色与性能。用户已连接手柄但暂不在场，本轮未为了文档结论开启设备独占、发送桌面按键、录制屏幕／声音、安装登录项或修改系统权限。
 
-验收使用 `.venv/bin/python scripts/test_macos.py --jobs 4`，104 个模块全部通过，唯一跳过项是 Windows 专属 FFmpeg 进程启动标志。合成 RGB／PCM 的 FFmpeg 封装与解码、原生 Swift 捕获组件的合成帧／音频、模拟窗口与设备以及离线界面均已验证；没有把它们当作真实桌面录制或 DS5 操作。`dist/GamePadStudio.app` 为本机 arm64 构建，内含 FFmpeg 与原生捕获组件，`codesign --verify --deep --strict` 通过，模拟设备的打包界面冒烟测试通过；签名为 ad hoc，公开分发仍需 Developer ID 签名与公证。Mac 测试中的 Windows API mock 只支持逻辑回归，Windows 原生输出、驱动与系统录屏仍需 Windows 机器复验。
+验收使用 `.venv/bin/python scripts/test_macos.py --jobs 4`，105 个模块、2,427 项通过，唯一跳过项是 Windows 专属 FFmpeg 进程启动标志。合成 RGB／PCM 的 FFmpeg 封装与解码、原生 Swift 捕获组件的合成帧／音频、模拟窗口与设备以及离线界面均已验证；没有把它们当作真实桌面录制或 DS5 操作。`dist/GamePadStudio.app` 为本机 arm64 构建，内含 FFmpeg 与原生捕获组件，`codesign --verify --deep --strict` 通过，模拟设备的打包界面冒烟测试通过；签名为 ad hoc，公开分发仍需 Developer ID 签名与公证。Mac 测试中的 Windows API mock 只支持逻辑回归，Windows 原生输出、驱动与系统录屏仍需 Windows 机器复验。

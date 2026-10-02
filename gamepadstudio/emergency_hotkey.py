@@ -38,13 +38,13 @@ def emergency_hotkey_supported():
     return sys.platform in ('win32', 'darwin')
 
 
-def parse_shortcut(shortcut):
+def parse_shortcut(shortcut, platform=None):
     """Return a canonical shortcut, logical modifier bits and profile keycode.
 
     Existing Windows modifier/key values are retained. On macOS Ctrl means
     the physical Control key, and Cmd/Command/Meta/Win mean Command.
     """
-    mac = sys.platform == 'darwin'
+    mac = (sys.platform if platform is None else platform) == 'darwin'
     format_error = ('请使用至少两个 Ctrl、Alt、Shift、Cmd 修饰键加一个普通按键'
                     if mac else _FORMAT_ERROR)
     if not isinstance(shortcut, str) or not shortcut or len(shortcut) > 64:

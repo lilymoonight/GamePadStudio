@@ -172,6 +172,7 @@ def mac_environment(tmp_path, monkeypatch):
     monkeypatch.setattr(virtual_kbm_ui, 'WINDOWS_FEATURES', False)
     monkeypatch.setattr(agent_module, 'LocalServer', FakeServer)
     monkeypatch.setattr(agent_module, 'EmergencyHotkey', FakeHotkey)
+    monkeypatch.setattr(agent_module, 'ScreenshotHotkey', FakeHotkey)
     monkeypatch.setattr(agent_module, 'ReplayBufferEngine', FakeReplay)
     monkeypatch.setattr(agent_module, 'HapticEngine', FakeHaptics)
     monkeypatch.setattr(agent_module, 'MappingRuntime',
@@ -237,6 +238,7 @@ def owner_for(root, *, physical=None, remote=False):
         setattr(owner, name, SimpleNamespace(stop=lambda: None))
     owner.events = SimpleNamespace(close=lambda: None)
     owner.emergency_hotkey = None
+    owner.screenshot_hotkey = None
     owner.tray = SimpleNamespace(hide=lambda: order.append('tray-hide'))
     owner.worker = None
     return owner
@@ -262,6 +264,7 @@ def prepare_studio_poll(owner):
     owner.update_application_profile = lambda: None
     owner.refresh_battery_status = lambda: None
     owner.refresh_emergency_hotkey_status = lambda: None
+    owner.refresh_screenshot_hotkey_status = lambda: None
     owner.refresh_input_permission_status = lambda: None
     owner.refresh_application_profile_status = lambda: None
     owner.controllers = SimpleNamespace(set_devices=lambda *args: None)

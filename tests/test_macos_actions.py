@@ -391,6 +391,56 @@ def test_cursor_guard_only_recenters_recognized_game_at_display_edge():
     assert native.warps == [(960, 540)]
 
 
+@pytest.mark.parametrize('name,window_name,width,height,excluded,warps', [
+    ('SomeGame', 'SomeGame', 1280, 800, False, 1),
+    ('somegame', 'OtherGame', 1280, 800, False, 0),
+    ('somegame', 'somegame', 500, 400, False, 0),
+    ('somegame', 'somegame', 1280, 800, True, 0),
+    ('somegame launcher', 'somegame launcher', 1280, 800, False, 0),
+    ('gamepadstudio', 'gamepadstudio', 1280, 800, False, 0),
+    ('finder', 'finder', 1280, 800, False, 0),
+])
+def test_cursor_guard_generic_game_requires_matching_foreground_window(
+        name, window_name, width, height, excluded, warps):
+    class Workspace:
+        def foreground_process_name(self):
+            return name
+
+    class Window:
+        process_name = window_name
+        bounds_points = {'width': width, 'height': height}
+
+    class Backend:
+        def foreground_window(self):
+            return Window()
+
+        def excluded(self, window):
+            assert isinstance(window, Window)
+            return excluded
+
+    native = FakeQuartz()
+    native.position = CGPoint(1915, 100)
+    value = MacActions(native=native, workspace=Workspace(), window_backend=Backend())
+    value.guard_cursor_edge()
+    assert native.warps == ([(960, 540)] if warps else [])
+
+
+def test_cursor_guard_generic_game_fails_closed_when_window_metadata_is_unavailable():
+    class Workspace:
+        def foreground_process_name(self):
+            return 'ExampleGame'
+
+    class Backend:
+        def foreground_window(self):
+            raise RuntimeError('graphical session unavailable')
+
+    native = FakeQuartz()
+    native.position = CGPoint(1915, 100)
+    value = MacActions(native=native, workspace=Workspace(), window_backend=Backend())
+    value.guard_cursor_edge()
+    assert native.warps == []
+
+
 def test_foreground_name_has_half_second_cache(monkeypatch):
     class Workspace:
         calls = 0

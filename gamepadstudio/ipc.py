@@ -133,9 +133,16 @@ def request(root, command, role='agent', timeout=1200, **values):
             socket.flush()
             data=bytearray()
             while socket.waitForReadyRead(timeout):
+                previous_length = len(data)
                 data.extend(bytes(socket.readAll()))
-                while b'\n' in data:
-                    line,_,rest=data.partition(b'\n');data=bytearray(rest)
+                # The existing buffer contains no newline. Search only the
+                # newly received bytes, otherwise a large frame arriving in
+                # small socket reads takes quadratic time to scan.
+                newline = data.find(b'\n', previous_length)
+                while newline >= 0:
+                    line = bytes(data[:newline])
+                    del data[:newline + 1]
+                    newline = data.find(b'\n')
                     if len(line) + 1 > MAX_REPLY_BYTES:
                         socket.abort()
                         return {'type': 'reply', 'ok': False, 'error': '后台回复超过 16 MiB，无法完整传送'}
@@ -423,16 +430,20 @@ class AgentClient(QObject):
         self.socket.flush();return True
 
     def receive(self):
+        previous_length = len(self.buffer)
         self.buffer.extend(bytes(self.socket.readAll()))
-        while b'\n' in self.buffer:
-            line,_,rest=self.buffer.partition(b'\n');self.buffer[:]=rest
+        newline = self.buffer.find(b'\n', previous_length)
+        while newline >= 0:
+            line = bytes(self.buffer[:newline])
+            del self.buffer[:newline + 1]
             if len(line) + 1 > MAX_REPLY_BYTES:self.socket.abort();self.buffer.clear();return
             try:message=json.loads(line)
-            except ValueError:continue
-            if not isinstance(message, dict):continue
-            if message.get('type')=='state' or 'device' in message:
-                self.state=message.get('device');self.status=message
-            self.event.emit(message)
+            except ValueError:message=None
+            if isinstance(message, dict):
+                if message.get('type')=='state' or 'device' in message:
+                    self.state=message.get('device');self.status=message
+                self.event.emit(message)
+            newline = self.buffer.find(b'\n')
         if len(self.buffer) >= MAX_REPLY_BYTES:self.socket.abort();self.buffer.clear()
 
     def close(self):

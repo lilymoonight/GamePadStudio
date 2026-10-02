@@ -27,6 +27,7 @@ from .mapping_engine import MappingRuntime, effective_mappings, binding_label
 from .mapping_ui import BindingDialog
 from .battery_monitor import BatteryMonitor, battery_reported, normalize_power
 from .emergency_hotkey import EmergencyHotkey, emergency_hotkey_supported, normalize_hotkey_settings
+from .screenshot_hotkey import ScreenshotHotkey, normalize_screenshot_hotkey_settings
 from .application_profiles import application_profiles_supported
 from .mapping_deck import MappingDeck
 from .virtual_kbm_ui import VirtualKbmPage
@@ -150,6 +151,10 @@ class Studio(GlassWindow):
         self.emergency_hotkey = None if self.remote or not emergency_hotkey_supported() else EmergencyHotkey(self.emergency_pause)
         if self.emergency_hotkey:
             self.emergency_hotkey.configure(self.config.get('emergency_hotkey'))
+        self.screenshot_hotkey = (ScreenshotHotkey(self.capture)
+                                  if sys.platform == 'darwin' and not WINDOWS_FEATURES and not self.remote else None)
+        if self.screenshot_hotkey:
+            self.screenshot_hotkey.configure(self.config.get('screenshot_hotkey'))
         self.last_touch=None; self.last_buttons=set(); self.quitting=False; self.learn=False
         self.log_rows=[]; self.nav={}; self.mapping_labels={}; self.recent_labels=[]
         main = GlassCanvas()
@@ -814,6 +819,14 @@ class Studio(GlassWindow):
         self.mode_combo.setMinimumContentsLength(14)
         cap.add_row(AppleRow('camera', (TOKENS['accent'], TOKENS['accent_lo']), tr('捕获目标屏幕与范围'), tr('选择截图范围；录制屏幕在精彩回放中单独设置。'), self.mode_combo))
 
+        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
+            self.screenshot_hotkey_button = button(tr('设置快捷键'), self.open_screenshot_hotkey_editor, pill=True)
+            self.screenshot_hotkey_row = AppleRow(
+                'camera', (TOKENS['purple'], TOKENS['accent_lo']), tr('物理键盘截图'),
+                tr('在任何窗口按下快捷键，按上方范围保存截图。'), self.screenshot_hotkey_button)
+            cap.add_row(self.screenshot_hotkey_row)
+            self.refresh_screenshot_hotkey_status()
+
         folder_row = QWidget()
         f_layout = QHBoxLayout(folder_row)
         f_layout.setContentsMargins(14, 8, 14, 8)
@@ -1169,7 +1182,8 @@ class Studio(GlassWindow):
             self.setting('replay_buffer_enabled', enabled)
             self._update_replay_hud()
         self.replay_toggle.toggled.connect(on_replay_toggle)
-        replay_group.add_row(AppleRow('wave', (TOKENS['purple'], TOKENS['accent_lo']), tr('4K 极清回放缓存'), tr('使用当前手柄映射或“立即保存当前回放”保存本地视频。'), self.replay_toggle))
+        replay_group.add_row(AppleRow('wave', (TOKENS['purple'], TOKENS['accent_lo']), tr('4K 极清回放缓存'),
+                                      tr('先启用并等待画面积累，再用手柄映射或下方按钮保存过去的片段。'), self.replay_toggle))
 
         self.replay_mode_combo = QComboBox()
         self.replay_mode_combo.setMinimumWidth(180)
@@ -1226,7 +1240,8 @@ class Studio(GlassWindow):
         cd_tv.setSpacing(2)
         cd_title = label(tr('硬件编码器与画质方案'), 'section')
         cd_tv.addWidget(cd_title)
-        self.replay_codec_desc = label(tr('选择显卡硬件加速格式与码率'), 'muted')
+        self.replay_codec_desc = label(tr('macOS 自动选择硬件或软件编码器与码率') if sys.platform == 'darwin' and not WINDOWS_FEATURES
+                                       else tr('选择显卡硬件加速格式与码率'), 'muted')
         self.replay_codec_desc.setObjectName('caption')
         cd_tv.addWidget(self.replay_codec_desc)
         cd_layout.addLayout(cd_tv, 1)
@@ -1237,7 +1252,8 @@ class Studio(GlassWindow):
         self.replay_codec_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.replay_codec_combo.setMinimumContentsLength(18)
         self.replay_codec_combo.addItem(tr('HEVC 标杆极清 (推荐 · 50Mbps)'), 'hevc')
-        self.replay_codec_combo.addItem(tr('AV1 次世代极清 (AMF/NVENC · 45Mbps)'), 'av1')
+        self.replay_codec_combo.addItem(tr('AV1 软件编码 (45Mbps)') if sys.platform == 'darwin' and not WINDOWS_FEATURES
+                                        else tr('AV1 次世代极清 (AMF/NVENC · 45Mbps)'), 'av1')
         self.replay_codec_combo.addItem(tr('H.264 兼容模式 (60Mbps)'), 'h264')
         cur_codec = self.config.get('replay_codec', 'hevc')
         self.replay_codec_combo.setCurrentIndex(max(0, self.replay_codec_combo.findData(cur_codec)))
@@ -1305,7 +1321,8 @@ class Studio(GlassWindow):
             else:
                 status_text = '等待录制启动' if get_language() == 'zh' else 'Waiting for recording'
             overhead_txt = f"{minutes} " + tr('分钟') + ("纯内存预估" if get_language() == 'zh' else " est. RAM")
-            hw_core = "硬件核心" if get_language() == 'zh' else "GPU Engine"
+            hw_core = ("编码器" if get_language() == 'zh' else "Encoder") if sys.platform == 'darwin' and not WINDOWS_FEATURES else (
+                "硬件核心" if get_language() == 'zh' else "GPU Engine")
             self.replay_hud_label.setText(
                 f"{status_text}  |  {codec.upper()} {bitrate}Mbps  |  {overhead_txt}: ~{ram_gb:.2f} GB (0 磁盘损耗)  |  {hw_core}: {enc}"
             )
@@ -1357,14 +1374,25 @@ class Studio(GlassWindow):
         self.recording_display_hint.setVisible(bool(reason))
 
     def trigger_manual_replay(self):
+        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
+            if not self.config.get('replay_buffer_enabled', False):
+                self.notify(tr('请先启用回放缓存，等待画面积累后保存'))
+                return
+            status = self.client.status.get('replay', {}) if self.remote and self.client.connected else {}
+            if self.remote and not status.get('running'):
+                self.notify(tr('回放录制尚未就绪，请检查状态并等待画面积累'))
+                return
+            if not self.remote and (not hasattr(self, 'replay_engine') or not self.replay_engine.is_running()):
+                self.notify(tr('回放录制尚未就绪，请检查状态并等待画面积累'))
+                return
         if self.remote:
             self.client.send('save_replay')
             self.notify(tr("正在生成 4K 极清精彩回放录像..."))
         else:
             if hasattr(self, 'replay_engine'):
-                if not self.replay_engine.is_running():
+                if sys.platform != 'darwin' and not self.replay_engine.is_running():
                     self.replay_engine.start()
-                path = self.replay_engine.save_replay()
+                path = self.replay_engine.save_replay() if self.replay_engine.is_running() else None
                 if path:
                     self.notify(f"🎬 {tr('精彩回放已保存')}: {Path(path).name}")
                     return
@@ -1898,13 +1926,13 @@ class Studio(GlassWindow):
             self.refresh_device_settings_ui(state)
 
     def setting(self,key,value):
-        previous_hotkey = copy.deepcopy(self.config.get('emergency_hotkey')) if key == 'emergency_hotkey' else None
+        previous_hotkey = copy.deepcopy(self.config.get(key)) if key in ('emergency_hotkey', 'screenshot_hotkey') else None
         self.store.set_setting(key, value, self.snapshot)
         try:
             self.store.save()
         except Exception:
-            if key == 'emergency_hotkey':
-                self.config['emergency_hotkey'] = previous_hotkey
+            if key in ('emergency_hotkey', 'screenshot_hotkey'):
+                self.config[key] = previous_hotkey
             raise
         if self.remote:self.client.send('reload')
         if key == 'emergency_hotkey':
@@ -1912,6 +1940,10 @@ class Studio(GlassWindow):
                 self.emergency_hotkey.configure(self.config.get('emergency_hotkey'))
             self.refresh_emergency_hotkey_status()
             self.refresh_input_permission_status()
+        elif key == 'screenshot_hotkey':
+            if self.screenshot_hotkey:
+                self.screenshot_hotkey.configure(self.config.get('screenshot_hotkey'))
+            self.refresh_screenshot_hotkey_status()
         if key=='long_press': self.engine.threshold=value
         if key=='touch_mouse': self.last_touch=None
         if not self.remote and (key in DEVICE_SETTING_KEYS or key == 'capture_sound_enabled'):
@@ -2049,6 +2081,7 @@ class Studio(GlassWindow):
                     if now-getattr(self,'last_suspend',0)>.5:
                         self.client.send('suspend',seconds=2);self.last_suspend=now
             self.refresh_emergency_hotkey_status()
+            self.refresh_screenshot_hotkey_status()
             self.refresh_controller_isolation()
             self.refresh_input_permission_status()
             if connected != self.previous_connected:
@@ -2248,6 +2281,43 @@ class Studio(GlassWindow):
             if self.remote:
                 self.client.send('suspend', seconds=0)
                 self.last_suspend = 0
+
+    def open_screenshot_hotkey_editor(self):
+        if not hasattr(self, 'screenshot_hotkey_row'):
+            return
+        from .screenshot_hotkey_ui import ScreenshotHotkeyDialog
+        self.engine.reset()
+        self.actions.release_all()
+        if self.remote:
+            self.client.send('suspend', seconds=2)
+        try:
+            ScreenshotHotkeyDialog(self).exec()
+        finally:
+            if self.remote:
+                self.client.send('suspend', seconds=0)
+                self.last_suspend = 0
+
+    def refresh_screenshot_hotkey_status(self):
+        if not hasattr(self, 'screenshot_hotkey_row'):
+            return
+        settings = normalize_screenshot_hotkey_settings(self.config.get('screenshot_hotkey'))
+        if self.remote:
+            online = self.client.connected
+            status = self.client.status.get('screenshot_hotkey', {}) if online else {}
+        else:
+            online = True
+            status = self.screenshot_hotkey.status() if self.screenshot_hotkey else {}
+        registered = bool(online and settings['enabled'] and status.get('registered')
+                          and status.get('shortcut') == settings['shortcut'])
+        if not settings['enabled']:
+            text = tr('已关闭 · 可用手柄映射或窗口按钮截图')
+        elif not online:
+            text = tr('后台离线，截图快捷键未生效')
+        elif registered:
+            text = settings['shortcut'] + ' · ' + tr('已生效')
+        else:
+            text = tr(status.get('error') or '截图快捷键未生效，请检查后台状态')
+        self.screenshot_hotkey_row.subtitle_label.setText(text)
 
     def refresh_emergency_hotkey_status(self):
         if not emergency_hotkey_supported():
@@ -3044,6 +3114,8 @@ class Studio(GlassWindow):
             finish(tr('停止界面计时器'), timer.stop)
         if self.emergency_hotkey:
             finish(tr('注销紧急暂停'), self.emergency_hotkey.close)
+        if getattr(self, 'screenshot_hotkey', None):
+            finish(tr('注销截图快捷键'), self.screenshot_hotkey.close)
         if self.remote:
             if self.client and self.client.connected:
                 try: self.client.send('preview', seconds=0)
