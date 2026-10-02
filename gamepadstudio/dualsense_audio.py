@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import ctypes as C
 import ctypes.util
+from dataclasses import dataclass
 from pathlib import Path
 import zlib
 
+# PCM decoder output rate, not a measurement of the controller's ADC rate.
 RATE = 48000
 FRAME_SAMPLES = 480
 OPUS_BYTES = 71
@@ -54,6 +56,64 @@ def opus_library_path() -> str:
         if candidate.is_file():
             return str(candidate)
     raise RuntimeError('找不到 libopus；收音诊断需要 Opus 解码库。')
+
+
+@dataclass(frozen=True)
+class OpusPacketInfo:
+    """Encoded packet properties, independent of the PCM output format.
+
+    The bandwidth is Opus's coded frequency limit, not the microphone's
+    hardware sample rate or a measurement of this packet's spectral energy.
+    Encoded stereo may still be decoded to mono by :class:`OpusDecoder`.
+    """
+
+    encoded_channels: int
+    encoded_bandwidth: str
+    encoded_bandwidth_hz: int
+    duration_ms: float
+    frame_count: int
+
+
+class OpusPacketInspector:
+    """Parse packet headers without decoding, playing or capturing audio.
+
+    A successful inspection does not prove that the compressed audio payload
+    can be decoded. The decoder remains responsible for validating that data.
+    """
+
+    _BANDWIDTHS = {
+        1101: ('narrowband', 4000),
+        1102: ('mediumband', 6000),
+        1103: ('wideband', 8000),
+        1104: ('superwideband', 12000),
+        1105: ('fullband', 20000),
+    }
+
+    def __init__(self, library=None):
+        self.lib = library if library is not None else C.CDLL(opus_library_path())
+        signatures = {
+            'opus_packet_get_bandwidth': [C.c_void_p],
+            'opus_packet_get_nb_channels': [C.c_void_p],
+            'opus_packet_get_nb_frames': [C.c_void_p, C.c_int32],
+            'opus_packet_get_nb_samples': [C.c_void_p, C.c_int32, C.c_int32],
+        }
+        for name, arguments in signatures.items():
+            function = getattr(self.lib, name)
+            function.argtypes, function.restype = arguments, C.c_int
+
+    def inspect(self, packet: bytes) -> OpusPacketInfo:
+        if not isinstance(packet, (bytes, bytearray)) or len(packet) != OPUS_BYTES:
+            raise ValueError('DualSense 音频帧必须为 71 字节。')
+        data = C.create_string_buffer(bytes(packet))
+        bandwidth = self.lib.opus_packet_get_bandwidth(data)
+        channels = self.lib.opus_packet_get_nb_channels(data)
+        frames = self.lib.opus_packet_get_nb_frames(data, len(packet))
+        samples = self.lib.opus_packet_get_nb_samples(data, len(packet), RATE)
+        if bandwidth not in self._BANDWIDTHS or channels not in (1, 2) or frames <= 0 or samples <= 0:
+            raise ValueError('不是有效的 Opus 音频包头。')
+        label, bandwidth_hz = self._BANDWIDTHS[bandwidth]
+        return OpusPacketInfo(channels, label, bandwidth_hz,
+                              samples * 1000 / RATE, frames)
 
 
 class OpusDecoder:

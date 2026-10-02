@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.gamepadstudio.bluetooth-diagnostics</string>
+    <key>CFBundleName</key>
+    <string>GamePadStudio Bluetooth Diagnostics</string>
+    <key>CFBundleDisplayName</key>
+    <string>GamePadStudio Bluetooth Diagnostics</string>
+    <key>CFBundleExecutable</key>
+    <string>gps-bluetooth-diagnostics</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>读取 PS5 手柄的蓝牙连接状态和传输间隔，诊断手柄麦克风的蓝牙收音问题。</string>
+</dict>
+</plist>

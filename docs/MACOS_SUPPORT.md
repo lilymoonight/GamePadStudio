@@ -89,9 +89,29 @@ DS5 蓝牙不会在本机直接列出标准音频输入。Sony 的标准兼容�
 .venv/bin/python scripts/probe_dualsense_mic.py --seconds 5 --output /tmp/ds5-mic-read-only.json
 # 准备好说话后，单独执行限时收音，结果和可能的 WAV 均留在本地。
 .venv/bin/python scripts/probe_dualsense_mic.py --enable-mic --seconds 10 --output /tmp/ds5-mic-capture.json
+# 只检查包速率、编码格式和解码情况；声音仅在内存中处理，不保存 WAV。
+.venv/bin/python scripts/probe_dualsense_mic.py --enable-mic --no-save-audio --seconds 5 --output /tmp/ds5-mic-format.json
 ```
 
 2026-10-03 实机测试：USB 连接时，macOS 将 DS5 列为音频输入；静音样本 RMS 约 23，说话样本 RMS 约 1,096。切换为蓝牙后，只读探测收到合法的 78 字节报告；开启麦克风 12 秒获得 518 个 CRC 合法、Opus 解码成功的音频包，关闭后复查没有音频标志。但 518 包只代表 5.18 秒声音，原先直接拼接导致播放语速明显加快。修正时间轴后，4 秒复测生成 4.00 秒 WAV，其中仅 168 个 10 毫秒音频包，覆盖率 42%；其余保留静音并明确判为 `INCOMPLETE_AUDIO`。蓝牙总报告率约 64–65 包/秒、音频包约 42 包/秒，而连续 10 毫秒音频需要约 100 包/秒；缺失内容无法靠修正 WAV 采样率恢复。此结果只证明蓝牙 HID 音频可解码，不证明蓝牙语音可用于识别或向 Codex／Antigravity 输入。后续须找到能提供完整音频流的采集路径；需要可靠收音时先用 USB 或 Mac 自身麦克风。
+
+### 蓝牙包格式和传输排查
+
+48,000 Hz 是当前 **PCM 解码输出** 的设置，不能据此认定手柄的硬件 ADC 采样率。2026-10-03 实测所有有效音频包为 71 字节、Opus TOC `0xd4`、编码双声道、`superwideband`（编码频率上限 12 kHz），每包仅一个 10 毫秒帧；单声道解码输出是下混结果。相同包按 16,000 Hz 输出为 160 点，按 48,000 Hz 输出为 480 点，两者都是 10 毫秒。编码频率上限也不是包中真实声音频谱的测量结果。诊断 JSON 使用 `encoded_packet_formats` 与 `pcm_output_sample_rate_hz` 分开报告这些信息。[Opus 包信息与解码 API](https://opus-codec.org/docs/opus_api-1.5/group__opus__decoder.html)、[Opus 带宽定义](https://github.com/xiph/opus/blob/main/include/opus_defines.h)
+
+在 macOS 26.5.2 的这只 DS5 上，独立原生 IOHID 回调及其内核时间戳均约每 15 毫秒一次，与 SDL/Python 读取结果一致。增加 IOHID 队列至 512 项仍无改善；报告高四位序号逐包连续，而音频头的第二个字节频繁跳变。`extended_sequence_deltas` 与 `audio_header_counter_deltas` 只报告实际观察的模计数变化，不擅自将未知字段认定为确定的丢包位置。把麦克风控制间隔从 500 毫秒缩短到 10 毫秒、切换 ASR/聊天输入路由、以及对比公开项目的完整控制块（含全零触觉段），仍只获得约 42–43 个音频包/秒。另一次先发送带标签的音频路由初始化（仅选择内置 processed 输入，不改音量及静音状态），6 秒收到 253 个音频包，覆盖率 42.2%，结束关闭麦克风并恢复输入路由，仍无改善。此时没有证据把瓶颈归因于解码输出采样率或 Python 读取速度。[SDL macOS HID 实现](https://github.com/libsdl-org/SDL/blob/release-2.28.4/src/hidapi/mac/hid.c)、[ControlDeck 控制协议](https://github.com/ihansel/control-deck/blob/main/Sources/ControlDeck/DualSenseBluetoothAudioProtocol.swift)
+
+15 毫秒间隔与 Bluetooth Sniff 省电模式相符，但还未读取真实连接模式来确认。本机宿主进程的蓝牙授权为 `denied`，旧 IOBluetooth 接口因而报告手柄未连接及控制器关闭，这些结果不能用于调整链路。项目提供独立的只读诊断 `.app`，在自己的应用身份下申请一次标准系统权限；默认不申请权限，也不调用 HCI 写命令。授权不可用时跳过全部 IOBluetooth 查询；授权可用后只匹配已连接 DS5，报告模式及间隔，文件权限为 `0600`，不输出地址。原生 helper 的编译、签名与静态分析已通过。首次系统权限请求也返回 `denied`，因此没有执行真实连接模式查询；需要用户在「系统设置 → 隐私与安全性 → 蓝牙」允许 `GamePadStudio Bluetooth Diagnostics` 后继续验证。[Apple 蓝牙授权状态](https://developer.apple.com/documentation/corebluetooth/cbmanager/authorization)、[Apple 蓝牙设备框架](https://developer.apple.com/documentation/iobluetooth)
+
+```sh
+.venv/bin/python scripts/macos/build_bluetooth_diagnostics.py
+# 通过 LaunchServices 启动，读取独立应用的权限状态。
+open -n 'build/macos/GamePadStudio Bluetooth Diagnostics.app' --args --output /tmp/ds5-bt-link.jsonl
+# 需要用户在 macOS 系统对话框选择允许，之后只读取连接状态。
+open -n 'build/macos/GamePadStudio Bluetooth Diagnostics.app' --args --request-permission --output /tmp/ds5-bt-link-authorized.jsonl --observe-seconds 2
+```
+
+不能把其他项目可列出虚拟麦克风、插入静音或 PLC 当成丢失语音已恢复的证明。当前诊断代码全量离线回归为 110 个模块、2,508 项通过、1 项 Windows 专属测试跳过；真实蓝牙连续语音仍未通过验收。
 
 ## 本地验证与打包
 

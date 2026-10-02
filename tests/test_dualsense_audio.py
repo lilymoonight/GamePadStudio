@@ -120,6 +120,57 @@ def test_real_opus_rejects_wrong_duration_and_corrupt_packet(opus_packets):
                 decoder.decode(bytes(size))
 
 
+@pytest.mark.parametrize(('samples', 'duration_ms'), [(240, 5), (480, 10), (960, 20)])
+def test_packet_inspection_reads_duration_without_assuming_ten_ms(opus_packets, samples, duration_ms):
+    info = audio.OpusPacketInspector(opus_packets.library).inspect(opus_packets.encode(samples))
+    assert info.duration_ms == duration_ms
+    assert info.frame_count == 1 and info.encoded_channels == 1
+    assert info.encoded_bandwidth_hz in (4000, 6000, 8000, 12000, 20000)
+
+
+def test_real_stereo_swb_packet_metadata_is_independent_of_mono_pcm_output(opus_packets):
+    library = opus_packets.library
+    error = C.c_int()
+    encoder = library.opus_encoder_create(audio.RATE, 2, 2049, C.byref(error))
+    assert encoder and error.value == 0
+    # The ctl function is variadic: keep its fixed ABI and type each ctl value.
+    library.opus_encoder_ctl.argtypes = [C.c_void_p, C.c_int]
+    library.opus_encoder_ctl.restype = C.c_int
+    try:
+        assert library.opus_encoder_ctl(encoder, 4008, C.c_int(1104)) == 0  # SET_BANDWIDTH
+        assert library.opus_encoder_ctl(encoder, 4022, C.c_int(2)) == 0  # SET_FORCE_CHANNELS
+        pcm = (C.c_int16 * (audio.FRAME_SAMPLES * 2))(
+            *[int(5000 * math.sin(2 * math.pi * 440 * (i // 2) / audio.RATE))
+              for i in range(audio.FRAME_SAMPLES * 2)])
+        encoded = (C.c_ubyte * audio.OPUS_BYTES)()
+        size = library.opus_encode(encoder, pcm, audio.FRAME_SAMPLES, encoded, audio.OPUS_BYTES)
+        assert 0 < size <= audio.OPUS_BYTES
+        assert library.opus_packet_pad(encoded, size, audio.OPUS_BYTES) == 0
+        packet = bytes(encoded)
+    finally:
+        library.opus_encoder_destroy(encoder)
+    inspector = audio.OpusPacketInspector(library)
+    assert inspector.inspect(packet) == audio.OpusPacketInfo(2, 'superwideband', 12000, 10, 1)
+    assert library.opus_packet_get_nb_samples(packet, len(packet), 16000) == 160
+    assert library.opus_packet_get_nb_samples(packet, len(packet), 48000) == 480
+    with audio.OpusDecoder(library) as decoder:
+        assert len(decoder.decode(packet)) == audio.FRAME_SAMPLES * 2
+
+
+def test_packet_inspection_counts_multiple_coded_frames(opus_packets):
+    # CELT superwideband, stereo, two equal-sized 10 ms frames. Header parsing
+    # does not claim that this synthetic compressed payload can be decoded.
+    packet = b'\xd5' + bytes(70)
+    assert audio.OpusPacketInspector(opus_packets.library).inspect(packet) == (
+        audio.OpusPacketInfo(2, 'superwideband', 12000, 20, 2))
+
+
+@pytest.mark.parametrize('packet', [None, [], 'x' * 71, b'', bytes(70), bytes(72), b'\xff' * 71])
+def test_packet_inspection_rejects_bad_length_type_and_invalid_header(opus_packets, packet):
+    with pytest.raises(ValueError):
+        audio.OpusPacketInspector(opus_packets.library).inspect(packet)
+
+
 def test_timed_pcm_preserves_missing_capture_intervals():
     pcm = bytearray()
     frame = bytes([7]) * 960
@@ -362,7 +413,7 @@ def test_writer_join_failure_keeps_native_handle_owned(monkeypatch):
 def test_main_wav_failure_keeps_live_writer_ownership_and_never_closes_hid(monkeypatch, tmp_path, capsys):
     transport = FakeTransport()
     closed = []
-    decoder = SimpleNamespace(close=lambda: closed.append('decoder'))
+    decoder = SimpleNamespace(lib=object(), close=lambda: closed.append('decoder'))
     result = probe.initial_result(True)
     result.update(verdict='DECODED_AUDIO', writer_started=True, writer_stopped=False,
                   mic_enable_written=True)
@@ -371,6 +422,7 @@ def test_main_wav_failure_keeps_live_writer_ownership_and_never_closes_hid(monke
         'probe', '--enable-mic', '--seconds', '1', '--output', str(tmp_path / 'result.json')])
     monkeypatch.setattr(probe, 'Transport', lambda: transport)
     monkeypatch.setattr(probe, 'OpusDecoder', lambda: decoder)
+    monkeypatch.setattr(probe, 'OpusPacketInspector', lambda _: object())
     monkeypatch.setattr(probe, 'probe', lambda *_: (result, bytes(960)))
     monkeypatch.setattr(probe.signal, 'signal', lambda *_: None)
     def refused(*_):
