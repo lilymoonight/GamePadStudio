@@ -7,7 +7,7 @@ import pytest
 from gamepadstudio import actions
 from gamepadstudio.actions import parse_keys
 from gamepadstudio.macos_actions import (CAPS_LOCK_FLAG, MEDIA_KEYS, CGPoint, CGRect,
-                                         CGSize, MacActions, MODIFIER_FLAGS)
+                                         CGSize, MacActions, MODIFIER_FLAGS, _QuartzNative)
 
 
 class FakeQuartz:
@@ -21,6 +21,7 @@ class FakeQuartz:
         self.physical_flags = 0
         self.position = CGPoint(300, 200)
         self.bounds = CGRect(CGPoint(0, 0), CGSize(1920, 1080))
+        self.desktop_bounds = None
         self.warps = []
         self.caps_changes = []
         self.caps_failure = False
@@ -81,6 +82,9 @@ class FakeQuartz:
 
     def display_bounds_at(self, point):
         return self.bounds
+
+    def virtual_display_bounds(self):
+        return self.desktop_bounds or self.bounds
 
     def CGWarpMouseCursorPosition(self, point):
         self.warps.append((point.x, point.y))
@@ -438,6 +442,50 @@ def test_cursor_guard_generic_game_fails_closed_when_window_metadata_is_unavaila
     native.position = CGPoint(1915, 100)
     value = MacActions(native=native, workspace=Workspace(), window_backend=Backend())
     value.guard_cursor_edge()
+    assert native.warps == []
+
+
+def test_virtual_display_bounds_uses_cg_points_and_negative_screen_origin():
+    native = object.__new__(_QuartzNative)
+    rectangles = {
+        11: CGRect(CGPoint(-1280, -100), CGSize(1280, 900)),
+        22: CGRect(CGPoint(0, 0), CGSize(1920, 1080)),
+    }
+
+    def active_displays(max_count, displays, count):
+        count._obj.value = len(rectangles)
+        if displays is not None:
+            displays[:] = list(rectangles)
+        return 0
+
+    native.CGGetActiveDisplayList = active_displays
+    native.CGDisplayBounds = lambda display: rectangles[display]
+    result = native.virtual_display_bounds()
+    assert (result.origin.x, result.origin.y, result.size.width, result.size.height) == (
+        -1280, -100, 3200, 1180)
+
+
+def test_cursor_guard_ignores_inner_display_seam_and_warps_at_desktop_edge():
+    value, native = output()
+    native.desktop_bounds = CGRect(CGPoint(0, 0), CGSize(3840, 1080))
+    native.position = CGPoint(1915, 300)
+    value.guard_cursor_edge(only_if_game=False)
+    assert native.warps == []
+
+    # Crossing the internal seam remains free, while the true outer edge
+    # recentres within the display containing the pointer.
+    value._last_guard_check = -1
+    native.bounds = CGRect(CGPoint(1920, 0), CGSize(1920, 1080))
+    native.position = CGPoint(3830, 300)
+    value.guard_cursor_edge(only_if_game=False)
+    assert native.warps == [(2880, 540)]
+
+
+def test_cursor_guard_ignores_negative_coordinate_inner_seam():
+    value, native = output()
+    native.desktop_bounds = CGRect(CGPoint(-1280, 0), CGSize(3200, 1080))
+    native.position = CGPoint(5, 300)
+    value.guard_cursor_edge(only_if_game=False)
     assert native.warps == []
 
 

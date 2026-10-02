@@ -5,6 +5,7 @@ them to macOS hardware keycodes. These are physical ANSI keyboard positions,
 so characters follow the user's current keyboard layout, as on Windows.
 """
 import ctypes as C
+import math
 import sys
 import time
 
@@ -88,6 +89,8 @@ class _QuartzNative:
             'CGEventPost': ([C.c_uint32, C.c_void_p], None),
             'CGGetDisplaysWithPoint': (
                 [CGPoint, C.c_uint32, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32)], C.c_int32),
+            'CGGetActiveDisplayList': (
+                [C.c_uint32, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32)], C.c_int32),
             'CGDisplayBounds': ([C.c_uint32], CGRect),
             'CGWarpMouseCursorPosition': ([CGPoint], C.c_int32),
         }
@@ -126,6 +129,25 @@ class _QuartzNative:
         count = C.c_uint32()
         error = self.CGGetDisplaysWithPoint(point, 1, C.byref(display), C.byref(count))
         return self.CGDisplayBounds(display.value) if not error and count.value else None
+
+    def virtual_display_bounds(self):
+        """Return the active desktop's union in Core Graphics global points."""
+        count = C.c_uint32()
+        if self.CGGetActiveDisplayList(0, None, C.byref(count)) or not 0 < count.value <= 128:
+            return None
+        displays = (C.c_uint32 * count.value)()
+        if self.CGGetActiveDisplayList(count.value, displays, C.byref(count)) or not 0 < count.value <= len(displays):
+            return None
+        rectangles = [self.CGDisplayBounds(display) for display in displays[:count.value]]
+        if any(not all(math.isfinite(value) for value in (
+                rect.origin.x, rect.origin.y, rect.size.width, rect.size.height))
+                or rect.size.width <= 0 or rect.size.height <= 0 for rect in rectangles):
+            return None
+        left = min(rect.origin.x for rect in rectangles)
+        top = min(rect.origin.y for rect in rectangles)
+        right = max(rect.origin.x + rect.size.width for rect in rectangles)
+        bottom = max(rect.origin.y + rect.size.height for rect in rectangles)
+        return CGRect(CGPoint(left, top), CGSize(right - left, bottom - top))
 
 
 class _MacWorkspace:
@@ -385,11 +407,18 @@ class MacActions(WindowsActions):
             return
         self._require_permission()
         point = self.native.cursor_position()
-        bounds = self.native.display_bounds_at(point)
-        if bounds is None or bounds.size.width <= 2 * margin or bounds.size.height <= 2 * margin:
+        desktop = self.native.virtual_display_bounds()
+        if desktop is None or desktop.size.width <= 2 * margin or desktop.size.height <= 2 * margin:
             return
-        x, y, width, height = bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height
+        x, y, width, height = desktop.origin.x, desktop.origin.y, desktop.size.width, desktop.size.height
         if (point.x <= x + margin or point.x >= x + width - margin
                 or point.y <= y + margin or point.y >= y + height - margin):
-            if self.native.CGWarpMouseCursorPosition(CGPoint(x + width / 2, y + height / 2)):
+            # The decision uses the whole desktop, but a display-local centre
+            # avoids warping into an empty gap in a staggered screen layout.
+            bounds = self.native.display_bounds_at(point)
+            if bounds is None:
+                return
+            centre = CGPoint(bounds.origin.x + bounds.size.width / 2,
+                             bounds.origin.y + bounds.size.height / 2)
+            if self.native.CGWarpMouseCursorPosition(centre):
                 raise OSError('macOS 拒绝了鼠标回中')

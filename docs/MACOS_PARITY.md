@@ -1,6 +1,6 @@
 # Windows / macOS 用户功能对齐
 
-日期：2026-10-02。比较依据是当前源码中的实际行为，平台可以使用不同 API，但不能只保留同名按钮就算完成。下表的“已实现”表示代码路径存在；“待实机”表示还缺真实设备、目标游戏或系统交互结果。本轮 Mac 离线全量回归为 2,405 项：2,404 通过、1 项 Windows 专属进程标志测试跳过。
+日期：2026-10-02。比较依据是当前源码中的实际行为，平台可以使用不同 API，但不能只保留同名按钮就算完成。下表的“已实现”表示代码路径存在；“待实机”表示还缺真实设备、目标游戏或系统交互结果。本轮 Mac 离线全量回归为 2,431 项：2,430 通过、1 项 Windows 专属进程标志测试跳过。
 
 Windows 与 Mac 共用映射引擎、设备配置和界面；系统输入、进程、窗口、捕获和登录启动在边界选择平台后端。开发分支用于集中适配，后续合入共同主线，避免长期分裂两套配置和业务逻辑。[启动与权限步骤](MACOS_SUPPORT.md)
 
@@ -16,7 +16,7 @@ Windows 与 Mac 共用映射引擎、设备配置和界面；系统输入、进�
 | Menu、音量增减、静音、播放／暂停 | VK_APPS 与 Windows 媒体键 | **已实现**：Menu 硬件码、AppKit systemDefined 媒体事件 | 实际菜单及媒体应用响应待实机；只声称代码中列出的媒体动作 |
 | Insert、Pause、ScrollLock、NumLock、PrintScreen、F21–F24 | 按对应 Windows VK 发送 | **缺口明确**：当前没有保持原作用的通用 Mac 合成输出；界面与保存校验给原因 | Help 不等于 Insert，Clear 不等于 NumLock；AppKit F21–F24 逻辑字符不能证明游戏接收通用硬件事件。用户明确改绑应用快捷键或项目截图动作属于替代方案 |
 | Calc／Calculator | **既有缺陷**：`actions.KEYS` 把 Calc 与 F24 都编码为 `0x87`，实际不是计算器启动 | **同一缺陷明确拒绝**：不能从旧值推断用户要启动计算器 | 需独立动作及配置迁移，不能把 Windows 当前按钮当作已完成基线。[Microsoft VK 表](https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes) |
-| 鼠标左／右／中键、拖拽、滚轮、指针与镜头 | `SendInput`；共用镜头物理模型 | **已实现**：CoreGraphics，拖拽带正确鼠标事件类型和相对位移字段 | 需要辅助功能权限；取消路径和分配失败通过模拟；镜头手感、游戏 Raw Input 接受情况与延迟待实机 |
+| 鼠标左／右／中键、拖拽、滚轮、指针与镜头 | `SendInput`；共用镜头物理模型 | **已实现**：CoreGraphics，拖拽带正确鼠标事件类型和相对位移字段 | 需要辅助功能权限；取消路径和分配失败通过模拟；双屏内接缝不回中且外缘回中已用负坐标布局模拟；镜头手感、游戏 Raw Input 接受情况与延迟待实机 |
 | 触摸板手势、双指滚动、指针 | SDL 触摸读取与共用手势状态机 | **共用实现** | 仅在 SDL 报告能力时显示；不能据双指能力报告声称已完成实际滑动验收 |
 | 普通震动、扳机震动、灯光、低电量提醒 | SDL 能力检测及共用设备／曲线逻辑 | **共用实现** | 能力依设备、连接与 SDL；普通震动不是完整音频触觉波形，扳机震动不是 DualSense 自适应扳机。当前没有真实输出验收 |
 | 设备隐身，避免物理手柄和映射双重输入 | 所选设备 HidHide 驱动隐藏和应用白名单 | **已实现替代路径，待实机**：所选原生 HID 的 IOKit 独占访问 | 不安装 HidHide；仅 SDL 2.28.4 已知 HIDAPI 路径，身份、实例、CF 类型和 usage 核对，拒绝键鼠复合／GCSyntheticDevice。其他版本／后端明确不可用 |
@@ -55,4 +55,4 @@ HDR 可用性分成屏幕潜在 EDR 能力、当前 EDR headroom、OS／架构�
 
 剩余关键检查是已授权情况下的真实 DS5 操作与键鼠释放、蓝牙／USB 独占及恢复、PS／Home 系统弹窗、目标游戏接受合成输入、真实窗口与多屏截图、包含系统声音的长时录像、HDR 游戏颜色与性能。用户已连接手柄但暂不在场，本轮未为了文档结论开启设备独占、发送桌面按键、录制屏幕／声音、安装登录项或修改系统权限。
 
-验收使用 `.venv/bin/python scripts/test_macos.py --jobs 4`，105 个模块、2,427 项通过，唯一跳过项是 Windows 专属 FFmpeg 进程启动标志。合成 RGB／PCM 的 FFmpeg 封装与解码、原生 Swift 捕获组件的合成帧／音频、模拟窗口与设备以及离线界面均已验证；没有把它们当作真实桌面录制或 DS5 操作。`dist/GamePadStudio.app` 为本机 arm64 构建，内含 FFmpeg 与原生捕获组件，`codesign --verify --deep --strict` 通过，模拟设备的打包界面冒烟测试通过；签名为 ad hoc，公开分发仍需 Developer ID 签名与公证。Mac 测试中的 Windows API mock 只支持逻辑回归，Windows 原生输出、驱动与系统录屏仍需 Windows 机器复验。
+验收使用 `.venv/bin/python scripts/test_modules.py --jobs 4`，105 个模块、2,430 项通过，唯一跳过项是 Windows 专属 FFmpeg 进程启动标志。合成 RGB／PCM 的 FFmpeg 封装与解码、原生 Swift 捕获组件的合成帧／音频、模拟窗口与设备以及离线界面均已验证；没有把它们当作真实桌面录制或 DS5 操作。`dist/GamePadStudio.app` 为本机 arm64 构建，内含 FFmpeg 与原生捕获组件，`codesign --verify --deep --strict` 通过，模拟设备的打包界面冒烟测试通过；签名为 ad hoc，公开分发仍需 Developer ID 签名与公证。Mac 测试中的 Windows API mock 只支持逻辑回归，Windows 原生输出、驱动与系统录屏仍需 Windows 机器复验。
