@@ -16,6 +16,10 @@ import xml.etree.ElementTree as ET
 
 
 def main():
+    # Windows CI redirects stdout through a legacy code page even when child
+    # pytest processes emit UTF-8 diagnostics containing Chinese test data.
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--jobs', type=int, default=2)
     args = parser.parse_args()

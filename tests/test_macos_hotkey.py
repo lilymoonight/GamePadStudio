@@ -2,6 +2,7 @@
 import ctypes as C
 from types import SimpleNamespace
 import threading
+import sys
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QObject, QTimer
@@ -226,6 +227,7 @@ def test_unrelated_or_malformed_native_event_cannot_pause(native, alteration):
     assert calls == []
 
 
+@pytest.mark.skipif(sys.platform != 'darwin', reason='macOS Carbon and Qt event integration')
 def test_qcore_loop_pumps_registered_events_and_releases_them(native):
     calls = []
     owner = native.create(lambda: calls.append('pause'))

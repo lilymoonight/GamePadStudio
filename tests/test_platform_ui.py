@@ -1,5 +1,6 @@
 """macOS capabilities stay honest without input injection or permission prompts."""
 import copy
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -264,6 +265,7 @@ def test_mac_isolation_panel_applies_real_backend_result_without_installing_driv
     page.cloaking_dialog.close()
 
 
+@pytest.mark.skipif(sys.platform != 'darwin', reason='macOS recording dispatch')
 def test_mac_record_toggle_uses_local_recording_instead_of_windows_hotkey(mac_workspace):
     w = mac_workspace.window
     w.dispatch({'action':'record_toggle'},False)
@@ -364,6 +366,7 @@ def test_mac_hotkey_editor_offers_command_without_enabling_until_saved(mac_works
         dialog.close()
 
 
+@pytest.mark.skipif(sys.platform != 'darwin', reason='macOS application bundle picker')
 def test_mac_application_picker_resolves_bundle_and_deduplicates_executable(mac_workspace, tmp_path, monkeypatch):
     import plistlib
     from PySide6.QtWidgets import QFileDialog

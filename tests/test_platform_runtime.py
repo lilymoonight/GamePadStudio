@@ -79,6 +79,7 @@ def test_posix_endpoint_uses_uid_instead_of_environment_user(monkeypatch, tmp_pa
     assert ipc.endpoint(tmp_path) != original
 
 
+@pytest.mark.skipif(sys.platform != 'darwin', reason='macOS UID and symlink semantics')
 def test_darwin_endpoint_ignores_process_session_and_resolves_root_alias(monkeypatch, tmp_path):
     monkeypatch.setattr(ipc, 'sys', SimpleNamespace(platform='darwin'))
     original = ipc.endpoint(tmp_path)
