@@ -91,6 +91,7 @@ class InputTester(QWidget):
         # ── Top Toolbar ───────────────────────────────────────────────────
         toolbar = QHBoxLayout()
         toolbar.setSpacing(12)
+        self._toolbar_layout = toolbar
 
         self.device_name = label(tr('未连接手柄'), 19, True)
         self.device_name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -410,6 +411,8 @@ class InputTester(QWidget):
             return
         self._compact_layout = compact
         self.layout().setSpacing(10 if compact else 14)
+        self._toolbar_layout.setSpacing(4 if compact else 12)
+        self.diagnostic_note.setVisible(not compact)
         self._dashboard_layout.setSpacing(10 if compact else 14)
         margins = (14, 12, 14, 12) if compact else (18, 16, 18, 16)
         for card_layout in self._card_layouts:

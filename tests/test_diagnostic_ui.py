@@ -43,6 +43,11 @@ def test_offline_test_page_keeps_activity_and_diagnostic_actions_available():
         assert tester.export_diagnostic_button.isEnabled()
         assert '脱敏' in tester.diagnostic_note.text()
         assert '不包含原始日志或配置' in tester.export_diagnostic_button.toolTip()
+        tester.resize(700, 640)
+        app.processEvents()
+        assert not tester.diagnostic_note.isVisible()
+        assert tester.events_button.isVisible()
+        assert tester.export_diagnostic_button.isVisible()
         tester.events_button.click()
         tester.export_diagnostic_button.click()
         assert actions == ['events', 'diagnostic']
