@@ -46,6 +46,8 @@ def test_offline_test_page_keeps_activity_and_diagnostic_actions_available():
         tester.resize(700, 640)
         app.processEvents()
         assert not tester.diagnostic_note.isVisible()
+        assert not tester.drift_spec.isVisible()
+        assert tester.drift_reading.toolTip() == tester.drift_spec.text()
         assert tester.events_button.isVisible()
         assert tester.export_diagnostic_button.isVisible()
         tester.events_button.click()
