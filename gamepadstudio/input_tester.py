@@ -232,10 +232,11 @@ class InputTester(QWidget):
         self.drift_reading.setStyleSheet(f'font: 11px {INSTRUMENT_MONO_STACK}; color: {TOKENS["ink"]}; font-weight: 600;')
         drift_info.addWidget(self.drift_reading)
 
-        drift_spec = label(tr('静止偏移参考；软件容错可在操作手感中调整。'), 10.5)
-        drift_spec.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        drift_spec.setStyleSheet(f'color: {TOKENS["ink_3"]};')
-        drift_info.addWidget(drift_spec)
+        self.drift_spec = label(tr('静止偏移参考；软件容错可在操作手感中调整。'), 10.5)
+        self.drift_spec.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.drift_spec.setStyleSheet(f'color: {TOKENS["ink_3"]};')
+        self.drift_reading.setToolTip(self.drift_spec.text())
+        drift_info.addWidget(self.drift_spec)
         drift_row.addLayout(drift_info, 1)
 
         a_layout.addLayout(drift_row)
@@ -410,14 +411,15 @@ class InputTester(QWidget):
         if compact == self._compact_layout:
             return
         self._compact_layout = compact
-        self.layout().setSpacing(10 if compact else 14)
+        self.layout().setSpacing(6 if compact else 14)
         self._toolbar_layout.setSpacing(4 if compact else 12)
         self.diagnostic_note.setVisible(not compact)
-        self._dashboard_layout.setSpacing(10 if compact else 14)
-        margins = (14, 12, 14, 12) if compact else (18, 16, 18, 16)
+        self.drift_spec.setVisible(not compact)
+        self._dashboard_layout.setSpacing(8 if compact else 14)
+        margins = (14, 8, 14, 8) if compact else (18, 16, 18, 16)
         for card_layout in self._card_layouts:
             card_layout.setContentsMargins(*margins)
-            card_layout.setSpacing(8 if compact else 12)
+            card_layout.setSpacing(6 if compact else 12)
 
     def toggle_trace(self, checked):
         self.diagram.trace = checked
