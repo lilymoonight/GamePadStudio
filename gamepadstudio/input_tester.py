@@ -333,13 +333,15 @@ class InputTester(QWidget):
         trig_col = QVBoxLayout()
         trig_col.setSpacing(8)
         trig_col.addLayout(card_heading(tr('线性扳机'), 'bolt', TOKENS['purple']))
-        trig_desc = label(tr('霍尔 / 压感行程深度'), 11)
-        trig_desc.setStyleSheet(f"color: {TOKENS['ink_3']}; font-weight: 500;")
-        trig_col.addWidget(trig_desc)
+        self.trigger_description = label(tr('霍尔 / 压感行程深度'), 11)
+        self.trigger_description.setStyleSheet(f"color: {TOKENS['ink_3']}; font-weight: 500;")
+        trig_col.addWidget(self.trigger_description)
 
         trig_row = QHBoxLayout()
         trig_row.setSpacing(12)
         self.trigger_gauges = [TriggerGauge('LT'), TriggerGauge('RT')]
+        for gauge in self.trigger_gauges:
+            gauge.setToolTip(self.trigger_description.text())
         self.trigger_names = [label('LT', 11, True), label('RT', 11, True)]
         for gauge, name in zip(self.trigger_gauges, self.trigger_names):
             c = QVBoxLayout()
@@ -358,9 +360,9 @@ class InputTester(QWidget):
         rumble_col = QVBoxLayout()
         rumble_col.setSpacing(8)
         rumble_col.addLayout(card_heading(tr('触觉马达'), 'wave', TOKENS['green']))
-        rumble_desc = label(tr('双声道触觉脉冲发生器'), 11)
-        rumble_desc.setStyleSheet(f"color: {TOKENS['ink_3']}; font-weight: 500;")
-        rumble_col.addWidget(rumble_desc)
+        self.rumble_description = label(tr('双声道触觉脉冲发生器'), 11)
+        self.rumble_description.setStyleSheet(f"color: {TOKENS['ink_3']}; font-weight: 500;")
+        rumble_col.addWidget(self.rumble_description)
 
         rumble_grid = QGridLayout()
         rumble_grid.setSpacing(8)
@@ -386,6 +388,7 @@ class InputTester(QWidget):
         self.motor_status = label(tr('未连接马达'), 11)
         self.motor_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.motor_status.setStyleSheet(f"color: {TOKENS['ink_3']}; font-size: 11px;")
+        self.motor_status.setToolTip(self.rumble_description.text())
         rumble_col.addWidget(self.motor_status)
         rumble_col.addStretch(1)
         actuators.addLayout(rumble_col, 1)
@@ -415,6 +418,8 @@ class InputTester(QWidget):
         self._toolbar_layout.setSpacing(4 if compact else 12)
         self.diagnostic_note.setVisible(not compact)
         self.drift_spec.setVisible(not compact)
+        self.trigger_description.setVisible(not compact)
+        self.rumble_description.setVisible(not compact)
         self._dashboard_layout.setSpacing(8 if compact else 14)
         margins = (14, 8, 14, 8) if compact else (18, 16, 18, 16)
         for card_layout in self._card_layouts:
