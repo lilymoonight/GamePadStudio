@@ -93,10 +93,11 @@ def measurement_owner(tmp_path, monkeypatch, hotkey_app, request):
     yield owner, hotkey_app, clock, open_dialog
     for dialog in dialogs:
         dialog.close()
-        dialog.deleteLater()
     owner.close()
     owner.deleteLater()
-    hotkey_app.sendPostedEvents(None, QEvent.DeferredDelete)
+    # Flush only this fixture's owner. A process-wide DeferredDelete flush can
+    # tear down unrelated Qt test objects still owned by other fixtures.
+    hotkey_app.sendPostedEvents(owner, QEvent.DeferredDelete)
 
 
 def emit_frame(owner, clock, *, step=.033, state=None):

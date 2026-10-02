@@ -1160,9 +1160,11 @@ class Studio(GlassWindow):
         background.add_row(AppleRow('autostart', (TOKENS['green'], TOKENS['green']), tr('系统开机自动启动'), tr('登录后在后台自动启动当前配置的映射服务') if autostart_supported() else tr('当前平台不支持登录启动，请手动启动应用'), self.autostart))
         grid.addWidget(background, 1, 1)
 
-        # 5. 4K 极清硬件加速回放录制 (HEVC / AV1 Replay Buffer)
+        # 5. 4K replay recording, using the encoder selected for this platform.
         replay_group = AppleGroup()
-        hdr_replay = QLabel('  05 // 4K INSTANT REPLAY BUFFER · ' + tr('HEVC / AV1 标杆极清即时回放'))
+        replay_heading = ('HEVC / AV1 即时回放' if sys.platform == 'darwin' and not WINDOWS_FEATURES
+                          else 'HEVC / AV1 标杆极清即时回放')
+        hdr_replay = QLabel('  05 // 4K INSTANT REPLAY BUFFER · ' + tr(replay_heading))
         hdr_replay.setObjectName('eyebrow')
         hdr_replay.setStyleSheet(f"color: {TOKENS['purple']}; font-size: 10.5px; font-weight: 700; padding: 8px 16px 2px 16px;")
         replay_group.vbox.addWidget(hdr_replay)
@@ -1238,7 +1240,8 @@ class Studio(GlassWindow):
         cd_tv = QVBoxLayout()
         cd_tv.setContentsMargins(0, 0, 0, 0)
         cd_tv.setSpacing(2)
-        cd_title = label(tr('硬件编码器与画质方案'), 'section')
+        cd_title = label(tr('编码器与画质方案') if sys.platform == 'darwin' and not WINDOWS_FEATURES
+                         else tr('硬件编码器与画质方案'), 'section')
         cd_tv.addWidget(cd_title)
         self.replay_codec_desc = label(tr('macOS 自动选择硬件或软件编码器与码率') if sys.platform == 'darwin' and not WINDOWS_FEATURES
                                        else tr('选择显卡硬件加速格式与码率'), 'muted')
@@ -1271,7 +1274,8 @@ class Studio(GlassWindow):
         hud_layout.setSpacing(12)
         hud_layout.addWidget(SquircleBadge('controller', (TOKENS['amber'], TOKENS['accent_lo'])))
         
-        self.replay_hud_label = label(tr('正在探测硬件加速状态...'), 'muted')
+        self.replay_hud_label = label(tr('正在检测编码器状态...') if sys.platform == 'darwin' and not WINDOWS_FEATURES
+                                      else tr('正在探测硬件加速状态...'), 'muted')
         self.replay_hud_label.setStyleSheet(f"font: 11.5px 'Cascadia Code', monospace; color: {TOKENS['ink_2']}; font-weight: 600;")
         hud_layout.addWidget(self.replay_hud_label, 1)
 
