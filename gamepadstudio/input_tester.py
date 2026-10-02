@@ -73,7 +73,8 @@ def card_heading(title, symbol, color):
 class InputTester(QWidget):
     """Real-time diagnostic dashboard inspired by GamepadTester.cn."""
 
-    def __init__(self, show_events, send_rumble=None, measure_stick=None):
+    def __init__(self, show_events, send_rumble=None, measure_stick=None,
+                 export_diagnostic=None):
         super().__init__()
         self.send_rumble = send_rumble
         self.identity = None
@@ -104,6 +105,30 @@ class InputTester(QWidget):
         self.raw_tag.setStyleSheet(tag_style(TOKENS['ink_3'], 0.12, 0.25))
         self.raw_tag.setToolTip(tr('SDL 原始标准轴值；不应用软件死区。'))
         toolbar.addWidget(self.raw_tag, 0, Qt.AlignTop)
+
+        self.events_button = QPushButton(tr('活动记录'))
+        self.events_button.setObjectName('testAction')
+        self.events_button.setFixedHeight(24)
+        self.events_button.setStyleSheet('font-size: 11px; min-height: 20px; padding: 0 4px; border: none; background: transparent;')
+        self.events_button.setAccessibleName(tr('活动记录'))
+        self.events_button.clicked.connect(lambda: show_events())
+        toolbar.addWidget(self.events_button, 0, Qt.AlignTop)
+
+        self.export_diagnostic_button = QPushButton(tr('导出诊断'))
+        self.export_diagnostic_button.setObjectName('testAction')
+        self.export_diagnostic_button.setFixedHeight(24)
+        self.export_diagnostic_button.setStyleSheet('font-size: 11px; min-height: 20px; padding: 0 4px; border: none; background: transparent;')
+        self.export_diagnostic_button.setAccessibleName(tr('导出诊断'))
+        self.export_diagnostic_button.setToolTip(tr('只导出脱敏的设备能力与错误摘要；不包含原始日志或配置。'))
+        self.export_diagnostic_button.setEnabled(export_diagnostic is not None)
+        if export_diagnostic is not None:
+            self.export_diagnostic_button.clicked.connect(lambda: export_diagnostic())
+        toolbar.addWidget(self.export_diagnostic_button, 0, Qt.AlignTop)
+
+        self.diagnostic_note = label(tr('仅含脱敏摘要'), 10)
+        self.diagnostic_note.setWordWrap(False)
+        self.diagnostic_note.setToolTip(self.export_diagnostic_button.toolTip())
+        toolbar.addWidget(self.diagnostic_note, 0, Qt.AlignTop)
         layout.addLayout(toolbar)
 
         # Headless tool state controllers (auto-active; hidden from UI to eliminate noise)

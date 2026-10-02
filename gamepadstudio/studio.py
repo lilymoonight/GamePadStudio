@@ -735,8 +735,28 @@ class Studio(GlassWindow):
         self.events.resize(640, 400)
         self.events.setParent(self, Qt.Dialog)
         self.events.hide()
-        self.tester = InputTester(self.events.show, self.test_rumble, self.open_stick_measurement)
+        self.tester = InputTester(self.events.show, self.test_rumble,
+                                  self.open_stick_measurement, self.export_diagnostic)
         self.stack.addWidget(scroll(self.tester))
+
+    def export_diagnostic(self):
+        """Write a sanitized support report only after an explicit save choice."""
+        filename = 'GamePadStudio-diagnostic-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '.json'
+        try:
+            path, _ = QFileDialog.getSaveFileName(
+                self, tr('导出诊断'), filename,
+                tr('GamePad Studio 诊断报告 (*.json)'),
+                options=QFileDialog.DontUseNativeDialog)
+            if not path:
+                return
+            from .diagnostic_report import build_report, save_report
+            status = self.client.status if self.remote and self.client.connected else None
+            report = build_report(self.store.root, device=self.snapshot, status=status)
+            save_report(path, report)
+        except Exception as exc:
+            self.notify(tr('诊断导出失败：') + str(exc))
+            return
+        self.notify(tr('诊断报告已保存：') + Path(path).name)
 
     def open_stick_measurement(self):
         from .stick_calibration import supports_right_stick

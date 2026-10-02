@@ -49,6 +49,10 @@ def validate_binding(binding):
     if not isinstance(binding, dict) or binding.get('action', 'none') not in ACTIONS:
         raise ValueError('未知映射动作')
     action = binding.get('action', 'none')
+    if 'mode' in binding and (action not in ('hold', 'mouse_hold')
+                              or type(binding['mode']) is not str
+                              or binding['mode'] not in ('hold', 'toggle')):
+        raise ValueError('键鼠按住模式应为按住或切换保持')
     if action == 'gamepad_button' and not str(binding.get('value', '')).strip():
         raise ValueError('请选择目标手柄按键')
     if action == 'gamepad_chord' and not str(binding.get('value', '')).strip():
@@ -57,6 +61,11 @@ def validate_binding(binding):
         raise ValueError('请选择手柄连发按键')
     if action in ('hold', 'shortcut') and not parse_keys(binding.get('value', '')):
         raise ValueError('请设置键盘按键或组合键')
+    if action == 'hold' and binding.get('mode') == 'toggle' and any(
+            key in (20, 144, 145) for key in parse_keys(binding['value'])):
+        # Lock keys already toggle OS state on key-down. Merely releasing the
+        # synthetic key on the second press cannot undo that state change.
+        raise ValueError('CapsLock、NumLock 和 ScrollLock 不能使用切换保持')
     if action in ('mouse_hold', 'mouse_click') and binding.get('value') not in ('left', 'right', 'middle'):
         raise ValueError('请选择鼠标按键')
     if action == 'wheel' and binding.get('value') not in ('up', 'down'):
@@ -77,6 +86,8 @@ def validate_mappings(mappings):
         result[key] = {g: validate_binding(entry.get(g, {'action': 'none'})) for g in GESTURES}
         if key.startswith('TP:') and result[key]['long'].get('action') not in ('none', 'suppress'):
             raise ValueError('触摸板手势只设置一次触发动作')
+        if key.startswith('TP:') and any(result[key][g].get('mode') == 'toggle' for g in GESTURES):
+            raise ValueError('触摸板手势不能使用切换保持')
         if 'long_press' in entry:
             threshold = float(entry['long_press'])
             if not .15 <= threshold <= 3:
@@ -218,9 +229,14 @@ def binding_label(binding, family='generic'):
     if action == 'gamepad_macro':
         return '手柄连招 (' + str(len(binding.get('sequence', []))) + ' 步)'
     if action in ('hold', 'shortcut'):
-        return value + (tr('（按住）') if action == 'hold' else '')
+        if action == 'shortcut':
+            return value
+        return value + tr('（切换保持）' if binding.get('mode') == 'toggle' else '（按住）')
     if action in ('mouse_hold', 'mouse_click'):
-        return tr('鼠标' + {'left': '左键', 'right': '右键', 'middle': '中键'}.get(value, value)) + (tr('（按住）') if action == 'mouse_hold' else '')
+        target = tr('鼠标' + {'left': '左键', 'right': '右键', 'middle': '中键'}.get(value, value))
+        if action == 'mouse_click':
+            return target
+        return target + tr('（切换保持）' if binding.get('mode') == 'toggle' else '（按住）')
     if action == 'wheel':
         return tr('滚轮') + ('↑' if value == 'up' else '↓')
     return tr(ACTION_NAMES.get(action, action))
@@ -469,6 +485,7 @@ class MappingRuntime:
         self.normalizer = InputNormalizer()
         self.engine = GestureEngine(self._dispatch)
         self.output_counts = Counter()
+        self.toggle_latches = {}
         self.pulses = []
         self.recent = {}
         self.events = []
@@ -530,7 +547,17 @@ class MappingRuntime:
         # leave this one output inert; native posting failures still propagate.
         if self._unsupported_key_reason(binding):
             return
-        if action in HOLD_ACTIONS:
+        if action in ('hold', 'mouse_hold') and binding.get('mode') == 'toggle':
+            if down:
+                owner = (self.engine.current_trigger, self.engine.current_gesture)
+                held = self.toggle_latches.get(owner)
+                if held is None:
+                    self._hold(binding, True)
+                    self.toggle_latches[owner] = copy.deepcopy(binding)
+                else:
+                    self._hold(held, False)
+                    del self.toggle_latches[owner]
+        elif action in HOLD_ACTIONS:
             self._hold(binding, down)
         elif down and action in ('shortcut', 'mouse_click'):
             held = dict(binding, action='hold' if action == 'shortcut' else 'mouse_hold')
@@ -678,11 +705,27 @@ class MappingRuntime:
             clear_error = getattr(self.mouse_thread, 'clear_output_error', None)
             if callable(clear_error):
                 clear_error()
-        self.engine.reset()
-        for _, binding in self.pulses:
-            self._hold(binding, False)
-        self.pulses.clear()
-        self.output_counts.clear()
+        errors = []
+        try:
+            self.engine.reset()
+        except Exception as exc:
+            errors.append(exc)
+        for owner, binding in list(self.toggle_latches.items()):
+            try:
+                self._hold(binding, False)
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                del self.toggle_latches[owner]
+        for item in list(self.pulses):
+            try:
+                self._hold(item[1], False)
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                self.pulses.remove(item)
+        if not errors:
+            self.output_counts.clear()
         self.recent.clear()
         self.last_touch = None
         self.touch_recognizer.reset(block_until_release=True)
@@ -690,6 +733,8 @@ class MappingRuntime:
         self.blocked.update(self.inputs if blocked is None else blocked)
         if self.mouse_thread:
             self.mouse_thread.update_stick(0., 0.)
+        if errors:
+            raise OSError('部分键鼠按键未能释放；映射保持暂停，可再次尝试释放') from errors[0]
 
     def close(self):
         try:

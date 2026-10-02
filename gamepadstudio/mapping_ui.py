@@ -354,6 +354,8 @@ class BindingDialog(QDialog):
         self.target_selectors = {}
         self.kbm_fields = {}
         self.mouse_combos = {}
+        self.hold_modes = {}
+        self.hold_mode_rows = {}
         self.launch_paths = {}
         self.launch_args = {}
         self.action_boxes = {}
@@ -438,6 +440,20 @@ class BindingDialog(QDialog):
             b_l.addWidget(mouse_combo)
             self.mouse_combos[gesture] = mouse_combo
 
+            hold_mode_row = QWidget()
+            hold_mode_layout = QHBoxLayout(hold_mode_row)
+            hold_mode_layout.setContentsMargins(0, 0, 0, 0)
+            hold_mode_layout.addWidget(QLabel(tr('触发方式')))
+            hold_mode = QComboBox()
+            hold_mode.addItem(tr('按住时生效'), 'hold')
+            hold_mode.addItem(tr('按一次保持，再按一次取消'), 'toggle')
+            hold_mode.setToolTip(tr('切换保持会在暂停、断线、切换预设或退出时自动释放'))
+            hold_mode.setCurrentIndex(max(0, hold_mode.findData(binding.get('mode', 'hold'))))
+            hold_mode_layout.addWidget(hold_mode, 1)
+            b_l.addWidget(hold_mode_row)
+            self.hold_modes[gesture] = hold_mode
+            self.hold_mode_rows[gesture] = hold_mode_row
+
             launch_row = QWidget()
             l_layout = QHBoxLayout(launch_row)
             l_layout.setContentsMargins(0, 0, 0, 0)
@@ -454,11 +470,12 @@ class BindingDialog(QDialog):
             self.launch_paths[gesture] = path_edit
             self.launch_args[gesture] = args_edit
 
-            def make_kbm_updater(a=action, kr=kbm_row, mc=mouse_combo, lr=launch_row):
+            def make_kbm_updater(a=action, kr=kbm_row, mc=mouse_combo, lr=launch_row, mr=hold_mode_row):
                 def update():
                     k = a.currentData()
                     kr.setVisible(k in ('hold', 'shortcut'))
                     mc.setVisible(k in ('mouse_hold', 'mouse_click', 'wheel'))
+                    mr.setVisible(not self.touch_gesture and self.mode == 'kbm' and k in ('hold', 'mouse_hold'))
                     lr.setVisible(k == 'launch')
                 return update
             updater = make_kbm_updater(action, kbm_row, mouse_combo, launch_row)
@@ -724,6 +741,9 @@ class BindingDialog(QDialog):
                     binding['value'] = self.mouse_combos[g].currentData()
                 elif action_code == 'launch':
                     binding.update(executable=self.launch_paths[g].text().strip(), arguments=self.launch_args[g].text().strip())
+                if (not self.touch_gesture and action_code in ('hold', 'mouse_hold')
+                        and self.hold_modes[g].currentData() == 'toggle'):
+                    binding['mode'] = 'toggle'
             mapping[g] = binding
         if self.touch_gesture:
             mapping['long'] = {'action': 'none'}
