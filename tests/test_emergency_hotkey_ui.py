@@ -87,7 +87,7 @@ def draft_owner(tmp_path, hotkey_app, monkeypatch):
     yield owner, hotkey_app
     owner.close()
     owner.deleteLater()
-    hotkey_app.sendPostedEvents(None, QEvent.DeferredDelete)
+    hotkey_app.sendPostedEvents(owner, QEvent.DeferredDelete)
 
 
 @pytest.fixture
@@ -151,7 +151,7 @@ def hotkey_workspace(tmp_path, monkeypatch, hotkey_app, request):
     window.cleanup()
     window.hide()
     window.deleteLater()
-    hotkey_app.sendPostedEvents(None, QEvent.DeferredDelete)
+    hotkey_app.sendPostedEvents(window, QEvent.DeferredDelete)
 
 
 def open_draft(owner):
@@ -162,7 +162,7 @@ def open_draft(owner):
 def close_draft(dialog, app):
     dialog.close()
     dialog.deleteLater()
-    app.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.sendPostedEvents(dialog, QEvent.DeferredDelete)
 
 
 def test_old_config_defaults_to_disabled_draft_without_writing(draft_owner):

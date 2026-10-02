@@ -425,7 +425,7 @@ def test_standalone_device_read_signal_is_the_measurement_source(hotkey_workspac
     finally:
         dialog.close()
         dialog.deleteLater()
-        app.sendPostedEvents(None, QEvent.DeferredDelete)
+        app.sendPostedEvents(dialog, QEvent.DeferredDelete)
 
 
 @pytest.mark.parametrize('hotkey_workspace', [{'remote': True}], indirect=True)
@@ -458,7 +458,7 @@ def test_remote_mapping_request_keeps_identity_and_stale_confirmation_open(hotke
     finally:
         dialog.close()
         dialog.deleteLater()
-        app.sendPostedEvents(None, QEvent.DeferredDelete)
+        app.sendPostedEvents(dialog, QEvent.DeferredDelete)
 
 
 @pytest.mark.parametrize('hotkey_workspace', [{'remote': True}], indirect=True)
@@ -494,7 +494,7 @@ def test_opening_entry_releases_outputs_and_remote_lease_before_dialog(hotkey_wo
     assert len(opened) == 1 and opened[0].disconnected
     if window.remote:
         assert window.client.sent[-1] == ('suspend', {'seconds': 0})
-    app.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.sendPostedEvents(opened[0], QEvent.DeferredDelete)
 
 
 def screenshot(widget, name):
