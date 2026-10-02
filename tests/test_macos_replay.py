@@ -117,6 +117,7 @@ def isolated_ffmpeg_paths(monkeypatch, tmp_path):
     return tmp_path
 
 
+@pytest.mark.skipif(sys.platform != 'darwin', reason='Unix executable permissions are macOS specific')
 def test_optional_ffmpeg_wheel_is_used_only_for_a_real_executable(isolated_ffmpeg_paths, monkeypatch):
     binary = isolated_ffmpeg_paths / 'standalone-ffmpeg'
     binary.write_bytes(b'not executed by this test')

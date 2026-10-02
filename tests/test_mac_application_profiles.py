@@ -1,11 +1,15 @@
 """Full executable ownership and read-only Mac foreground metadata."""
 import ctypes as C
 import plistlib
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from gamepadstudio import application_profiles as apps
+
+
+pytestmark = pytest.mark.skipif(sys.platform != 'darwin', reason='macOS application bundles and AppKit only')
 
 
 @pytest.fixture(autouse=True)

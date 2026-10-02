@@ -11,6 +11,9 @@ import pytest
 from gamepadstudio import ipc
 
 
+pytestmark = pytest.mark.skipif(sys.platform != 'darwin', reason='macOS LaunchAgent only')
+
+
 @pytest.fixture
 def login_job(monkeypatch, tmp_path):
     path = tmp_path / 'LaunchAgents' / 'com.gamepadstudio.agent.plist'
