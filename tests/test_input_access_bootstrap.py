@@ -24,6 +24,7 @@ def test_device_bootstrap_runs_before_sdl_init(monkeypatch):
     monkeypatch.setattr('gamepadstudio.device.C.CDLL', lambda path: FakeSDL(calls))
     monkeypatch.setattr('gamepadstudio.hidhide.ensure_current_app_input_access',
                         lambda: calls.append('bootstrap') or (True, ''))
+    monkeypatch.setattr('gamepadstudio.device.sys.platform', 'win32')
     device = Device()
     try:
         assert calls.index('bootstrap') < calls.index('SDL_Init')
@@ -38,6 +39,7 @@ def test_bootstrap_failure_keeps_sdl_running_and_exposes_warning(monkeypatch):
     monkeypatch.setattr('gamepadstudio.device.C.CDLL', lambda path: FakeSDL(calls))
     monkeypatch.setattr('gamepadstudio.hidhide.ensure_current_app_input_access',
                         lambda: (False, warning))
+    monkeypatch.setattr('gamepadstudio.device.sys.platform', 'win32')
     device = Device()
     try:
         assert 'SDL_Init' in calls

@@ -17,7 +17,7 @@ DEVICE_PROFILE_VERSION = 1
 OFFLINE_PROFILE_SCOPE = 'offline:xinput'
 DEVICE_SETTING_KEYS = ('led', 'rumble', 'touch_mouse', 'long_press', 'deadzone',
                        'capture_haptics_enabled', 'haptic_intensity', 'haptic_profile',
-                       'haptic_engine_enabled', 'device_cloaking_enabled',
+                       'haptic_engine_enabled', 'device_cloaking_enabled', 'mac_controller_isolation_requested',
                        'trigger_curves', 'rumble_curves', 'trigger_rumble_curves',
                        'trigger_rumble_enabled', 'touch_gestures_enabled', 'touch_scroll',
                        'touch_gesture_sensitivity', 'battery_notifications_enabled')
@@ -25,7 +25,8 @@ DEVICE_SETTING_DEFAULTS = {'led': '#5686ff', 'rumble': .35, 'touch_mouse': False
                            'long_press': .65, 'deadzone': .10,
                            'capture_haptics_enabled': True, 'haptic_intensity': 1.0,
                            'haptic_profile': 'crisp', 'haptic_engine_enabled': True,
-                           'device_cloaking_enabled': True, 'battery_notifications_enabled': True}
+                           'device_cloaking_enabled': True, 'mac_controller_isolation_requested':False,
+                           'battery_notifications_enabled': True}
 DEVICE_SETTING_DEFAULTS.update({key: normalize_curve_channels(key) for key in CURVE_CHANNELS})
 DEVICE_SETTING_DEFAULTS['trigger_rumble_enabled'] = False
 DEVICE_SETTING_DEFAULTS.update(touch_gestures_enabled=False, touch_scroll=False,
@@ -114,7 +115,7 @@ def device_config(config, state):
     for key in CURVE_CHANNELS:
         resolved[key] = normalize_curve_channels(key, resolved)
     resolved['trigger_rumble_enabled'] = resolved.get('trigger_rumble_enabled') is True
-    for key in ('touch_gestures_enabled', 'touch_scroll'):
+    for key in ('touch_gestures_enabled', 'touch_scroll', 'mac_controller_isolation_requested'):
         resolved[key] = resolved.get(key) is True
     if type(resolved.get('battery_notifications_enabled')) is not bool:
         resolved['battery_notifications_enabled'] = True
@@ -778,7 +779,7 @@ class ConfigStore:
             raise ValueError('低电量提醒设置应为开启或关闭')
         if key in CURVE_CHANNELS:
             value = normalize_curve_channels(key, {key: value})
-        elif key in ('trigger_rumble_enabled', 'touch_gestures_enabled', 'touch_scroll'):
+        elif key in ('trigger_rumble_enabled', 'touch_gestures_enabled', 'touch_scroll', 'mac_controller_isolation_requested'):
             value = value is True
         elif key == 'touch_gesture_sensitivity':
             value = normalize_touch_sensitivity(value)

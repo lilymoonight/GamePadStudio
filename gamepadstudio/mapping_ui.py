@@ -1,5 +1,6 @@
 """Shared mapping editors and live binding lists."""
 import copy
+import sys
 import time
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QColor
@@ -170,7 +171,7 @@ class KeySequenceField(QLineEdit):
         self.recording = False
         self.held = set()
         self.keys = []
-        self.setPlaceholderText('Ctrl+Shift+S / W+Space')
+        self.setPlaceholderText('Cmd+Shift+S / Ctrl / W+Space' if sys.platform == 'darwin' else 'Ctrl+Shift+S / W+Space')
 
     def start_recording(self):
         self.recording = True; self.held.clear(); self.keys.clear()
@@ -182,8 +183,12 @@ class KeySequenceField(QLineEdit):
         if event.isAutoRepeat():
             return
         key = event.key()
-        name = {Qt.Key_Control: 'Ctrl', Qt.Key_Shift: 'Shift', Qt.Key_Alt: 'Alt',
-                Qt.Key_Meta: 'Win'}.get(key, QKeySequence(key).toString(QKeySequence.PortableText))
+        # Qt maps Key_Control to physical Command and Key_Meta to physical
+        # Control on macOS. Persist actual modifiers, not Qt's aliases.
+        modifiers = {Qt.Key_Control: 'Cmd' if sys.platform == 'darwin' else 'Ctrl',
+                     Qt.Key_Meta: 'Ctrl' if sys.platform == 'darwin' else 'Win',
+                     Qt.Key_Shift: 'Shift', Qt.Key_Alt: 'Alt'}
+        name = modifiers.get(key, QKeySequence(key).toString(QKeySequence.PortableText))
         if name and name not in self.keys:
             self.keys.append(name)
         self.held.add(key)
@@ -437,7 +442,7 @@ class BindingDialog(QDialog):
             l_layout = QHBoxLayout(launch_row)
             l_layout.setContentsMargins(0, 0, 0, 0)
             path_edit = QLineEdit(binding.get('executable', ''))
-            path_edit.setPlaceholderText('应用程序路径 (.exe)')
+            path_edit.setPlaceholderText('应用程序路径 (.app / 可执行文件)' if sys.platform == 'darwin' else '应用程序路径 (.exe)')
             browse_btn = QPushButton('浏览...')
             browse_btn.clicked.connect(lambda chk=False, p=path_edit: self.browse_app(p))
             args_edit = QLineEdit(binding.get('arguments', ''))
@@ -610,7 +615,8 @@ class BindingDialog(QDialog):
 
     def browse_app(self, field):
         from PySide6.QtWidgets import QFileDialog
-        value, _ = QFileDialog.getOpenFileName(self, '选择应用', '', '程序 (*.exe);;所有文件 (*)')
+        application_filter = '应用程序 (*.app);;所有文件 (*)' if sys.platform == 'darwin' else '程序 (*.exe);;所有文件 (*)'
+        value, _ = QFileDialog.getOpenFileName(self, '选择应用', '', application_filter)
         if value:
             field.setText(value)
 
@@ -737,6 +743,12 @@ class BindingDialog(QDialog):
             if not set(trig.split('+')) <= set(input_sources(self.owner.snapshot)):
                 raise ValueError('请选择当前手柄支持的输入按键')
             validate_mappings({trig: val})
+            if sys.platform == 'darwin':
+                from .actions import supports_key
+                for binding in (val.get('short', {}), val.get('long', {})):
+                    if binding.get('action') in ('hold', 'shortcut') and not supports_key(binding.get('value', '')):
+                        from .macos_actions import MacActions
+                        raise ValueError(MacActions.key_capability(binding.get('value',''))['reason'])
             if self.new_binding or trig != self.original_trigger:
                 existing = self.owner.config['profiles'].get(self.profile, {}).get(trig, {})
                 if any(existing.get(g, {}).get('action', 'none') != 'none' for g in ('short', 'long')):

@@ -1,0 +1,16 @@
+GamePadStudio macOS preview dependencies
+
+The macOS bundle includes FFmpeg 7.1 from the architecture-matched
+imageio-ffmpeg 0.6.0 wheel. FFmpeg is licensed under GPL version 2 or later
+in this build (built with --enable-gpl). Run bin/ffmpeg -L and
+bin/ffmpeg -buildconf for the binary's license and build configuration.
+
+FFmpeg project and source:
+https://ffmpeg.org/
+https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz
+Wheel packaging and binary build project:
+https://github.com/imageio/imageio-ffmpeg
+https://github.com/imageio/imageio-binaries
+
+GamePadStudio's GPL-3.0 license is included in licenses/LICENSE.
+Other dependencies retain their licenses and notices supplied with them.

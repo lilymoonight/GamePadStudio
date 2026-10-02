@@ -13,6 +13,13 @@ from gamepadstudio import emergency_hotkey as hotkeys
 _REAL_LOAD_USER32 = hotkeys._load_user32
 
 
+@pytest.fixture(autouse=True)
+def windows_shortcut_rules(monkeypatch):
+    # These assertions preserve Windows' reserved keys and modifier rules,
+    # including when the regression suite itself runs on macOS.
+    monkeypatch.setattr(hotkeys, 'sys', SimpleNamespace(platform='win32'))
+
+
 class Function:
     def __init__(self, callback):
         self.callback = callback
@@ -38,7 +45,7 @@ class FakeUser32:
         if self.raise_register:
             raise OSError('unavailable')
         if self.conflict:
-            C.set_last_error(1409)
+            hotkeys.C.set_last_error(1409)
             return 0
         self.active[identifier] = (modifiers, vk)
         return 1
@@ -54,6 +61,12 @@ class FakeUser32:
 def native(monkeypatch):
     app = QApplication.instance() or QApplication([])
     library, owners = FakeUser32(), []
+    monkeypatch.setattr(hotkeys, 'sys', SimpleNamespace(platform='win32'))
+    errors = threading.local()
+    native_ctypes = SimpleNamespace(**vars(C))
+    native_ctypes.get_last_error = lambda: getattr(errors, 'value', 0)
+    native_ctypes.set_last_error = lambda value: setattr(errors, 'value', value)
+    monkeypatch.setattr(hotkeys, 'C', native_ctypes)
     monkeypatch.setattr(hotkeys, '_load_user32', lambda: library)
 
     def create(callback=None, parent=None):
@@ -333,7 +346,7 @@ def test_callback_exception_cannot_escape_qt_virtual_callback(native):
 
 
 def test_win32_functions_have_pointer_safe_typed_abi(native, monkeypatch):
-    monkeypatch.setattr(C, 'WinDLL', lambda *_, **__: native.library)
+    monkeypatch.setattr(hotkeys.C, 'WinDLL', lambda *_, **__: native.library, raising=False)
     user32 = _REAL_LOAD_USER32()
     assert user32.RegisterHotKey.argtypes == [W.HWND, W.INT, W.UINT, W.UINT]
     assert user32.RegisterHotKey.restype is W.BOOL

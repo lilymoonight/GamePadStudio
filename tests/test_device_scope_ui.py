@@ -25,6 +25,12 @@ def device(identity, family='xbox', *, rumble=True, led=False, touch=False,
 
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
+    # This fixture exercises the existing Windows workspace contract using
+    # fake output; native Mac capability coverage lives in test_platform_ui.
+    from tests.test_unified_mapping import Actions
+    monkeypatch.setattr('gamepadstudio.studio.WINDOWS_FEATURES', True)
+    monkeypatch.setattr('gamepadstudio.virtual_kbm_ui.WINDOWS_FEATURES', True)
+    monkeypatch.setattr('gamepadstudio.studio.create_actions', Actions)
     class Disconnected:
         available = []
         def scan(self): pass

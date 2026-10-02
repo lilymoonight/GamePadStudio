@@ -172,8 +172,9 @@ def test_controller_card_favorite_does_not_open_and_keyboard_opens():
 
 
 def test_delete_buttons_interactive_and_responsive(tmp_path, monkeypatch):
+    from pathlib import Path
+    from PySide6.QtGui import QImage
     from PySide6.QtWidgets import QMessageBox
-    from gamepadstudio.screenshot_service import take_screenshot
     class Disconnected:
         available = []
         def scan(self): pass
@@ -181,7 +182,7 @@ def test_delete_buttons_interactive_and_responsive(tmp_path, monkeypatch):
         def close(self): pass
     monkeypatch.setattr('gamepadstudio.studio.Device', Disconnected)
     app = QApplication.instance() or QApplication([])
-    window = Studio(tmp_path, standalone=True)
+    window = Studio(tmp_path, standalone=True, lang='zh')
     window.enabled = False
 
     # Mock QMessageBox to verify dialog is triggered without blocking
@@ -201,7 +202,11 @@ def test_delete_buttons_interactive_and_responsive(tmp_path, monkeypatch):
         assert len(questions) + len(infos) == 1
 
         # 2. Screenshot gallery delete buttons: responsive on each card
-        take_screenshot(window.config['save_dir'])
+        capture_folder = Path(window.config['save_dir'])
+        capture_folder.mkdir(parents=True, exist_ok=True)
+        capture = QImage(32, 32, QImage.Format_RGB32)
+        capture.fill(Qt.black)
+        assert capture.save(str(capture_folder / 'gallery-fixture.png'))
         window.gallery_signature = None
         window.navigate(2)
         app.processEvents()

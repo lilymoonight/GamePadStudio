@@ -1,5 +1,16 @@
 from pathlib import Path
+from types import SimpleNamespace
+import pytest
 from gamepadstudio import screenshot_service as service
+
+
+@pytest.fixture(autouse=True)
+def fake_capture_consent(monkeypatch):
+    # Pixel capture is already a fake; these tests must not depend on TCC.
+    # Exercise the existing MSS/PNG route; native Mac routing has its own tests.
+    monkeypatch.setattr(service, 'sys', SimpleNamespace(platform='linux'))
+    monkeypatch.setattr('gamepadstudio.macos_permissions.screen_capture_permission_status',
+                        lambda: {'supported': True, 'granted': True, 'reason': ''})
 
 
 class FakeMSS:
@@ -86,4 +97,3 @@ def test_list_and_delete_mp4_captures(tmp_path):
     assert not vid.exists()
     assert not thumb.exists()
     assert len(service.list_captures(tmp_path)) == 0
-

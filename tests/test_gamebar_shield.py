@@ -1,4 +1,4 @@
-import sys
+from types import SimpleNamespace
 import pytest
 from gamepadstudio.gamebar_shield import (
     is_gamebar_shield_active,
@@ -13,6 +13,7 @@ from gamepadstudio.i18n import tr, set_language, get_language
 def isolated_registry(monkeypatch):
     """Never change the user's Windows settings while running tests."""
     from gamepadstudio import gamebar_shield as shield
+    monkeypatch.setattr(shield, 'sys', SimpleNamespace(platform='win32'))
     values = {}
     monkeypatch.setattr(shield, '_read_reg_dword', lambda root, key, name: values.get((root, key, name)))
     def write(root, key, name, value):
@@ -82,7 +83,6 @@ def test_gamebar_refresh_failure_is_not_silently_reported_as_success(monkeypatch
     assert not ok and backup and '游戏栏未能关闭' in message
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows specific registry tests")
 def test_gamebar_shield_lifecycle():
     initial_summary = get_gamebar_shield_summary()
     assert "active" in initial_summary

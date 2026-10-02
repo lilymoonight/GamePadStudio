@@ -4,7 +4,7 @@
 
 # GamePad Studio
 
-### 次时代 Windows 游戏手柄全功能工作台 · 300Hz 物理动态虚拟键鼠 · 全外设支持
+### 游戏手柄全功能工作台 · Windows 正式版 / macOS 适配预览
 
 <p align="center">
   <a href="https://github.com/lilymoonight/GamePadStudio/releases/latest">
@@ -14,6 +14,7 @@
     <img src="https://img.shields.io/github/actions/workflow/status/lilymoonight/GamePadStudio/build.yml?branch=main&label=CI%20Build&logo=githubactions" alt="Build Status" />
   </a>
   <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20(64--bit)-0078D6?logo=windows&logoColor=white" alt="Windows Platform" />
+  <img src="https://img.shields.io/badge/macOS-14%2B_%E9%A2%84%E8%A7%88-555555?logo=apple&logoColor=white" alt="macOS 14+ 预览" />
   <img src="https://img.shields.io/badge/License-GPL--3.0-blue.svg" alt="License: GPL v3" />
 </p>
 
@@ -78,6 +79,8 @@
 ---
 
 ## 🚀 三步快速开始 (无需安装 Python)
+
+以下下载步骤适用于 Windows 正式版。macOS 14+ 已提供源码运行与 `.app` 适配预览，使用原生键鼠、窗口截图、多屏捕获和 VideoToolbox，并保留应用关联、全局暂停与登录启动。手柄独占访问和项目内整段录像用于替代 Windows 系统功能，系统音轨正在集成验收；特殊键和真实虚拟手柄仍有明确缺口。源码需先构建 Swift 捕获组件，已打包应用无需 Xcode。启动、权限及实机步骤见 [macOS 支持说明](docs/MACOS_SUPPORT.md)，完整实现与验证边界见 [平台功能对齐矩阵](docs/MACOS_PARITY.md)。
 
 本项目通过 **GitHub Actions CI/CD** 全自动打包构建，所有发布版本均经过 100% 自动化测试验证。
 

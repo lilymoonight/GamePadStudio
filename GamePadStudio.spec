@@ -1,19 +1,33 @@
 import os
+import sys
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
-
-block_cipher = None
 
 added_files = [
     ('gamepadstudio/assets', 'gamepadstudio/assets'),
+    ('LICENSE', 'licenses'),
 ]
 
-added_binaries = [
-    ('bin/ffmpeg.exe', 'bin'),
-] if os.path.exists('bin/ffmpeg.exe') else []
+ffmpeg_binary = 'bin/ffmpeg.exe' if sys.platform == 'win32' else 'bin/ffmpeg'
+if sys.platform == 'darwin' and not os.path.isfile(ffmpeg_binary):
+    # The architecture-matched wheel avoids a global Homebrew dependency.
+    import imageio_ffmpeg
+    ffmpeg_binary = imageio_ffmpeg.get_ffmpeg_exe()
+added_binaries = [(ffmpeg_binary, 'bin')] if os.path.exists(ffmpeg_binary) else []
+if sys.platform == 'darwin':
+    capture_helper = 'bin/gps-mac-capture'
+    if not os.path.isfile(capture_helper):
+        raise RuntimeError('Run python scripts/build_macos_capture.py before packaging macOS.')
+    added_binaries.append((capture_helper, 'bin'))
+
+# Keep the runtime path stable regardless of the wheel's versioned filename.
+# TOCs use (destination, source, type); preserve executable permissions and
+# PyInstaller signing by including FFmpeg as a binary instead of data.
 
 hidden_imports = [
     'gamepadstudio',
     'gamepadstudio.actions',
+    'gamepadstudio.macos_actions',
+    'gamepadstudio.macos_permissions',
     'gamepadstudio.agent',
     'gamepadstudio.cli',
     'gamepadstudio.config',
@@ -65,11 +79,14 @@ a = Analysis(
     excludes=['tkinter', 'matplotlib', 'unittest', 'pytest'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+if sys.platform == 'darwin':
+    a.binaries = [(('bin/ffmpeg' if source == ffmpeg_binary else destination), source, kind)
+                  for destination, source, kind in a.binaries]
+
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
@@ -87,16 +104,29 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='gamepadstudio/assets/studio.ico',
+    icon='gamepadstudio/assets/studio.ico' if sys.platform == 'win32' else 'gamepadstudio/assets/studio.icns',
 )
 
 coll = COLLECT(
     exe,
     a.binaries,
-    a.zipfiles,
     a.datas,
     strip=False,
     upx=True,
     upx_exclude=[],
     name='GamePadStudio',
 )
+
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        coll,
+        name='GamePadStudio.app',
+        icon='gamepadstudio/assets/studio.icns',
+        bundle_identifier='io.github.lilymoonight.GamePadStudio',
+        info_plist={
+            'CFBundleShortVersionString': '2.0.1',
+            'CFBundleVersion': '2.0.1',
+            'NSHighResolutionCapable': True,
+            'NSBluetoothAlwaysUsageDescription': '读取已连接的游戏手柄输入，并提供设备支持的反馈。',
+        },
+    )

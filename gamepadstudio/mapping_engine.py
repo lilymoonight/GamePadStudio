@@ -538,6 +538,13 @@ class MappingRuntime:
             self.events = self.events[-8:]
 
     def update(self, state, config, enabled=True, now=None, preview=False):
+        consume_error = getattr(self.mouse_thread, 'consume_output_error', None)
+        if callable(consume_error):
+            error = consume_error()
+            if error is not None:
+                # Propagate on the owner thread, where Agent/Studio pause
+                # mapping and release all other held keyboard/mouse output.
+                raise error
         from .studio_core import device_config, profile_scope, profile_mode
         config = device_config(config, state)
         self.now = time.monotonic() if now is None else now
@@ -641,6 +648,9 @@ class MappingRuntime:
         # Stop continuous motion even if a following key-up is rejected.
         if self.mouse_thread:
             self.mouse_thread.update_stick(0., 0.)
+            clear_error = getattr(self.mouse_thread, 'clear_output_error', None)
+            if callable(clear_error):
+                clear_error()
         self.engine.reset()
         for _, binding in self.pulses:
             self._hold(binding, False)

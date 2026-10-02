@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import ntpath
+import sys
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog,
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
 from .glass import AppleGroup, AppleRow, TOKENS, Toggle
 from .i18n import tr, tr_profile
 from .studio_core import profile_scope
+from .application_profiles import normalize_executable, canonical_executable
 
 
 def caption(text, kind='caption'):
@@ -110,7 +112,7 @@ class ApplicationProfilesDialog(QDialog):
         self.rule_layout = QVBoxLayout(body)
         self.rule_layout.setContentsMargins(0, 0, 0, 0)
         self.rule_layout.setSpacing(8)
-        self.empty_label = caption(tr('添加游戏实际运行的程序，再选择此手柄的预设。'))
+        self.empty_label = caption(tr('添加 .app 应用或实际运行的可执行文件，再选择此手柄的预设。') if sys.platform == 'darwin' else tr('添加游戏实际运行的程序，再选择此手柄的预设。'))
         self.rule_layout.addWidget(self.empty_label)
         self.rule_layout.addStretch()
         area.setWidget(body)
@@ -144,11 +146,18 @@ class ApplicationProfilesDialog(QDialog):
         self.empty_label.setVisible(not self.rows)
 
     def choose_application(self):
-        path, _ = QFileDialog.getOpenFileName(self, tr('选择应用'), '', tr('应用程序 (*.exe)'))
+        mac = sys.platform == 'darwin'
+        path, _ = QFileDialog.getOpenFileName(self, tr('选择应用'), '/Applications' if mac else '',
+                                             tr('macOS 应用 (*.app);;全部文件 (*)') if mac else tr('应用程序 (*.exe)'))
         if not path or not self.check_device():
             return
-        path = ntpath.normpath(path)
-        if any(ntpath.normcase(row.executable) == ntpath.normcase(path) for row in self.rows):
+        try:
+            path = normalize_executable(path)
+            duplicate = any(canonical_executable(row.executable) == canonical_executable(path) for row in self.rows)
+        except ValueError as exc:
+            self.message.setText(tr(str(exc)))
+            return
+        if duplicate:
             self.message.setText(tr('此应用已关联，请修改已有条目的预设。'))
             return
         active = self.owner.config.get('active_profile')

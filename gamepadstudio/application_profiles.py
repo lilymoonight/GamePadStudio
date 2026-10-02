@@ -1,18 +1,21 @@
-"""Device-owned application rules and read-only Windows foreground detection."""
+"""Device-owned application rules and read-only native foreground detection."""
 from __future__ import annotations
 
 import ctypes as C
 from ctypes import wintypes as W
 import ntpath
+from pathlib import Path
+import plistlib
 import re
 import sys
 
 
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _PATH_ERROR = '请选择 Windows 应用的完整 .exe 路径'
+_MAC_PATH_ERROR = '请选择 macOS 应用的 .app 或完整可执行文件路径'
 
 
-def normalize_executable(path):
+def _normalize_windows_executable(path):
     """Accept complete Win32 executable paths without requiring installation."""
     if not isinstance(path, str) or not path.strip():
         raise ValueError(_PATH_ERROR)
@@ -40,9 +43,48 @@ def normalize_executable(path):
     return path
 
 
+def _windows_path(path):
+    return bool(re.match(r'^[A-Za-z]:', path) or path.startswith(('\\\\', '//')))
+
+
+def normalize_executable(path):
+    """Keep full process paths; resolve Mac bundles from their actual metadata."""
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError(_MAC_PATH_ERROR if sys.platform == 'darwin' else _PATH_ERROR)
+    path = path.strip()
+    # Windows rules remain valid when a shared config is opened on a Mac.
+    if _windows_path(path) or sys.platform != 'darwin':
+        return _normalize_windows_executable(path)
+    if not path.startswith('/') or any(ord(char) < 32 for char in path):
+        raise ValueError(_MAC_PATH_ERROR)
+    executable = Path(path)
+    if executable.suffix.casefold() == '.app':
+        try:
+            with (executable / 'Contents' / 'Info.plist').open('rb') as source:
+                info = plistlib.load(source)
+            name = info.get('CFBundleExecutable') if isinstance(info, dict) else None
+            if (not isinstance(name, str) or not name or name in ('.', '..')
+                    or any(ord(char) < 32 or char in '/\\' for char in name)):
+                raise ValueError(_MAC_PATH_ERROR)
+            executable = executable / 'Contents' / 'MacOS' / name
+            if not executable.is_file():
+                raise ValueError(_MAC_PATH_ERROR)
+        except (OSError, ValueError, plistlib.InvalidFileException) as error:
+            raise ValueError(_MAC_PATH_ERROR) from error
+    try:
+        if executable.is_dir():
+            raise ValueError(_MAC_PATH_ERROR)
+        # Resolve aliases to the same executable while retaining a stored rule
+        # if an application is temporarily removed, just like Windows paths.
+        return str(executable.resolve())
+    except (OSError, RuntimeError) as error:
+        raise ValueError(_MAC_PATH_ERROR) from error
+
+
 def canonical_executable(path):
-    """Case-insensitive full-path identity; equal basenames never imply a match."""
-    return normalize_executable(path).casefold()
+    """Full-path identity, preserving case on case-sensitive Mac volumes."""
+    normalized = normalize_executable(path)
+    return normalized.casefold() if _windows_path(normalized) else normalized
 
 
 def normalize_application_profiles(value, config, state):
@@ -131,17 +173,83 @@ class ForegroundApplicationReader:
         return result
 
 
+class _MacWorkspaceNative:
+    """Read public NSWorkspace metadata with typed Objective-C messages."""
+    def __init__(self):
+        self.appkit = C.CDLL('/System/Library/Frameworks/AppKit.framework/AppKit')
+        self.objc = C.CDLL('/usr/lib/libobjc.A.dylib')
+        self.objc.objc_getClass.argtypes, self.objc.objc_getClass.restype = [C.c_char_p], C.c_void_p
+        self.objc.sel_registerName.argtypes, self.objc.sel_registerName.restype = [C.c_char_p], C.c_void_p
+        address = C.cast(self.objc.objc_msgSend, C.c_void_p).value
+        # Fixed signatures preserve pointers and pid_t on Apple Silicon and
+        # avoid calling a variadic objc_msgSend through ctypes' default ABI.
+        self._send_object = C.CFUNCTYPE(C.c_void_p, C.c_void_p, C.c_void_p)(address)
+        self._send_pid = C.CFUNCTYPE(C.c_int, C.c_void_p, C.c_void_p)(address)
+        self._send_text = C.CFUNCTYPE(C.c_char_p, C.c_void_p, C.c_void_p)(address)
+        self._send_void = C.CFUNCTYPE(None, C.c_void_p, C.c_void_p)(address)
+
+    def _message(self, obj, selector):
+        return self._send_object(obj, self.objc.sel_registerName(selector)) if obj else None
+
+    def frontmost_application(self):
+        pool = self._message(self.objc.objc_getClass(b'NSAutoreleasePool'), b'alloc')
+        pool = self._message(pool, b'init')
+        try:
+            workspace = self._message(self.objc.objc_getClass(b'NSWorkspace'), b'sharedWorkspace')
+            app = self._message(workspace, b'frontmostApplication')
+            if not app:
+                return {'pid': 0, 'executable': ''}
+            pid = self._send_pid(app, self.objc.sel_registerName(b'processIdentifier'))
+            url = self._message(app, b'executableURL')
+            path = self._message(url, b'path')
+            raw = self._send_text(path, self.objc.sel_registerName(b'UTF8String')) if path else None
+            return {'pid': pid, 'executable': raw.decode('utf-8') if raw else ''}
+        finally:
+            if pool:
+                self._send_void(pool, self.objc.sel_registerName(b'drain'))
+
+
+class MacForegroundApplicationReader:
+    """Return the frontmost app's real executable without permission prompts."""
+    def __init__(self, workspace=None):
+        self.workspace = workspace if workspace is not None else _MacWorkspaceNative()
+
+    def read(self):
+        result = {'pid': 0, 'hwnd': 0, 'executable': ''}
+        try:
+            foreground = self.workspace.frontmost_application()
+            pid = foreground.get('pid', 0)
+            if not isinstance(pid, int) or pid <= 0:
+                return result
+            result['pid'] = pid
+            path = foreground.get('executable', '')
+            if path:
+                result['executable'] = normalize_executable(path)
+            # A vanished process or focus change must never select a stale rule.
+            current = self.workspace.frontmost_application()
+            if current.get('pid', 0) != pid:
+                return {'pid': 0, 'hwnd': 0, 'executable': ''}
+        except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
+            result['executable'] = ''
+        return result
+
+
 _foreground_reader = None
+
+
+def application_profiles_supported():
+    return sys.platform in ('win32', 'darwin')
 
 
 def foreground_application():
     """Safe process metadata for the current foreground window, never a scan."""
     global _foreground_reader
-    if sys.platform != 'win32':
+    if not application_profiles_supported():
         return {'pid': 0, 'hwnd': 0, 'executable': ''}
     try:
         if _foreground_reader is None:
-            _foreground_reader = ForegroundApplicationReader()
+            reader_class = MacForegroundApplicationReader if sys.platform == 'darwin' else ForegroundApplicationReader
+            _foreground_reader = reader_class()
         return _foreground_reader.read()
     except (OSError, ValueError, TypeError, AttributeError):
         return {'pid': 0, 'hwnd': 0, 'executable': ''}

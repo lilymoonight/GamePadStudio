@@ -68,6 +68,10 @@ TOKENS = {
 INK = TOKENS['ink_3']
 ACCENT = TOKENS['accent']
 
+UI_FONT_STACK = ('"Helvetica Neue", "PingFang SC"' if sys.platform == 'darwin'
+                 else '"Microsoft YaHei UI", "Segoe UI", "Microsoft YaHei", sans-serif')
+MONO_FONT_STACK = ('"Menlo"' if sys.platform == 'darwin'
+                   else '"Cascadia Code", "Cascadia Mono", Consolas, monospace')
 
 # ─── Global Stylesheet ──────────────────────────────────────────────
 # fmt: off
@@ -75,7 +79,7 @@ STYLE = f'''
 /* ── Base ─────────────────────────────────────────────── */
 QWidget {{
     color: {TOKENS['ink']};
-    font-family: "Microsoft YaHei UI", "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-family: {UI_FONT_STACK};
     font-size: 13px;
     background: transparent;
 }}
@@ -122,7 +126,7 @@ QLabel#caption {{
 }}
 QLabel#metric {{
     color: {TOKENS['ink']};
-    font-family: "Cascadia Code", "Cascadia Mono", Consolas, monospace;
+    font-family: {MONO_FONT_STACK};
     font-size: 12px;
     font-weight: 600;
 }}

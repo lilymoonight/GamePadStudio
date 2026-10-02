@@ -44,7 +44,9 @@ def foreground(path=GAME, pid=321, hwnd=123):
     r'C:\Game*\game.exe', r'\\server\share', r'\\.\pipe\game.exe',
     'C:\\Bad\nFolder\\game.exe', r'C:\trailing.\game.exe',
 ])
-def test_executable_requires_a_full_windows_executable_path(path):
+def test_executable_requires_a_full_windows_executable_path(path, monkeypatch):
+    import gamepadstudio.application_profiles as module
+    monkeypatch.setattr(module, 'sys', SimpleNamespace(platform='win32'))
     with pytest.raises(ValueError):
         canonical_executable(path)
 
@@ -185,7 +187,7 @@ def test_reader_focus_change_during_query_does_not_return_old_application():
 def test_foreground_reader_is_safe_when_native_libraries_are_unavailable(monkeypatch):
     import gamepadstudio.application_profiles as module
     monkeypatch.setattr(module, '_foreground_reader', None)
-    monkeypatch.setattr(module.sys, 'platform', 'win32')
+    monkeypatch.setattr(module, 'sys', SimpleNamespace(platform='win32'))
     def unavailable():
         raise OSError('user32 unavailable')
     monkeypatch.setattr(module, 'ForegroundApplicationReader', unavailable)

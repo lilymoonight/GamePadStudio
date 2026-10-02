@@ -2,7 +2,9 @@ import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
 import pytest
+from gamepadstudio import hidhide
 
 from gamepadstudio.hidhide import (
     HidHideClient,
@@ -24,13 +26,25 @@ from gamepadstudio.hidhide import (
 def block_native_hidhide_access(monkeypatch):
     """These tests never inspect or change the host's real driver state."""
     import gamepadstudio.hidhide as module
+    # Exercise Windows policy with local stand-ins; never change Python's host
+    # platform or allow a fixture to load/query the real driver.
+    windows_sys = SimpleNamespace(**vars(sys))
+    windows_sys.platform = 'win32'
+    monkeypatch.setattr(module, 'sys', windows_sys)
     monkeypatch.setattr(HidHideClient, 'is_driver_installed', lambda self: False)
     monkeypatch.setattr(HidHideClient, '_send_ioctl', lambda self, *args, **kwargs: (False, b''))
 
     def no_registry(*args, **kwargs):
         raise OSError('Registry access is isolated in tests')
 
-    monkeypatch.setattr(module.winreg, 'OpenKey', no_registry)
+    monkeypatch.setattr(module, 'winreg', SimpleNamespace(
+        OpenKey=no_registry, HKEY_LOCAL_MACHINE='HKLM'))
+    native_ctypes = SimpleNamespace(**vars(module.C))
+    native_ctypes.WinDLL = no_registry
+    native_ctypes.windll = SimpleNamespace(kernel32=SimpleNamespace(QueryDosDeviceW=no_registry))
+    monkeypatch.setattr(module, 'C', native_ctypes)
+    from gamepadstudio import virtual_kbm_ui
+    monkeypatch.setattr(virtual_kbm_ui, 'WINDOWS_FEATURES', True)
     original_exists = module.os.path.exists
     cli = r'C:\Program Files\Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe'
     monkeypatch.setattr(module.os.path, 'exists', lambda path: False if str(path) == cli else original_exists(path))
@@ -82,8 +96,8 @@ def test_bootstrap_active_hidhide_preserves_entries_and_adds_only_current_execut
     nt_current = r'\Device\HarddiskVolume5\GamePadStudio\GamePadStudio.exe'
     existing = [r'\Device\HarddiskVolume4\Other App\app.exe', r'C:\Existing\tool.exe']
     client, state = bootstrap_driver(monkeypatch, whitelist=existing)
-    monkeypatch.setattr(sys, 'executable', current)
-    monkeypatch.setattr(sys, '_base_executable', r'C:\Python\python.exe')
+    monkeypatch.setattr(hidhide.sys, 'executable', current)
+    monkeypatch.setattr(hidhide.sys, '_base_executable', r'C:\Python\python.exe')
     monkeypatch.setattr('gamepadstudio.hidhide.dos_to_nt_path', lambda path: nt_current)
     ok, message = ensure_current_app_input_access(client)
     assert ok and not message
@@ -108,7 +122,7 @@ def test_bootstrap_existing_access_is_idempotent_and_preserves_other_entries(mon
     current = r'D:\GamePadStudio\GamePadStudio.exe'
     existing = [r'C:\Other\app.exe', current.upper()]
     client, state = bootstrap_driver(monkeypatch, whitelist=existing)
-    monkeypatch.setattr(sys, 'executable', current)
+    monkeypatch.setattr(hidhide.sys, 'executable', current)
     monkeypatch.setattr('gamepadstudio.hidhide.dos_to_nt_path', lambda path: path)
     assert ensure_current_app_input_access(client) == (True, '')
     assert state['whitelist'] == existing and not state['writes']
@@ -468,4 +482,3 @@ def test_cloaking_ui_without_device_disables_control_and_ignores_toggle(tmp_path
         assert owner.store.settings_for(None)['device_cloaking_enabled']
     finally:
         owner.close()
-

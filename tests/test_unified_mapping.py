@@ -27,6 +27,10 @@ class Actions:
         self.calls.append(('mouse', button, down))
         self.mouse.add(button) if down else self.mouse.discard(button)
     def scroll(self, n): self.calls.append(('wheel', n))
+    def move_mouse(self, dx, dy): self.calls.append(('move', dx, dy))
+    def shortcut(self, value):
+        self.hold(value, True)
+        self.hold(value, False)
     def release_all(self): self.keys.clear(); self.mouse.clear()
 
 
@@ -384,4 +388,3 @@ def test_rapid_shortcut_retrigger_cleans_pulse_and_sends_distinct_events():
     assert a.calls == [('key', '1', True), ('key', '1', False), ('key', '1', True)]
     assert len(runtime.pulses) == 1
     assert runtime.pulses[0][0] == 1.07
-

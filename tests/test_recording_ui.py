@@ -15,6 +15,8 @@ def displays(monkeypatch, refresh=(60, 144), hdr=(False, False)):
     monitors = [dict(left=0, top=0, width=len(physical) * 1920, height=1080), *physical]
     monkeypatch.setattr('gamepadstudio.display_info.enumerate_displays', lambda: physical)
     monkeypatch.setattr('mss.mss', lambda: nullcontext(SimpleNamespace(monitors=monitors)))
+    monkeypatch.setattr('gamepadstudio.replay_capture.create_replay_capture',
+                        lambda: nullcontext(SimpleNamespace(monitors=monitors)))
 
 
 def test_recording_all_disabled_for_mixed_refresh_but_screenshot_all_remains(workspace, monkeypatch):

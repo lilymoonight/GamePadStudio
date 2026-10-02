@@ -1,6 +1,7 @@
 """GamepadTester Diagnostic Dashboard — real-time hardware telemetry."""
 from collections import deque
 import math
+import sys
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout,
@@ -8,10 +9,11 @@ from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout,
 
 from .controller_catalog import CATALOG, axis_labels, button_labels, button_order
 from .controller_schematic import ControllerSchematic
-from .glass import GlassPanel, IconButton, glyph, TOKENS, token_color, tag_style
+from .glass import GlassPanel, IconButton, glyph, TOKENS, token_color, tag_style, MONO_FONT_STACK
 from .test_widgets import StickGauge, TriggerGauge
 from .i18n import tr
 
+INSTRUMENT_MONO_STACK = MONO_FONT_STACK if sys.platform == 'darwin' else '"Cascadia Code", Consolas'
 
 class StickHistory:
     """Bounded motion trail and a full-deflection radial envelope in 36 sectors."""
@@ -165,7 +167,7 @@ class InputTester(QWidget):
             col.addWidget(name)
             reading = self.axis_readings[i]
             reading.setAlignment(Qt.AlignCenter)
-            reading.setStyleSheet(f'font: 11px "Cascadia Code", Consolas; color: {TOKENS["ink_2"]}; font-weight: 600;')
+            reading.setStyleSheet(f'font: 11px {INSTRUMENT_MONO_STACK}; color: {TOKENS["ink_2"]}; font-weight: 600;')
             col.addWidget(reading)
             stick_row.addLayout(col, 1)
         a_layout.addLayout(stick_row, 1)
@@ -201,7 +203,7 @@ class InputTester(QWidget):
 
         self.drift_reading = label(tr('偏移: —'), 11)
         self.drift_reading.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.drift_reading.setStyleSheet(f'font: 11px "Cascadia Code", Consolas; color: {TOKENS["ink"]}; font-weight: 600;')
+        self.drift_reading.setStyleSheet(f'font: 11px {INSTRUMENT_MONO_STACK}; color: {TOKENS["ink"]}; font-weight: 600;')
         drift_info.addWidget(self.drift_reading)
 
         drift_spec = label(tr('静止偏移参考；软件容错可在操作手感中调整。'), 10.5)
@@ -253,7 +255,7 @@ class InputTester(QWidget):
             tile = QLabel(clean_lbl(k))
             tile.setAlignment(Qt.AlignCenter)
             tile.setFixedHeight(30)
-            tile.setStyleSheet(f"background: {TOKENS['void']}; color: {TOKENS['ink_2']}; font: 11px 'Cascadia Code', Consolas; font-weight: 600; border: 1px solid {TOKENS['border']}; border-radius: {TOKENS['r_sm']}px;")
+            tile.setStyleSheet(f"background: {TOKENS['void']}; color: {TOKENS['ink_2']}; font: 11px {INSTRUMENT_MONO_STACK}; font-weight: 600; border: 1px solid {TOKENS['border']}; border-radius: {TOKENS['r_sm']}px;")
             self.btn_grid.addWidget(tile, 0, col_idx)
             self.btn_tiles[k] = tile
 
@@ -261,7 +263,7 @@ class InputTester(QWidget):
             tile = QLabel(clean_lbl(k))
             tile.setAlignment(Qt.AlignCenter)
             tile.setFixedHeight(30)
-            tile.setStyleSheet(f"background: {TOKENS['void']}; color: {TOKENS['ink_2']}; font: 11px 'Cascadia Code', Consolas; font-weight: 600; border: 1px solid {TOKENS['border']}; border-radius: {TOKENS['r_sm']}px;")
+            tile.setStyleSheet(f"background: {TOKENS['void']}; color: {TOKENS['ink_2']}; font: 11px {INSTRUMENT_MONO_STACK}; font-weight: 600; border: 1px solid {TOKENS['border']}; border-radius: {TOKENS['r_sm']}px;")
             self.btn_grid.addWidget(tile, 1, col_idx)
             self.btn_tiles[k] = tile
 
@@ -365,6 +367,29 @@ class InputTester(QWidget):
         dashboard.addWidget(digital_card, 1)
 
         layout.addLayout(dashboard, 1)
+        self._dashboard_layout = dashboard
+        self._card_layouts = (a_layout, d_layout)
+        self._compact_layout = None
+        self._fit_dashboard(self.width())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, '_card_layouts'):
+            self._fit_dashboard(event.size().width())
+
+    def _fit_dashboard(self, width):
+        # Keep all gauges visible at the supported 960px workspace width while
+        # allowing the normal card spacing to return on wider screens.
+        compact = width < 900
+        if compact == self._compact_layout:
+            return
+        self._compact_layout = compact
+        self.layout().setSpacing(10 if compact else 14)
+        self._dashboard_layout.setSpacing(10 if compact else 14)
+        margins = (14, 12, 14, 12) if compact else (18, 16, 18, 16)
+        for card_layout in self._card_layouts:
+            card_layout.setContentsMargins(*margins)
+            card_layout.setSpacing(8 if compact else 12)
 
     def toggle_trace(self, checked):
         self.diagram.trace = checked

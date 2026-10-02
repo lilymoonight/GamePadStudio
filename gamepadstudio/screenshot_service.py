@@ -9,6 +9,7 @@ import struct
 import sys
 import uuid
 import zlib
+from functools import lru_cache
 import mss
 import mss.tools
 
@@ -110,8 +111,28 @@ def _ensure_dpi_awareness():
                 pass
 
 
+@lru_cache(maxsize=1)
+def get_mac_window_backend():
+    from .macos_windows import MacWindowBackend
+    return MacWindowBackend()
+
+
+def configure_window_exclusions(pids):
+    """Exclude this instance's GUI/backend, including separate source processes."""
+    from .macos_windows import configure_window_exclusions as configure
+    configure(pids)
+
+
+def create_mac_capture():
+    from .macos_capture import MacCapture
+    return MacCapture()
+
+
 def get_window_process_name(hwnd) -> str:
     """安全获取指定窗口所属进程名"""
+    if hwnd and sys.platform == 'darwin':
+        window = get_mac_window_backend().window(hwnd)
+        return window.process_name if window else ''
     if not hwnd or sys.platform != 'win32':
         return ''
     pid = wintypes.DWORD()
@@ -147,6 +168,9 @@ def smart_foreground_info():
     智能前台识别：若前台窗口是游戏则直接返回；若当前前台是 GamePad Studio 或桌面，
     则自动穿透扫描 Default 桌面找到真正运行的大型游戏/全屏应用窗口
     """
+    if sys.platform == 'darwin':
+        window = get_mac_window_backend().smart_window()
+        return (window.window_id, window.title) if window else (None, '桌面')
     _ensure_dpi_awareness()
     fg_hwnd, fg_title = foreground_info()
     fg_pname = get_window_process_name(fg_hwnd)
@@ -193,6 +217,9 @@ def smart_foreground_info():
 
 
 def foreground_info():
+    if sys.platform == 'darwin':
+        window = get_mac_window_backend().foreground_window()
+        return (window.window_id, window.title) if window else (None, '桌面')
     _ensure_dpi_awareness()
     if sys.platform != 'win32':
         return None, '桌面'
@@ -206,7 +233,11 @@ def foreground_info():
     return hwnd, title.value or '桌面'
 
 
-def _get_active_monitor_bbox():
+def _get_active_monitor_bbox(monitors=None):
+    if sys.platform == 'darwin':
+        backend = get_mac_window_backend()
+        window = backend.smart_window() or backend.foreground_window()
+        return backend.monitor(window, monitors) if window else None
     _ensure_dpi_awareness()
     if sys.platform != 'win32':
         return None
@@ -240,6 +271,15 @@ def get_target_monitor_bbox(sct, mode: str = 'game') -> dict:
     _ensure_dpi_awareness()
     if mode == 'all':
         return sct.monitors[0]
+    if sys.platform == 'darwin':
+        selected = re.fullmatch(r'monitor_(\d+)', mode)
+        if selected:
+            index = int(selected.group(1))
+            if index < 1 or index >= len(sct.monitors):
+                raise RuntimeError('所选显示器已断开，请重新选择截图屏幕')
+            return sct.monitors[index]
+        active = _get_active_monitor_bbox(sct.monitors[1:])
+        return active or (sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0])
     elif mode == 'monitor_1':
         return sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
     elif mode == 'monitor_2':
@@ -251,7 +291,57 @@ def get_target_monitor_bbox(sct, mode: str = 'game') -> dict:
     return sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
 
 
+def _take_macos_screenshot(save_dir, mode):
+    backend = get_mac_window_backend()
+    window = backend.smart_window()
+    title = window.title if window else '桌面'
+    now = datetime.now()
+    folder = Path(save_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f'DS_{sanitize_filename(title)}_{now:%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:4]}.png'
+    details = {}
+    with create_mac_capture() as capture:
+        if mode == 'window':
+            if window is None:
+                raise RuntimeError('未找到可截图的游戏或应用窗口，请切换到目标窗口')
+            current = backend.verify(window)
+            image = capture.capture_window(current.window_id)
+            backend.verify(current)
+            details = dict(window_id=current.window_id, pid=current.pid,
+                           process_path=current.process_path, bounds_points=current.bounds_points)
+        elif mode == 'all':
+            image = capture.capture_all()
+        else:
+            selected = re.fullmatch(r'monitor_(\d+)', mode)
+            if selected:
+                index = int(selected.group(1))
+                if index < 1 or index >= len(capture.monitors):
+                    raise RuntimeError('所选显示器已断开，请重新选择截图屏幕')
+                monitor = capture.monitors[index]
+            else:
+                monitor = backend.monitor(window, capture.monitors[1:]) if window else None
+                monitor = monitor or (capture.monitors[1] if len(capture.monitors) > 1 else None)
+            if not monitor or not monitor.get('display_id'):
+                raise RuntimeError('未找到可截图的 macOS 显示器')
+            image = capture.capture_display(monitor['display_id'])
+            details = dict(display_id=monitor['display_id'], bounds_points={
+                key: monitor[key] for key in ('left', 'top', 'width', 'height')})
+        if image.width < 1 or image.height < 1:
+            raise RuntimeError('macOS 捕获未返回有效图像')
+        image.save(path, format='PNG')
+    metadata = dict(title=title, created=now.isoformat(), width=image.width, height=image.height,
+                    mode=mode, favorite=False, capture_method='ScreenCaptureKit', **details)
+    embed_png_metadata(path, metadata)
+    return str(path)
+
+
 def take_screenshot(save_dir, toast_duration_ms=0, mode='game'):
+    if sys.platform == 'darwin':
+        from .macos_permissions import screen_capture_permission_status
+        permission = screen_capture_permission_status()
+        if not permission['granted']:
+            raise PermissionError(permission['reason'])
+        return _take_macos_screenshot(save_dir, mode)
     folder = Path(save_dir)
     folder.mkdir(parents=True, exist_ok=True)
     _ensure_dpi_awareness()
@@ -387,4 +477,3 @@ def delete_capture(path):
     except OSError:
         pass
     return deleted
-

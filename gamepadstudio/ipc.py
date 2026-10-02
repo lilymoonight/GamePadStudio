@@ -1,11 +1,15 @@
 """User/session-scoped local IPC. No network listener and no arbitrary execution RPC."""
 import ctypes
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import subprocess
 import sys
+import tempfile
+import time
 from PySide6.QtCore import QObject, QTimer, Signal, QLockFile
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
@@ -23,7 +27,12 @@ def _encode_message(message, maximum):
 
 
 def default_root():
-    local_appdata = Path(os.environ.get('LOCALAPPDATA',str(Path.home())))
+    if sys.platform == 'darwin':
+        local_appdata = Path.home() / 'Library' / 'Application Support'
+    elif sys.platform == 'win32':
+        local_appdata = Path(os.environ.get('LOCALAPPDATA',str(Path.home())))
+    else:
+        local_appdata = Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local' / 'share')))
     new_dir = local_appdata / 'GamePadStudio'
     old_dir = local_appdata / 'DualSenseStudio'
     if not new_dir.exists() and old_dir.exists():
@@ -41,9 +50,19 @@ def default_root():
 
 
 def endpoint(root, role='agent', legacy=False):
-    session=ctypes.c_ulong()
-    ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(),ctypes.byref(session))
-    identity=f'{Path(root).resolve()}|{os.environ.get("USERNAME","")}|{session.value}'.casefold()
+    if sys.platform == 'win32':
+        session=ctypes.c_ulong()
+        ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(),ctypes.byref(session))
+        identity=f'{Path(root).resolve()}|{os.environ.get("USERNAME","")}|{session.value}'.casefold()
+    elif sys.platform == 'darwin':
+        # Finder and different Terminal windows can have different POSIX
+        # sessions while sharing the same configuration and process lock.
+        # Keep one listener per user's data root across all launch methods.
+        identity=f'{Path(root).resolve()}|{os.getuid()}'
+    else:
+        # Spawned UI/backend processes inherit the session. Do not use PID or
+        # USER/USERNAME, which are unstable or can be supplied by another user.
+        identity=f'{Path(root).resolve()}|{os.getuid()}|{os.getsid(0)}'
     prefix = 'DualSenseStudio-' if legacy else 'GamePadStudio-'
     return prefix+role+'-'+hashlib.sha256(identity.encode()).hexdigest()[:20]
 
@@ -53,22 +72,27 @@ def command_line(root, *args):
         command=[sys.executable]
     else:
         project_root = Path(__file__).resolve().parents[1]
-        venv_pythonw = project_root / '.venv' / 'Scripts' / 'pythonw.exe'
-        if venv_pythonw.exists():
-            python = venv_pythonw
+        if sys.platform == 'win32':
+            venv_pythonw = project_root / '.venv' / 'Scripts' / 'pythonw.exe'
+            if venv_pythonw.exists():
+                python = venv_pythonw
+            else:
+                python = Path(sys.executable).with_name('pythonw.exe')
         else:
-            python = Path(sys.executable).with_name('pythonw.exe')
+            python = Path(sys.executable)
         command = [str(python), str(project_root / 'main.py')]
     return [*command,'--data-dir',str(Path(root).resolve()),*args]
 
 
 def spawn(root,*args):
-    flags = subprocess.CREATE_NO_WINDOW
+    options = {}
     if sys.platform == 'win32':
+        flags = subprocess.CREATE_NO_WINDOW
         flags |= getattr(subprocess, 'DETACHED_PROCESS', 0x00000008)
         flags |= getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x00000200)
+        options['creationflags'] = flags
     return subprocess.Popen(command_line(root,*args),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,creationflags=flags,close_fds=True)
+                            stderr=subprocess.DEVNULL,close_fds=True,**options)
 
 
 def request(root, command, role='agent', timeout=1200, **values):
@@ -135,8 +159,8 @@ def is_process_alive(pid: int) -> bool:
         try:
             os.kill(pid, 0)
             return True
-        except OSError:
-            return False
+        except OSError as exc:
+            return exc.errno == errno.EPERM
 
 
 def terminate_pid(pid: int, timeout_ms: int = 800) -> bool:
@@ -168,9 +192,14 @@ def terminate_pid(pid: int, timeout_ms: int = 800) -> bool:
         try:
             import signal
             os.kill(pid, signal.SIGKILL)
+            deadline = time.monotonic() + max(0, timeout_ms) / 1000
+            while is_process_alive(pid) and time.monotonic() < deadline:
+                time.sleep(.01)
+            return not is_process_alive(pid)
+        except ProcessLookupError:
             return True
-        except Exception:
-            pass
+        except OSError:
+            return False
     return False
 
 
@@ -210,7 +239,22 @@ class LocalServer(QObject):
     def __init__(self,root,handler,role='agent',parent=None):
         super().__init__(parent);self.handler=handler;self.clients={};self.pending_replies=set()
         self.server=QLocalServer(self);self.server.setSocketOptions(QLocalServer.UserAccessOption)
-        if not self.server.listen(endpoint(root,role)):raise RuntimeError(self.server.errorString())
+        name = endpoint(root,role)
+        if sys.platform != 'win32':
+            # Unix socket files can survive a crash. A live listener must never
+            # be unlinked; probe before listen because Qt's UserAccessOption
+            # can replace a socket path. Startup also holds its QLockFile.
+            probe = QLocalSocket()
+            probe.connectToServer(name)
+            active = probe.waitForConnected(100)
+            stale = probe.error() == QLocalSocket.ConnectionRefusedError
+            probe.abort()
+            if active:
+                raise RuntimeError('当前用户会话已有 GamePad Studio 本地服务。')
+            if stale:
+                QLocalServer.removeServer(name)
+        if not self.server.listen(name):
+            raise RuntimeError(self.server.errorString())
         self.server.newConnection.connect(self.accept)
 
     def accept(self):
@@ -341,14 +385,121 @@ class RemoteDevice:
     def close(self):self.client.close()
     def led(self,color):return self.client.send('led',color=color)
     def rumble(self,strength):return self.client.send('rumble',strength=strength)
+    def controller_isolation_status(self):
+        return self.client.status.get('controller_isolation',
+            {'supported':False,'active':False,'restore_pending':False,'reason':'后台尚未提供隔离状态'})
 
 
 RUN_KEY=r'Software\Microsoft\Windows\CurrentVersion\Run'
 RUN_NAME='GamePadStudioAgent'
 LEGACY_RUN_NAME='DualSenseStudioAgent'
+MAC_AGENT_LABEL = 'com.gamepadstudio.agent'
 
 
-def autostart_enabled():
+def _launch_agent_path():
+    return Path.home() / 'Library' / 'LaunchAgents' / f'{MAC_AGENT_LABEL}.plist'
+
+
+def _read_launch_agent():
+    try:
+        with _launch_agent_path().open('rb') as source:
+            value = plistlib.load(source)
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return {}
+
+
+def _launchctl(*args, check=True):
+    result = subprocess.run(['/bin/launchctl', *args], capture_output=True,
+                            text=True, timeout=10, check=False)
+    if check and result.returncode:
+        detail = (result.stderr or result.stdout or '').strip()
+        raise OSError('无法更新 macOS 登录启动项' + (f'：{detail}' if detail else ''))
+    return result
+
+
+def _write_launch_agent(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + '.', delete=False) as output:
+            temporary = Path(output.name)
+            output.write(data)
+        # NamedTemporaryFile creates a private file; replace atomically so
+        # launchd never encounters a partially written property list.
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _set_mac_autostart(root, enabled):
+    """Mutate this user's login job only after the explicit settings action."""
+    path = _launch_agent_path()
+    domain = f'gui/{os.getuid()}'
+    service = f'{domain}/{MAC_AGENT_LABEL}'
+    loaded = _launchctl('print', service, check=False).returncode == 0
+    if not enabled:
+        if loaded:
+            _launchctl('bootout', service)
+        path.unlink(missing_ok=True)
+        return
+    arguments = command_line(root, '--agent')
+    document = {'Label': MAC_AGENT_LABEL, 'ProgramArguments': arguments,
+                'RunAtLoad': True, 'ProcessType': 'Interactive',
+                'LimitLoadToSessionType': 'Aqua',
+                'WorkingDirectory': str(Path(arguments[0]).parent),
+                'ThrottleInterval': 10}
+    previous = path.read_bytes() if path.exists() else None
+    # A second click must not restart the backend currently owning held keys.
+    if loaded and _read_launch_agent() == document:
+        _launchctl('enable', service)
+        return
+    if loaded:
+        _launchctl('bootout', service)
+    try:
+        _write_launch_agent(path, plistlib.dumps(document, sort_keys=False))
+        _launchctl('enable', service)
+        _launchctl('bootstrap', domain, str(path))
+    except Exception:
+        if previous is None:
+            path.unlink(missing_ok=True)
+        else:
+            _write_launch_agent(path, previous)
+            if loaded:
+                # Preserve the previously configured job after a failed edit.
+                try:
+                    _launchctl('bootstrap', domain, str(path))
+                except (OSError, subprocess.SubprocessError):
+                    pass
+        raise
+
+
+def autostart_supported():
+    return sys.platform in ('win32', 'darwin')
+
+
+def autostart_enabled(root=None):
+    if not autostart_supported():
+        return False
+    if sys.platform == 'darwin':
+        value = _read_launch_agent()
+        arguments = value.get('ProgramArguments', [])
+        if (value.get('Label') != MAC_AGENT_LABEL or value.get('RunAtLoad') is not True
+                or value.get('Disabled') is True or not isinstance(arguments, list)
+                or not arguments or not all(isinstance(item, str) for item in arguments)
+                or not Path(arguments[0]).is_absolute() or '--agent' not in arguments):
+            return False
+        try:
+            data_dir = arguments[arguments.index('--data-dir') + 1]
+            if not Path(data_dir).is_absolute():
+                return False
+            if root is not None:
+                if Path(data_dir).resolve() != Path(root).resolve():
+                    return False
+        except (ValueError, IndexError, OSError):
+            return False
+        return True
     import winreg
     for name in (RUN_NAME, LEGACY_RUN_NAME):
         try:
@@ -361,6 +512,12 @@ def autostart_enabled():
 
 
 def set_autostart(root,enabled):
+    if not autostart_supported():
+        if enabled:
+            raise NotImplementedError('此平台尚未支持开机自动启动。')
+        return
+    if sys.platform == 'darwin':
+        return _set_mac_autostart(root, enabled)
     import winreg
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER,RUN_KEY) as key:
         if enabled:
