@@ -1,5 +1,6 @@
 """Independent, headless mapping process for the interactive Windows user session."""
 from datetime import datetime
+import copy
 import json
 import os
 from pathlib import Path
@@ -15,8 +16,11 @@ from .actions import WindowsActions, launch_command
 from .screenshot_service import take_screenshot
 from .replay_service import ReplayBufferEngine
 from .haptic_engine import HapticEngine
-from .ipc import LocalServer, request, spawn, default_root
+from .ipc import LocalServer, request, spawn, default_root, read_lock_pid
 from .mapping_engine import MappingRuntime
+from .application_profiles import ApplicationProfileResolver, foreground_application
+from .battery_monitor import BatteryMonitor
+from .emergency_hotkey import EmergencyHotkey
 
 
 class Agent(QObject):
@@ -30,6 +34,11 @@ class Agent(QObject):
         self.engine=MappingRuntime(self.actions, self.dispatch)
         self.state=None;self.enabled=bool(self.config.get('mapping_enabled', True));self.suspended_until=0.;self.blocked=set();self.last_touch=None
         self.preview_until = 0.
+        self.application_resolver = ApplicationProfileResolver()
+        self.application_profile = {'automatic': False, 'executable': '',
+                                    'profile': self.config['active_profile']}
+        self.last_application_check = -float('inf')
+        self.battery_monitor = BatteryMonitor()
         self.busy=False;self.last_capture=0.;self.last_buttons=set();self.last_ui=0.;self.closed=False
         self.capture_device_context = None
         self.replay_device_context = None
@@ -37,6 +46,8 @@ class Agent(QObject):
         self.replay_finished.connect(self.on_replay_finished)
         self.replay_busy = False
         self.server=LocalServer(self.root,self.handle)
+        self.emergency_hotkey = EmergencyHotkey(self.emergency_pause, self)
+        self.emergency_hotkey.configure(self.config['emergency_hotkey'])
         self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(4)
         self.scan_timer=QTimer(self);self.scan_timer.timeout.connect(self.scan);self.scan_timer.start(1000)
         self.broadcast_timer=QTimer(self);self.broadcast_timer.timeout.connect(self.broadcast);self.broadcast_timer.start(33)
@@ -122,7 +133,53 @@ class Agent(QObject):
                 'devices':getattr(self.device,'available',[]),
                 'replay':self.replay_engine.get_status() if hasattr(self,'replay_engine') else {},
                 'mapping':self.engine.feedback(), 'mapping_revision':self.config.get('mapping_revision',0),
-                'profile':self.config['active_profile'],'suspended':time.monotonic()<self.suspended_until}
+                'profile':self.config['active_profile'],'suspended':time.monotonic()<self.suspended_until,
+                'application_profile':dict(self.application_profile),
+                'emergency_hotkey':self.emergency_hotkey.status(),
+                'battery_warning':self.battery_monitor.warning(
+                    self.state, enabled=device_config(self.config, self.state)['battery_notifications_enabled'])}
+
+    def update_battery(self, now=None):
+        """Observe current hardware power even while mapping output is paused."""
+        event = self.battery_monitor.sample(
+            self.state, time.monotonic() if now is None else now,
+            enabled=device_config(self.config, self.state)['battery_notifications_enabled'])
+        if event is not None:
+            self.server.broadcast(event)
+            # Structured battery history must not also emit a generic notice.
+            try:
+                row = {'time': datetime.now().isoformat(), **event}
+                with (self.root / 'agent-events.jsonl').open('a', encoding='utf-8') as file:
+                    file.write(json.dumps(row, ensure_ascii=False) + '\n')
+            except (OSError, UnicodeError):
+                pass
+        return event
+
+    def update_application_profile(self, now=None, force=False):
+        """Switch actual output before the next frame without replacing its fallback."""
+        now = time.monotonic() if now is None else now
+        if not force and now - self.last_application_check < .25:
+            return False
+        self.last_application_check = now
+        foreground = foreground_application()
+        protected_pids = {os.getpid(), read_lock_pid(self.root / 'studio.lock')}
+        protected_pids.discard(0)
+        resolved = self.application_resolver.resolve(
+            self.config, self.state, foreground, now,
+            editing=now < self.suspended_until, preview=now < self.preview_until,
+            protected_pids=protected_pids)
+        target = resolved.get('profile', '')
+        changed = target in self.config['profiles'] and target != self.config['active_profile']
+        if changed:
+            self.release()
+            self.config['active_profile'] = target
+            self.config['mapping_revision'] = self.config.get('mapping_revision', 0) + 1
+            self.store.save()
+        resolved['profile'] = self.config['active_profile']
+        self.application_profile = resolved
+        if changed:
+            self.broadcast()
+        return changed
 
     def apply_gamebar_shield(self):
         if self.config.get('gamebar_shield_enabled', False):
@@ -164,6 +221,29 @@ class Agent(QObject):
             self.store.save()
             self.enabled=True
 
+    def emergency_pause(self):
+        """A keyboard escape always stops this agent and never toggles resume."""
+        if self.closed:
+            return
+        error = None
+        try:
+            self.set_enabled(False)
+        except Exception as exc:
+            error = exc
+            # A failed configuration write cannot prevent releasing held output.
+            self.enabled = False
+            self.config['mapping_enabled'] = False
+            try:
+                self.release()
+            except Exception as release_error:
+                error = release_error
+        try:
+            self.log('紧急暂停：映射已暂停' if error is None else
+                     '紧急暂停已生效；保存或释放失败：' + str(error))
+        except (OSError, UnicodeError):
+            pass
+        self.broadcast()
+
     def scan(self):
         try:self.device.scan()
         except Exception as exc:self.log('连接失败：'+str(exc))
@@ -182,7 +262,8 @@ class Agent(QObject):
 
             previous=self.state;self.state=self.device.read()
             identity=lambda s: (s.get('instance_id'),profile_scope(s)) if s else None
-            if identity(previous)!=identity(self.state):
+            device_changed = identity(previous) != identity(self.state)
+            if device_changed:
                 self.release();self.last_buttons=set()
                 self.log('手柄已连接' if self.state else '手柄已断开')
                 # Legacy test/headless clients may provide buttons without an
@@ -197,6 +278,8 @@ class Agent(QObject):
                 inputs = dict(options.get('input') or {})
                 inputs['trigger_curves'] = settings.get('trigger_curves', {})
                 self.engine.blocked.update(self.engine.normalizer.update(self.state, inputs))
+            self.update_application_profile(force=device_changed)
+            self.update_battery()
             if not self.state:
                 self.engine.update(None, self.config, enabled=False);return
             buttons=set(self.state['buttons']);new=buttons-self.last_buttons;self.last_buttons=buttons
@@ -223,6 +306,38 @@ class Agent(QObject):
         if command == 'preview_curve' and 'instance_id' in message:
             if message['instance_id'] != (self.state or {}).get('instance_id'):
                 raise ValueError('输入设备已变化，请重新打开当前设备设置')
+        importing = (command == 'mapping_change' and
+                     isinstance(message.get('change'), dict) and
+                     message['change'].get('op') == 'import_profile')
+        calibrating = (command == 'mapping_change' and
+                       isinstance(message.get('change'), dict) and
+                       message['change'].get('op') == 'pointer_deadzone')
+        swapping = (command == 'mapping_change' and
+                    isinstance(message.get('change'), dict) and
+                    message['change'].get('op') == 'swap_bindings')
+        if swapping:
+            if (not self.state or self.state.get('connected') is False
+                    or type(self.state.get('instance_id')) is not int or self.state['instance_id'] < 0):
+                raise ValueError('请先连接手柄，再交换绑定')
+            if (message.get('device_scope') != profile_scope(self.state) or
+                    type(message.get('instance_id')) is not int or
+                    message['instance_id'] != self.state['instance_id']):
+                raise ValueError('输入设备已变化，请重新打开交换绑定')
+        if calibrating:
+            if not self.state or type(self.state.get('instance_id')) is not int:
+                raise ValueError('请先连接提供右摇杆的手柄，再应用测量结果')
+            if (message.get('device_scope') != profile_scope(self.state) or
+                    type(message.get('instance_id')) is not int or
+                    message['instance_id'] != self.state['instance_id']):
+                raise ValueError('输入设备已变化，请重新测量右摇杆')
+        if importing:
+            if not self.state or self.state.get('instance_id') is None:
+                raise ValueError('请先连接手柄，再导入预设')
+            if (message.get('device_scope') != profile_scope(self.state) or
+                    'instance_id' not in message or
+                    type(message['instance_id']) is not int or
+                    message['instance_id'] != self.state['instance_id']):
+                raise ValueError('输入设备已变化，请重新预览导入内容')
         if command=='status':return self.status()
         if command in ('pause','resume'):
             self.set_enabled(command=='resume');self.log('映射已恢复' if self.enabled else '映射已暂停')
@@ -233,15 +348,26 @@ class Agent(QObject):
         elif command=='mapping_change':
             self.release()
             latest = ConfigStore(self.root)
-            data = latest.apply_mapping_change(message['change'], self.state)
+            latest.apply_mapping_change(message['change'], self.state)
             self.store = latest; self.config = latest.data
+            if message['change'].get('op') in ('select', 'create'):
+                self.application_resolver.manual_selection(self.config['active_profile'])
+                self.application_profile = {'automatic': False,
+                                            'executable': self.application_profile.get('executable', ''),
+                                            'profile': self.config['active_profile']}
+            if not importing and not calibrating and not swapping:
+                self.update_application_profile(force=True)
             self.broadcast()
-            return {'config': data}
+            result = {'config': copy.deepcopy(self.config)}
+            if importing:
+                result['imported_profile'] = latest.last_imported_profile
+            return result
         elif command=='reload':
             self.release()
             previous_config = self.config
             self.store=ConfigStore(self.root)
             self.config=self.store.data
+            self.emergency_hotkey.configure(self.config['emergency_hotkey'])
             self.apply_gamebar_shield()
             self.apply_device_cloaking()
             if hasattr(self, 'replay_engine'):
@@ -263,6 +389,7 @@ class Agent(QObject):
                 if replay_enabled and (replay_changed or newly_enabled):
                     self.replay_engine.start()
             self.apply_device_settings()
+            self.update_application_profile(force=True)
         elif command=='set_device_cloaking':
             if not self.state or not self.state.get('vendor'):
                 raise ValueError('请先连接支持设备隐身的手柄')
@@ -445,6 +572,8 @@ class Agent(QObject):
         # Release input BEFORE waiting for recording workers or other teardown.
         try:self.release()
         except Exception as exc:self.log('释放输入失败：'+str(exc))
+        try:self.emergency_hotkey.close()
+        except Exception:pass
         try:self.engine.close()
         except Exception as exc:self.log('关闭映射失败：'+str(exc))
         if hasattr(self, 'replay_engine'):

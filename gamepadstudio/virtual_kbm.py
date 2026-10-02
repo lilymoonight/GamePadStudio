@@ -229,6 +229,7 @@ class VirtualMouseThread(threading.Thread):
         self.sensitivity = 28.0
         self.y_ratio = 0.70
         self.edge_boost = 1.70
+        self.invert_y = False
         
         # 亚像素积分累加器
         self.acc_x = 0.0
@@ -236,14 +237,24 @@ class VirtualMouseThread(threading.Thread):
         self.outer_hold_time = 0.0
 
     def configure(self, settings: Dict[str, Any]):
+        settings = settings if isinstance(settings, dict) else {}
         with self._lock:
-            self.deadzone = settings.get("deadzone", 0.06)
-            self.sensitivity = settings.get("sensitivity", 28.0)
-            self.y_ratio = settings.get("y_ratio", 0.70)
-            self.edge_boost = settings.get("edge_boost", 1.70)
+            values = (settings.get("deadzone", 0.06), settings.get("sensitivity", 28.0),
+                      settings.get("y_ratio", 0.70), settings.get("edge_boost", 1.70),
+                      settings.get("invert_y") is True)
+            previous = (self.deadzone, self.sensitivity, self.y_ratio, self.edge_boost, self.invert_y)
+            self.deadzone, self.sensitivity, self.y_ratio, self.edge_boost, self.invert_y = values
+            if values != previous:
+                self._reset_motion()
+
+    def _reset_motion(self):
+        """Caller holds the motion lock; old fractional direction never leaks."""
+        self.acc_x = self.acc_y = self.outer_hold_time = 0.0
 
     def update_stick(self, rx: float, ry: float, is_desktop: bool = False):
         with self._lock:
+            if is_desktop != self.is_desktop or (rx == 0 and ry == 0):
+                self._reset_motion()
             self.stick_x = rx
             self.stick_y = ry
             self.is_desktop = is_desktop
@@ -259,86 +270,70 @@ class VirtualMouseThread(threading.Thread):
         except Exception:
             pass
         set_system_timer_resolution(True)
-        last_t = time.perf_counter()
-        
-        while self.running:
-            now = time.perf_counter()
-            dt = now - last_t
-            if dt < 0.0019:  # 约 500Hz 限频 (2ms 周期)，保证高频亚像素平滑并避免空转
-                time.sleep(0.001)
-                continue
-            last_t = now
-            dt = min(0.02, dt)
-            
-            with self._lock:
-                rx, ry = self.stick_x, self.stick_y
-                deadzone = self.deadzone
-                sensitivity = self.sensitivity
-                is_desktop = self.is_desktop
-                y_ratio = 1.0 if is_desktop else self.y_ratio
-                boost_max = self.edge_boost
-                is_click_locked = self.click_locked
-
-            mag = math.sqrt(rx * rx + ry * ry)
-            # 桌面点击防抖；游戏中的瞄准/蓄力仍需保留小幅镜头调整。
-            if is_desktop and is_click_locked and mag < 0.35:
-                mag = 0.0
-            
-            if mag > deadzone:
-                # 归一化死区偏移 (0.0 ~ 1.0)
-                norm = min(1.0, (mag - deadzone) / (1.0 - deadzone))
-                
-                # 边缘推满调头动态增益 (当摇杆推向极限区时平滑蓄力加速)
-                if norm >= 0.88:
-                    self.outer_hold_time = min(0.30, self.outer_hold_time + dt)
-                else:
-                    self.outer_hold_time = max(0.0, self.outer_hold_time - dt * 3.0)
-                boost = 1.0 + (boost_max - 1.0) * (self.outer_hold_time / 0.30)
-                
-                # 工业级混合幂次曲线：25% 线性响应保底 (低推力即刻跟手，桌面选点与微距瞄准清脆敏锐) + 75% 幂律顺滑转镜
-                power_exp = 1.5 if is_desktop else 2.0
-                curve = 0.25 * norm + 0.75 * (norm ** power_exp)
-                effective_sens = sensitivity * (1.20 if is_desktop else 1.0)
-                speed = effective_sens * curve * boost * 60.0  # 像素/秒
-                
-                target_vx = (rx / mag) * speed
-                target_vy = (ry / mag) * speed * y_ratio
-                
-                # 边缘守护节流检查 (仅在 3D 游戏处于前台时检查)
-                if not is_desktop and (not hasattr(self, '_last_guard') or (now - self._last_guard > 0.10)):
-                    self._last_guard = now
-                    if hasattr(self.actions, 'guard_cursor_edge'):
+        try:
+            last_t = time.perf_counter()
+            while self.running:
+                now = time.perf_counter()
+                dt = now - last_t
+                if dt < 0.0019:  # About 500 Hz; retain the existing pacing.
+                    time.sleep(0.001)
+                    continue
+                last_t = now
+                dt = min(0.02, dt)
+                # Setters and actual output share a short critical section.
+                # After a change returns, no frame can send the old direction.
+                with self._lock:
+                    if not self.running:
+                        continue
+                    rx, ry = self.stick_x, self.stick_y
+                    mag = math.sqrt(rx * rx + ry * ry)
+                    desktop = self.is_desktop
+                    if desktop and self.click_locked and mag < 0.35:
+                        mag = 0.0
+                    if mag <= self.deadzone:
+                        self._reset_motion()
+                        continue
+                    norm = min(1.0, (mag - self.deadzone) / (1.0 - self.deadzone))
+                    if norm >= 0.88:
+                        self.outer_hold_time = min(0.30, self.outer_hold_time + dt)
+                    else:
+                        self.outer_hold_time = max(0.0, self.outer_hold_time - dt * 3.0)
+                    boost = 1.0 + (self.edge_boost - 1.0) * (self.outer_hold_time / 0.30)
+                    power_exp = 1.5 if desktop else 2.0
+                    curve = 0.25 * norm + 0.75 * norm ** power_exp
+                    effective_sens = self.sensitivity * (1.20 if desktop else 1.0)
+                    speed = effective_sens * curve * boost * 60.0
+                    y_ratio = 1.0 if desktop else self.y_ratio
+                    direction_y = -1.0 if self.invert_y and not desktop else 1.0
+                    target_vx = rx / mag * speed
+                    target_vy = ry / mag * speed * y_ratio * direction_y
+                    if not desktop and (not hasattr(self, '_last_guard') or now - self._last_guard > 0.10):
+                        self._last_guard = now
+                        if hasattr(self.actions, 'guard_cursor_edge'):
+                            try:
+                                self.actions.guard_cursor_edge()
+                            except Exception:
+                                pass
+                    self.acc_x += target_vx * dt
+                    self.acc_y += target_vy * dt
+                    dx, dy = int(self.acc_x), int(self.acc_y)
+                    if dx or dy:
                         try:
-                            self.actions.guard_cursor_edge()
+                            self.actions.move_mouse(dx, dy)
                         except Exception:
                             pass
-            else:
-                target_vx = 0.0
-                target_vy = 0.0
-                self.outer_hold_time = 0.0
-                # 摇杆回正瞬间：强制清零亚像素累加器，回正即停，绝对不带任何残余漂移
-                self.acc_x = 0.0
-                self.acc_y = 0.0
-
-            # 亚像素时域时钟积分
-            self.acc_x += target_vx * dt
-            self.acc_y += target_vy * dt
-            
-            dx = int(self.acc_x)
-            dy = int(self.acc_y)
-            
-            if dx != 0 or dy != 0:
-                try:
-                    self.actions.move_mouse(dx, dy)
-                except Exception:
-                    pass
-                self.acc_x -= dx
-                self.acc_y -= dy
-            
-        set_system_timer_resolution(False)
+                        self.acc_x -= dx
+                        self.acc_y -= dy
+        finally:
+            with self._lock:
+                self._reset_motion()
+            set_system_timer_resolution(False)
 
     def stop(self):
-        self.running = False
+        with self._lock:
+            self.running = False
+            self.stick_x = self.stick_y = 0.0
+            self._reset_motion()
 
 
 class KeyPressState:

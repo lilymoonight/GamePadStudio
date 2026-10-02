@@ -1,4 +1,4 @@
-"""Shared mapping editor and live binding list for pure Gamepad-to-Gamepad macro production."""
+"""Shared mapping editors and live binding lists."""
 import copy
 import time
 from PySide6.QtCore import Qt, QTimer
@@ -228,7 +228,7 @@ class BindingDialog(QDialog):
         self.available_inputs = input_sources(owner.snapshot)
 
         from .i18n import tr
-        title = tr('编辑触摸板手势') if self.touch_gesture else ('编辑手柄按键与原生宏' if self.mode == 'gamepad' else '编辑虚拟键鼠映射')
+        title = tr('编辑触摸板手势') if self.touch_gesture else tr('编辑手柄输出配置' if self.mode == 'gamepad' else '编辑虚拟键鼠映射')
         self.setWindowTitle(title)
         self.setMinimumWidth(520 if self.touch_gesture else 660)
         self.normalizer = InputNormalizer()
@@ -248,7 +248,7 @@ class BindingDialog(QDialog):
         prof_title.setStyleSheet(f"font-size: 13.5px; font-weight: 700; color: {TOKENS['accent'] if self.mode == 'gamepad' else TOKENS['cyan']};")
         top_bar.addWidget(prof_title, 1)
 
-        badge_text = "手柄 ➔ 手柄 原生宏生产" if self.mode == 'gamepad' else "手柄 ➔ 虚拟键鼠 映射生产"
+        badge_text = tr('手柄输出配置') if self.mode == 'gamepad' else '手柄 ➔ 虚拟键鼠 映射生产'
         if self.touch_gesture:
             badge_text = tr('触摸板 → 键鼠与快捷动作')
         macro_badge = QLabel(badge_text)
@@ -483,7 +483,7 @@ class BindingDialog(QDialog):
         if self.touch_gesture:
             tip_text = tr('每个手势触发一次动作；按下触摸板仍使用独立按键映射。')
         elif self.mode == 'gamepad':
-            tip_text = '💡 纯手柄原生宏：无需额外背键，通过原始手柄按键的短按、长按与组合键，即可直接触发全新手柄单键重映射或组合宏。'
+            tip_text = tr('手柄输出配置；当前未接入系统虚拟手柄后端。')
         else:
             tip_text = '💡 虚拟键鼠模拟：将物理手柄输入无缝转换为真实键盘按键、鼠标点击、滚轮或应用快捷键。'
         tip_lbl = QLabel(tip_text)
@@ -571,15 +571,15 @@ class BindingDialog(QDialog):
                 action.blockSignals(False)
                 action.currentIndexChanged.emit(action.currentIndex())
         self.setWindowTitle(tr('编辑触摸板手势') if touch else
-                            '编辑手柄按键与原生宏' if self.mode == 'gamepad' else '编辑虚拟键鼠映射')
+                            tr('编辑手柄输出配置' if self.mode == 'gamepad' else '编辑虚拟键鼠映射'))
         self.mode_badge.setText(tr('触摸板 → 键鼠与快捷动作') if touch else
-                                '手柄 ➔ 手柄 原生宏生产' if self.mode == 'gamepad' else '手柄 ➔ 虚拟键鼠 映射生产')
+                                tr('手柄输出配置') if self.mode == 'gamepad' else '手柄 ➔ 虚拟键鼠 映射生产')
         if touch:
             self.tip_label.setText(tr('每个手势触发一次动作；按下触摸板仍使用独立按键映射。'))
         elif self.mode == 'kbm':
             self.tip_label.setText(tr('选择手柄按键或触摸手势，也可以点击录入后实际操作。'))
         else:
-            self.tip_label.setText(tr('手柄按键支持原生映射；触摸手势可绑定键鼠或快捷动作。'))
+            self.tip_label.setText(tr('手柄输出配置；当前未接入系统虚拟手柄后端。'))
 
     @staticmethod
     def _device_context(state):
@@ -778,12 +778,14 @@ class BindingList(QWidget):
         for name, title, symbol, callback in [
             ('add_button', '添加映射', 'plus', self.add),
             ('edit_button', '编辑', 'edit', self.edit),
+            ('swap_button', '交换', None, self.swap),
             ('clear_button', '清除', 'trash', self.clear),
         ]:
             btn = QPushButton(tr(title))
             btn.setObjectName('pill')
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setIcon(glyph(symbol, TOKENS['ink_2']))
+            if symbol:
+                btn.setIcon(glyph(symbol, TOKENS['ink_2']))
             btn.setAccessibleName(tr(title))
             btn.setToolTip(tr(title))
             btn.clicked.connect(callback)
@@ -814,6 +816,9 @@ class BindingList(QWidget):
         selected = bool(self.list.selectedItems())
         self.edit_button.setEnabled(selected)
         self.clear_button.setEnabled(selected)
+        from .mapping_swap_ui import can_swap_bindings
+        first = self.list.currentItem().data(Qt.UserRole) if self.list.currentItem() else None
+        self.swap_button.setEnabled(selected and can_swap_bindings(self.owner, self.get_profile_name(), first))
 
     def get_profile_name(self):
         if self.profile_getter:
@@ -860,6 +865,14 @@ class BindingList(QWidget):
         if self.list.currentItem():
             profile_name = self.get_profile_name()
             self.owner.mapping_change({'op': 'unbind', 'trigger': self.list.currentItem().data(Qt.UserRole), 'profile': profile_name})
+
+    def swap(self):
+        from .mapping_swap_ui import can_swap_bindings
+        if self.list.currentItem():
+            profile_name = self.get_profile_name()
+            first = self.list.currentItem().data(Qt.UserRole)
+            if can_swap_bindings(self.owner, profile_name, first):
+                self.owner.open_mapping_swap(profile_name, first)
 
     def feedback(self, data):
         active = set(data.get('active', []))

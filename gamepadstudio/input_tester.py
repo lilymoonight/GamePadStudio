@@ -71,7 +71,7 @@ def card_heading(title, symbol, color):
 class InputTester(QWidget):
     """Real-time diagnostic dashboard inspired by GamepadTester.cn."""
 
-    def __init__(self, show_events, send_rumble=None):
+    def __init__(self, show_events, send_rumble=None, measure_stick=None):
         super().__init__()
         self.send_rumble = send_rumble
         self.identity = None
@@ -138,7 +138,18 @@ class InputTester(QWidget):
         a_layout.setContentsMargins(18, 16, 18, 16)
         a_layout.setSpacing(12)
 
-        a_layout.addLayout(card_heading(tr('摇杆坐标与运动轨迹'), 'circle', TOKENS['accent']))
+        analog_heading = card_heading(tr('摇杆坐标与运动轨迹'), 'circle', TOKENS['accent'])
+        self.measure_stick_button = QPushButton(tr('RS 静止测量'))
+        self.measure_stick_button.setObjectName('testAction')
+        self.measure_stick_button.setStyleSheet('font-size: 11px; min-height: 20px; padding: 0 4px; border: none; background: transparent;')
+        self.measure_stick_button.setAccessibleName(tr('右摇杆静止测量'))
+        self.measure_stick_button.setToolTip(tr('松开右摇杆，测量偏移并建议居中容错'))
+        self.measure_stick_button.setEnabled(False)
+        self.measure_stick_button.setVisible(measure_stick is not None)
+        if measure_stick is not None:
+            self.measure_stick_button.clicked.connect(measure_stick)
+        analog_heading.addWidget(self.measure_stick_button)
+        a_layout.addLayout(analog_heading)
 
         # Dual Stick Radars
         stick_row = QHBoxLayout()
@@ -193,7 +204,7 @@ class InputTester(QWidget):
         self.drift_reading.setStyleSheet(f'font: 11px "Cascadia Code", Consolas; color: {TOKENS["ink"]}; font-weight: 600;')
         drift_info.addWidget(self.drift_reading)
 
-        drift_spec = label(tr('硬件安全死区阈值: 12% 刻度参考'), 10.5)
+        drift_spec = label(tr('静止偏移参考；软件容错可在操作手感中调整。'), 10.5)
         drift_spec.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         drift_spec.setStyleSheet(f'color: {TOKENS["ink_3"]};')
         drift_info.addWidget(drift_spec)
@@ -394,6 +405,8 @@ class InputTester(QWidget):
 
     def update_state(self, state, collect=True):
         self.state = state
+        from .stick_calibration import supports_right_stick
+        self.measure_stick_button.setEnabled(supports_right_stick(state))
         rumble_supported = bool(state and state.get('rumble'))
         for button in self.rumble_buttons:
             button.setEnabled(rumble_supported)

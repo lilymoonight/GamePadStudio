@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import re
 import time
@@ -19,12 +20,12 @@ DEVICE_SETTING_KEYS = ('led', 'rumble', 'touch_mouse', 'long_press', 'deadzone',
                        'haptic_engine_enabled', 'device_cloaking_enabled',
                        'trigger_curves', 'rumble_curves', 'trigger_rumble_curves',
                        'trigger_rumble_enabled', 'touch_gestures_enabled', 'touch_scroll',
-                       'touch_gesture_sensitivity')
+                       'touch_gesture_sensitivity', 'battery_notifications_enabled')
 DEVICE_SETTING_DEFAULTS = {'led': '#5686ff', 'rumble': .35, 'touch_mouse': False,
                            'long_press': .65, 'deadzone': .10,
                            'capture_haptics_enabled': True, 'haptic_intensity': 1.0,
                            'haptic_profile': 'crisp', 'haptic_engine_enabled': True,
-                           'device_cloaking_enabled': True}
+                           'device_cloaking_enabled': True, 'battery_notifications_enabled': True}
 DEVICE_SETTING_DEFAULTS.update({key: normalize_curve_channels(key) for key in CURVE_CHANNELS})
 DEVICE_SETTING_DEFAULTS['trigger_rumble_enabled'] = False
 DEVICE_SETTING_DEFAULTS.update(touch_gestures_enabled=False, touch_scroll=False,
@@ -36,6 +37,69 @@ def profile_scope(state):
     if not state:
         return OFFLINE_PROFILE_SCOPE
     return str(state.get('device_key') or state.get('profile_key') or state.get('family') or 'generic')
+
+
+def pointer_input_signature(state):
+    """Describe reported inputs only after validating actual RS axes and data."""
+    from .stick_calibration import supports_right_stick
+    from .mapping_engine import input_sources
+    from .profile_transfer import _device_source
+    if not supports_right_stick(state):
+        raise ValueError('当前设备未提供有效的右摇杆双轴，请重新连接或测量')
+    source = _device_source(state)
+    return dict(source, model=source.get('model', ''), inputs=sorted(input_sources(state)))
+
+
+def mapping_input_signature(state):
+    """Describe a connected controller's reported inputs without requiring sticks."""
+    from .mapping_engine import input_sources
+    from .profile_transfer import _device_source
+    if (not isinstance(state, dict) or not state or state.get('connected') is False
+            or type(state.get('instance_id')) is not int or state['instance_id'] < 0):
+        raise ValueError('请先连接手柄，再交换绑定')
+    source = _device_source(state)
+    return dict(source, model=source.get('model', ''), inputs=sorted(input_sources(state)))
+
+
+def swap_binding_entry(config, state, profile, trigger):
+    """Snapshot one full effective binding, including its device timing default."""
+    from .mapping_engine import canonical_trigger, effective_mappings, input_sources, validate_mappings
+    mapping_input_signature(state)
+    key = canonical_trigger(trigger)
+    if not set(key.split('+')) <= set(input_sources(state)):
+        raise ValueError('请选择当前手柄支持的输入按键')
+    profiles, owners = config.get('profiles'), config.get('profile_devices')
+    if not isinstance(profiles, dict) or profile not in profiles:
+        raise ValueError('预设已删除，请重新选择')
+    if not isinstance(owners, dict) or owners.get(profile) != profile_scope(state):
+        raise ValueError('该预设不属于当前输入设备')
+    if not isinstance(profiles[profile], dict):
+        raise ValueError('按键配置格式错误')
+    resolved = device_config(config, state)
+    entry = effective_mappings(resolved, state, profile).get(key, {})
+    if not isinstance(entry, dict) or set(entry) - {'short', 'long', 'long_press'}:
+        raise ValueError('按键配置包含不支持的内容，请先编辑该绑定')
+    threshold = entry.get('long_press', resolved.get('long_press', .65))
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+        raise ValueError('长按时长应在 0.15 至 3 秒之间')
+    try:
+        valid = math.isfinite(threshold) and .15 <= threshold <= 3.
+    except (ValueError, OverflowError):
+        valid = False
+    if not valid:
+        raise ValueError('长按时长应在 0.15 至 3 秒之间')
+    try:
+        result = validate_mappings({key: entry})[key]
+    except (TypeError, OverflowError) as exc:
+        raise ValueError('按键配置格式错误') from exc
+    for gesture in ('short', 'long'):
+        result[gesture].setdefault('action', 'none')
+    if (key in ('TP:scroll_up', 'TP:scroll_down') and resolved.get('touch_scroll')
+            and result['short']['action'] == 'none'):
+        result['short'] = dict(result['short'], action='wheel',
+                               value='up' if key == 'TP:scroll_up' else 'down')
+    result['long_press'] = float(threshold)
+    return result
 
 
 def device_config(config, state):
@@ -52,6 +116,8 @@ def device_config(config, state):
     resolved['trigger_rumble_enabled'] = resolved.get('trigger_rumble_enabled') is True
     for key in ('touch_gestures_enabled', 'touch_scroll'):
         resolved[key] = resolved.get(key) is True
+    if type(resolved.get('battery_notifications_enabled')) is not bool:
+        resolved['battery_notifications_enabled'] = True
     resolved['touch_gesture_sensitivity'] = normalize_touch_sensitivity(resolved.get('touch_gesture_sensitivity'))
     return resolved
 
@@ -68,7 +134,7 @@ NIKKI_PROFILE_OPTIONS = {'right_stick_mouse': True,
                                    'walk_press': .62, 'walk_release': .72,
                                    'chord_window': .055},
                          'mouse': {'mode': 'game', 'sensitivity': 24.0, 'deadzone': .09,
-                                   'y_ratio': .70, 'edge_boost': 1.45}}
+                                   'y_ratio': .70, 'edge_boost': 1.45, 'invert_y': False}}
 
 BUTTONS = {0: '×  交叉', 1: '○  圆圈', 2: '□  方块', 3: '△  三角',
            4: 'Create', 5: 'PS', 6: 'Options', 7: 'L3', 8: 'R3',
@@ -144,6 +210,7 @@ def get_buttons(lang=None):
 
 
 def default_config(root: Path):
+    from .emergency_hotkey import DEFAULT_SHORTCUT
     from .kbm_mapper import NIKKI_PROFILE_NAME, NIKKI_LAYOUT_VERSION, infinity_nikki_defaults
     base = {'4': {'short': {'action': 'capture'}, 'long': {'action': 'replay_record'}},
             '5': {'short': {'action': 'home'}, 'long': {'action': 'none'}}}
@@ -168,6 +235,8 @@ def default_config(root: Path):
             'profile_devices': {NIKKI_PROFILE_NAME: OFFLINE_PROFILE_SCOPE},
             'profile_sources': {NIKKI_PROFILE_NAME: NIKKI_PROFILE_NAME},
             'device_settings': {},
+            'application_profiles': {},
+            'emergency_hotkey': {'enabled': False, 'shortcut': DEFAULT_SHORTCUT},
             'save_dir': str(root / 'Captures'), 'capture_mode': 'game', 'cooldown': .5,
             'long_press': .65, 'deadzone': .10, 'rumble': .35, 'led': '#5686ff',
             'touch_mouse': False, 'close_to_tray': False, 'mapping_enabled': True, 'controller_profiles':{}, 'controller_favorites':[], 'preferred_controller':'',
@@ -222,6 +291,11 @@ class ConfigStore:
                                                  if name in self.data['profiles'] and isinstance(source, str)}
                 self.data['device_settings'] = {scope: options for scope, options in self.data['device_settings'].items()
                                                if isinstance(scope, str) and isinstance(options, dict)}
+                application_profiles = self.data.get('application_profiles', {})
+                self.data['application_profiles'] = {
+                    scope: options for scope, options in application_profiles.items()
+                    if isinstance(scope, str) and isinstance(options, dict)
+                } if isinstance(application_profiles, dict) else {}
                 self.data['nikki_profile_layouts'] = {
                     name: value for name, value in self.data['nikki_profile_layouts'].items()
                     if name in self.data['profiles'] and isinstance(value, dict)}
@@ -276,6 +350,8 @@ class ConfigStore:
                 self.warning = f'配置无法读取，已备份并恢复默认值：{exc}'
                 self.data = default_config(root)
 
+        from .emergency_hotkey import normalize_hotkey_settings
+        self.data['emergency_hotkey'] = normalize_hotkey_settings(self.data.get('emergency_hotkey'))
         needs_cleanup = self.data.get('keyboard_profile_cleanup_version', 0) < KEYBOARD_PROFILE_CLEANUP_VERSION
         if needs_cleanup and self.path.exists():
             backup = self.path.with_name('studio.before-keyboard-profile-cleanup-v1.json')
@@ -664,7 +740,42 @@ class ConfigStore:
         resolved = device_config(self.data, state)
         return {key: copy.deepcopy(resolved[key]) for key in DEVICE_SETTING_KEYS}
 
+    def application_settings(self, state):
+        """Return this device's usable application rules, tolerating stale files."""
+        from .application_profiles import normalize_application_profiles
+        if not state:
+            return {'enabled': False, 'rules': []}
+        scope = profile_scope(state)
+        all_settings = self.data.get('application_profiles', {})
+        settings = all_settings.get(scope, {}) if isinstance(all_settings, dict) else {}
+        if not isinstance(settings, dict):
+            return {'enabled': False, 'rules': []}
+        rules = settings.get('rules', [])
+        rules = rules if isinstance(rules, list) else []
+        usable = []
+        for rule in rules:
+            try:
+                normalized = normalize_application_profiles(
+                    {'enabled': False, 'rules': [rule]}, self.data, state)
+                usable.extend(normalized['rules'])
+            except (TypeError, ValueError):
+                continue
+        # A stale file can contain duplicate paths. The first valid rule wins.
+        normalized = []
+        seen = set()
+        from .application_profiles import canonical_executable
+        for rule in usable:
+            path = canonical_executable(rule['executable'])
+            if path not in seen:
+                seen.add(path); normalized.append(rule)
+        return {'enabled': settings.get('enabled') is True, 'rules': normalized}
+
     def set_setting(self, key, value, state=None):
+        if key == 'emergency_hotkey':
+            from .emergency_hotkey import normalize_hotkey_settings
+            value = normalize_hotkey_settings(value, strict=True)
+        if key == 'battery_notifications_enabled' and type(value) is not bool:
+            raise ValueError('低电量提醒设置应为开启或关闭')
         if key in CURVE_CHANNELS:
             value = normalize_curve_channels(key, {key: value})
         elif key in ('trigger_rumble_enabled', 'touch_gestures_enabled', 'touch_scroll'):
@@ -691,6 +802,10 @@ class ConfigStore:
         self.data.get('profile_options', {}).pop(name, None)
         self.data.get('profile_devices', {}).pop(name, None)
         self.data.get('profile_sources', {}).pop(name, None)
+        for settings in self.data.get('application_profiles', {}).values():
+            if isinstance(settings, dict) and isinstance(settings.get('rules'), list):
+                settings['rules'] = [rule for rule in settings['rules']
+                                     if not isinstance(rule, dict) or rule.get('profile') != name]
         remaining = self.profiles_for(state)
         fallback = remaining[0] if remaining else (next(iter(self.data['profiles'])) if self.data['profiles'] else '主机体验')
         for k, p in list(self.data['controller_profiles'].items()):
@@ -797,9 +912,182 @@ class ConfigStore:
             self.data['nikki_layout_version'] = latest['nikki_layout_version']
             self._baseline['nikki_layout_version'] = latest['nikki_layout_version']
 
+    def _import_profile(self, change, state):
+        """Create one verified, inactive profile without borrowing device data."""
+        if not state or state.get('instance_id') is None:
+            raise ValueError('请先连接手柄，再导入预设')
+        from .profile_transfer import preview_profile_import
+
+        preview = preview_profile_import(change.get('package'), state)
+        expected = change.get('expected_inputs')
+        if not isinstance(expected, dict) or expected != preview['input_signature']:
+            raise ValueError('输入设备能力已变化，请重新预览导入内容')
+        profile = preview['profile']
+        requested = change.get('name', profile['name'])
+        if (not isinstance(requested, str) or not requested.strip() or len(requested.strip()) > 80
+                or any(ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF
+                       for char in requested)):
+            raise ValueError('请输入 1 至 80 个字符的预设名称')
+        requested = requested.strip()
+        occupied = set(self.data['profiles'])
+        revision = self.data.get('mapping_revision', 0)
+        if self.path.exists():
+            # A settings panel can hold an older snapshot while the backend has
+            # already added a preset. The three-way save must not overwrite it.
+            latest = json.loads(self.path.read_text(encoding='utf-8'))
+            if not isinstance(latest, dict) or not isinstance(latest.get('profiles'), dict):
+                raise ValueError('当前配置无法读取，请重新打开软件')
+            occupied.update(latest['profiles'])
+            revision = max(revision, latest.get('mapping_revision', 0))
+        name, index = requested, 2
+        while name in occupied:
+            suffix = f' · 导入 {index}'
+            name = requested[:80 - len(suffix)].rstrip() + suffix
+            index += 1
+        before = copy.deepcopy(self.data)
+        baseline = copy.deepcopy(getattr(self, '_baseline', None))
+        staged = copy.deepcopy(self.data)
+        staged['profiles'][name] = {row['trigger']: copy.deepcopy(row['mapping'])
+                                   for row in preview['accepted']}
+        staged.setdefault('profile_modes', {})[name] = profile['mode']
+        staged.setdefault('profile_options', {})[name] = copy.deepcopy(profile['options'])
+        staged.setdefault('profile_devices', {})[name] = profile_scope(state)
+        staged.setdefault('profile_families', {})[name] = state.get('family', 'generic')
+        staged['mapping_revision'] = revision + 1
+        self.data.clear(); self.data.update(staged)
+        try:
+            self.save()
+        except Exception:
+            self.data.clear(); self.data.update(before)
+            if baseline is not None:
+                self._baseline = baseline
+            raise
+        # This is a reply detail, not persisted source/migration metadata.
+        self.last_imported_profile = name
+        return copy.deepcopy(self.data)
+
+    def _apply_pointer_deadzone(self, change, state):
+        """Apply one measured preference to the latest preset as one transaction."""
+        signature = pointer_input_signature(state)
+        expected = change.get('expected_input_signature')
+        if not isinstance(expected, dict) or expected != signature:
+            raise ValueError('输入设备能力已变化，请重新测量右摇杆')
+        value = change.get('deadzone')
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError('居中容错建议应为 0.01 至 0.50 之间的有限数值')
+        try:
+            valid = math.isfinite(value) and .01 <= value <= .50
+        except (ValueError, OverflowError):
+            valid = False
+        if not valid:
+            raise ValueError('居中容错建议应为 0.01 至 0.50 之间的有限数值')
+        before = copy.deepcopy(self.data)
+        baseline = copy.deepcopy(getattr(self, '_baseline', None))
+        staged = copy.deepcopy(self.data)
+        if self.path.exists():
+            staged = json.loads(self.path.read_text(encoding='utf-8'))
+            if not isinstance(staged, dict) or not isinstance(staged.get('profiles'), dict):
+                raise ValueError('当前配置无法读取，请重新打开软件')
+        name = change.get('profile')
+        if not isinstance(name, str) or name not in staged['profiles']:
+            raise ValueError('预设已删除，请重新选择')
+        owners = staged.get('profile_devices')
+        if not isinstance(owners, dict) or owners.get(name) != profile_scope(state):
+            raise ValueError('该预设不属于当前输入设备')
+        if profile_mode(staged, name) != 'kbm':
+            raise ValueError('请选择当前手柄的键鼠预设')
+        options = staged.setdefault('profile_options', {})
+        if not isinstance(options, dict):
+            raise ValueError('预设操作手感格式错误')
+        options = options.setdefault(name, {})
+        if not isinstance(options, dict):
+            raise ValueError('预设操作手感格式错误')
+        mouse = options.setdefault('mouse', {})
+        if not isinstance(mouse, dict):
+            raise ValueError('预设视角与指针设置格式错误')
+        mouse['deadzone'] = float(value)
+        staged['mapping_revision'] = staged.get('mapping_revision', 0) + 1
+        self.data.clear(); self.data.update(staged)
+        try:
+            self.save(merge=False)
+        except Exception:
+            self.data.clear(); self.data.update(before)
+            if baseline is not None:
+                self._baseline = baseline
+            raise
+        return copy.deepcopy(self.data)
+
+    def _swap_bindings(self, change, state):
+        """Exchange two current entries in the latest file as one transaction."""
+        from .mapping_engine import canonical_trigger, validate_mappings
+        signature = mapping_input_signature(state)
+        expected_inputs = change.get('expected_inputs')
+        if not isinstance(expected_inputs, dict) or expected_inputs != signature:
+            raise ValueError('输入设备能力已变化，请重新打开交换绑定')
+        if not isinstance(change.get('first'), str) or not isinstance(change.get('second'), str):
+            raise ValueError('请选择两个不同的输入来源')
+        first, second = canonical_trigger(change['first']), canonical_trigger(change['second'])
+        if first == second:
+            raise ValueError('请选择两个不同的输入来源')
+        if first.startswith('TP:') != second.startswith('TP:'):
+            raise ValueError('触摸手势只能与触摸手势交换绑定')
+        staged = copy.deepcopy(self.data)
+        if self.path.exists():
+            staged = json.loads(self.path.read_text(encoding='utf-8'))
+            if not isinstance(staged, dict) or not isinstance(staged.get('profiles'), dict):
+                raise ValueError('当前配置无法读取，请重新打开软件')
+        name = change.get('profile')
+        if not isinstance(name, str):
+            raise ValueError('请选择当前手柄的预设')
+        resolved = device_config(staged, state)
+        if (any(key in ('TP:scroll_up', 'TP:scroll_down') for key in (first, second))
+                and resolved.get('touch_scroll') and not resolved.get('touch_gestures_enabled')):
+            raise ValueError('请先在触摸板设置中开启手势绑定，再交换滚动手势')
+        before_first = swap_binding_entry(staged, state, name, first)
+        before_second = swap_binding_entry(staged, state, name, second)
+        if (not isinstance(change.get('expected_first'), dict)
+                or not isinstance(change.get('expected_second'), dict)
+                or change['expected_first'] != before_first or change['expected_second'] != before_second):
+            raise ValueError('绑定或长按设置已变化，请重新打开交换绑定')
+        # Explicitly save both sides, including empty entries, so a device's
+        # implicit default cannot reappear after it has been moved elsewhere.
+        swapped = validate_mappings({first: before_second, second: before_first})
+        for key, entry in swapped.items():
+            if key in ('TP:scroll_up', 'TP:scroll_down') and entry['short'].get('action') == 'none':
+                # Scroll's runtime default deliberately falls back for "none";
+                # an explicit empty side of this exchange must suppress it.
+                entry['short']['action'] = 'suppress'
+        staged['profiles'][name].update(swapped)
+        staged['mapping_revision'] = staged.get('mapping_revision', 0) + 1
+        before, baseline = copy.deepcopy(self.data), copy.deepcopy(getattr(self, '_baseline', None))
+        self.data.clear(); self.data.update(staged)
+        try:
+            self.save(merge=False)
+        except Exception:
+            self.data.clear(); self.data.update(before)
+            if baseline is not None:
+                self._baseline = baseline
+            raise
+        return copy.deepcopy(self.data)
+
     def apply_mapping_change(self, change, state=None):
         from .mapping_engine import canonical_trigger, input_sources, validate_mappings
         op = change['op']
+        if op == 'import_profile':
+            return self._import_profile(change, state)
+        if op == 'pointer_deadzone':
+            return self._apply_pointer_deadzone(change, state)
+        if op == 'swap_bindings':
+            return self._swap_bindings(change, state)
+        if op == 'application_profiles':
+            if not state:
+                raise ValueError('请先连接手柄，再设置应用关联')
+            from .application_profiles import normalize_application_profiles
+            settings = normalize_application_profiles(change.get('settings'), self.data, state)
+            self.data.setdefault('application_profiles', {})[profile_scope(state)] = settings
+            self.data['mapping_revision'] = self.data.get('mapping_revision', 0) + 1
+            self.save()
+            return copy.deepcopy(self.data)
         name = change.get('profile', self.data['active_profile'])
         if op != 'create' and name not in self.data['profiles']:
             raise ValueError('预设已删除，请重新选择')
@@ -855,6 +1143,12 @@ class ConfigStore:
                 raise ValueError('未知预设选项')
             if 'input' in change['options'] and not isinstance(change['options']['input'], dict):
                 raise ValueError('输入手感设置格式错误')
+            if 'mouse' in change['options']:
+                mouse = change['options']['mouse']
+                if not isinstance(mouse, dict):
+                    raise ValueError('预设视角与指针设置格式错误')
+                if 'invert_y' in mouse and not isinstance(mouse['invert_y'], bool):
+                    raise ValueError('Y 轴反转设置应为开启或关闭')
             self.data['profile_options'].setdefault(name, {}).update(copy.deepcopy(change['options']))
         elif op == 'delete':
             if self.delete_profile(name, state) is None:
@@ -908,6 +1202,10 @@ def remove_profiles(config, removed):
     config['controller_profiles'] = {key: NIKKI_PROFILE_NAME if name in removed else name
                                      for key, name in controller_profiles.items()
                                      if name in removed or name in profiles}
+    for settings in config.get('application_profiles', {}).values():
+        if isinstance(settings, dict) and isinstance(settings.get('rules'), list):
+            settings['rules'] = [rule for rule in settings['rules']
+                                 if isinstance(rule, dict) and rule.get('profile') in profiles]
 
 
 def merge_changes(base, edited, latest):
