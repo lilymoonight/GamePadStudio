@@ -89,8 +89,10 @@ class MacHotkey(QObject):
     triggered = Signal()
     failed = Signal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, failure_message=None):
         super().__init__(parent)
+        self._failure_message = (failure_message or
+            '紧急暂停快捷键监听失败，请使用界面上的暂停按钮并重新设置快捷键')
         self._native = _CarbonNative()
         self._hotkey = C.c_void_p()
         self._handler = C.c_void_p()
@@ -159,7 +161,7 @@ class MacHotkey(QObject):
     def _fail(self):
         self._active = False
         self._timer.stop()
-        self.failed.emit('紧急暂停快捷键监听失败，请使用界面上的暂停按钮并重新设置快捷键')
+        self.failed.emit(self._failure_message)
 
     def _handle_event(self, _next_handler, event, _context):
         # Never allow Python exceptions to escape the native callback.

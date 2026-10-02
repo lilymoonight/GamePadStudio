@@ -48,7 +48,7 @@ def measurement_owner(tmp_path, monkeypatch, hotkey_app, request):
     class Socket(QObject):
         disconnected = Signal()
 
-    class Client(QWidget):
+    class Client(QObject):
         event = Signal(dict)
 
         def __init__(self, parent):

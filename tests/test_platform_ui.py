@@ -6,12 +6,12 @@ import pytest
 from PySide6.QtCore import QEvent, QObject, QSize, Signal
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 from shiboken6 import delete
 
 from gamepadstudio import (hidhide, studio, virtual_kbm_ui, macos_permissions,
                            application_profiles, application_profiles_ui, emergency_hotkey, emergency_hotkey_ui)
-from gamepadstudio.i18n import get_language_preference, init_language
+from gamepadstudio.i18n import get_language_preference, init_language, tr
 from gamepadstudio.mapping_engine import MappingRuntime
 from tests.test_battery_ui import BatteryDevice, FakeTray
 from tests.test_device_scope_ui import device
@@ -90,6 +90,7 @@ def mac_workspace(tmp_path, monkeypatch, request):
     monkeypatch.setattr(application_profiles, 'foreground_application',
                         lambda: {'pid': 0, 'hwnd': 0, 'executable': ''})
     monkeypatch.setattr(studio, 'EmergencyHotkey', FakeHotkey)
+    monkeypatch.setattr(studio, 'ScreenshotHotkey', FakeHotkey)
     monkeypatch.setattr(studio, 'set_autostart', lambda root, enabled: startup_changes.append((root, enabled)))
     monkeypatch.setattr(studio, 'AgentClient', Client)
     monkeypatch.setattr(studio, 'request', lambda *args, **kwargs: {'ok': True})
@@ -171,6 +172,55 @@ def test_mac_capture_scopes_preserve_game_window_and_replay_modes(mac_workspace)
     all_item = w.replay_mode_combo.model().item(all_index)
     assert not all_item.isEnabled()
     assert all_item.toolTip()
+
+
+@pytest.mark.parametrize('mac_workspace', [{}, {'remote': True}], indirect=True)
+def test_mac_screenshot_shortcut_can_be_changed_disabled_and_reports_effective_status(mac_workspace):
+    from gamepadstudio.screenshot_hotkey_ui import ScreenshotHotkeyDialog
+    w = mac_workspace.window
+    assert w.screenshot_hotkey_button.isEnabled()
+    if w.remote:
+        assert w.screenshot_hotkey is None
+    else:
+        assert isinstance(w.screenshot_hotkey, FakeHotkey)
+    dialog = ScreenshotHotkeyDialog(w)
+    try:
+        dialog.enabled.setChecked(True)
+        dialog.shortcut.setCurrentText('Alt+Cmd+S')
+        dialog.save()
+        assert w.config['screenshot_hotkey'] == {'enabled': True, 'shortcut': 'Alt+Cmd+S'}
+        if w.remote:
+            assert '未生效' in w.screenshot_hotkey_row.subtitle_label.text()
+            w.client.status['screenshot_hotkey'] = {
+                'enabled': True, 'shortcut': 'Alt+Cmd+S', 'registered': True, 'error': ''}
+            w.refresh_screenshot_hotkey_status()
+        assert 'Alt+Cmd+S' in w.screenshot_hotkey_row.subtitle_label.text()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+    w.setting('screenshot_hotkey', {'enabled': False, 'shortcut': 'Alt+Cmd+S'})
+    assert '已关闭' in w.screenshot_hotkey_row.subtitle_label.text()
+
+
+@pytest.mark.parametrize('mac_workspace', [{}, {'remote': True}], indirect=True)
+def test_mac_replay_button_requires_previously_running_buffer_and_av1_label_is_software(mac_workspace):
+    w = mac_workspace.window
+    assert tr('AV1 软件编码 (45Mbps)') == w.replay_codec_combo.itemText(w.replay_codec_combo.findData('av1'))
+    assert any(tr('先启用并等待画面积累，再用手柄映射或下方按钮保存过去的片段。') == label.text()
+               for label in w.settings_page.findChildren(QLabel))
+    before = list(w.client.sent) if w.remote else None
+    w.trigger_manual_replay()
+    assert tr('请先启用回放缓存，等待画面积累后保存') in mac_workspace.notices
+    if w.remote:
+        assert w.client.sent == before
+    w.setting('replay_buffer_enabled', True)
+    w.trigger_manual_replay()
+    assert tr('回放录制尚未就绪，请检查状态并等待画面积累') in mac_workspace.notices
+    if w.remote:
+        assert w.client.sent[-1][0] == 'reload'
+        w.client.status['replay'] = {'running': True}
+        w.trigger_manual_replay()
+        assert w.client.sent[-1][0] == 'save_replay'
 
 
 def test_mac_keyboard_names_and_unsupported_keys_preserve_stored_tokens(mac_workspace):

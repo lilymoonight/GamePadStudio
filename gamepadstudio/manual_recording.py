@@ -204,7 +204,7 @@ class ManualRecording:
                 else:
                     bbox = dict(get_target_monitor_bbox(source, self.capture_mode))
                 window_backend = target = None
-                if self.capture_mode in ('game','window','smart') and hasattr(source,'configure_window'):
+                if self.capture_mode == 'window' and hasattr(source,'configure_window'):
                     from .screenshot_service import get_mac_window_backend
                     window_backend = get_mac_window_backend()
                     target = window_backend.smart_window()

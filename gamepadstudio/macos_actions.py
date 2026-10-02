@@ -176,7 +176,7 @@ def request_input_permission():
 
 class MacActions(WindowsActions):
     """Share input ownership and cleanup behavior, replace every Windows API."""
-    def __init__(self, native=None, workspace=None):
+    def __init__(self, native=None, workspace=None, window_backend=None):
         self.held = {}
         self.held_mouse = set()
         self.held_gamepad_buttons = set()
@@ -184,6 +184,7 @@ class MacActions(WindowsActions):
         self._posted_keys = set()
         self.native = native if native is not None else _QuartzNative()
         self._workspace = workspace
+        self._window_backend = window_backend
 
     def input_permission_status(self):
         return _permission_status(self.native)
@@ -352,10 +353,28 @@ class MacActions(WindowsActions):
         return name
 
     def is_nikki_game_focused(self):
-        name = self.get_foreground_process_name()
-        if any(marker in name for marker in ('starter', 'launcher', 'install', 'update')):
+        name = self.get_foreground_process_name().casefold()
+        if any(marker in name for marker in ('starter', 'launcher', 'install', 'update', 'gamepadstudio')):
             return False
-        return any(marker in name for marker in ('infinitynikki', 'x6game', 'nikki', 'genshin'))
+        if any(marker in name for marker in ('infinitynikki', 'x6game', 'nikki', 'genshin')):
+            return True
+        if 'game' not in name:
+            return False
+        # A generic process name is weaker evidence than a known game. Only
+        # recenter when that executable owns the actual foreground window,
+        # excluding this app and system windows through the shared selector.
+        try:
+            if self._window_backend is None:
+                from .macos_windows import MacWindowBackend
+                self._window_backend = MacWindowBackend()
+            window = self._window_backend.foreground_window()
+            if window is None or self._window_backend.excluded(window):
+                return False
+            bounds = window.bounds_points
+            return (window.process_name.casefold() == name.casefold()
+                    and bounds['width'] >= 640 and bounds['height'] >= 480)
+        except (OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError):
+            return False
 
     def guard_cursor_edge(self, margin=35, only_if_game=True):
         now = time.monotonic()

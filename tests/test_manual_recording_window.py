@@ -105,25 +105,28 @@ def route(monkeypatch, tmp_path):
     return create, source, backend, monitor_modes
 
 
-@pytest.mark.parametrize('mode', ['game', 'window', 'smart'])
-def test_game_and_window_modes_lock_one_verified_window(route, mode):
+def test_window_mode_locks_one_verified_window(route):
     create, source, backend, monitor_modes = route
-    create(mode)
+    create('window')
     assert source.window_args == (WINDOW.window_id, 30,
                                   {'include_system_audio': True, 'expected_pid': WINDOW.pid})
     assert source.display_args is None
     assert backend.verify_calls == 2
     assert (backend.smart_calls, backend.foreground_calls) == (1, 0)
-    assert monitor_modes == [mode]
+    assert monitor_modes == ['window']
 
 
 @pytest.mark.parametrize('mode,expected', [
+    ('game', RouteSource.monitors[2]),
+    ('smart', RouteSource.monitors[2]),
     ('monitor', RouteSource.monitors[2]),
     ('monitor_1', RouteSource.monitors[1]),
     ('all', RouteSource.monitors[0]),
 ])
-def test_monitor_and_all_modes_keep_display_capture(route, mode, expected):
+def test_display_modes_keep_display_capture(route, mode, expected):
     create, source, backend, monitor_modes = route
+    if mode == 'game':
+        backend.front = None  # A display recording does not require a target window.
     create(mode)
     assert source.window_args is None
     assert source.display_args == (expected, 30, {})
@@ -247,7 +250,7 @@ def recording_window(monkeypatch, tmp_path):
         source = RecordingWindowSource(backend, on_first)
         sources.append(source)
         monkeypatch.setattr(manual_recording, 'create_replay_capture', lambda: source)
-        recorder = manual_recording.ManualRecording(tmp_path, capture_mode='game', codec='h264')
+        recorder = manual_recording.ManualRecording(tmp_path, capture_mode='window', codec='h264')
         source.recorder = recorder
         return recorder, source, backend, ffmpeg
 

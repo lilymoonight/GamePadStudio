@@ -23,6 +23,7 @@ from .mapping_engine import MappingRuntime
 from .application_profiles import ApplicationProfileResolver, foreground_application, application_profiles_supported
 from .battery_monitor import BatteryMonitor
 from .emergency_hotkey import EmergencyHotkey, emergency_hotkey_supported
+from .screenshot_hotkey import ScreenshotHotkey
 
 
 class Agent(QObject):
@@ -56,6 +57,9 @@ class Agent(QObject):
         self.server=LocalServer(self.root,self.handle)
         self.emergency_hotkey = EmergencyHotkey(self.emergency_pause, self)
         self.emergency_hotkey.configure(self.config['emergency_hotkey'])
+        self.screenshot_hotkey = ScreenshotHotkey(self.capture, self) if sys.platform == 'darwin' else None
+        if self.screenshot_hotkey:
+            self.screenshot_hotkey.configure(self.config['screenshot_hotkey'])
         self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(4)
         self.scan_timer=QTimer(self);self.scan_timer.timeout.connect(self.scan);self.scan_timer.start(1000)
         self.broadcast_timer=QTimer(self);self.broadcast_timer.timeout.connect(self.broadcast);self.broadcast_timer.start(33)
@@ -170,6 +174,7 @@ class Agent(QObject):
                 'profile':self.config['active_profile'],'suspended':time.monotonic()<self.suspended_until,
                 'application_profile':dict(self.application_profile),
                 'emergency_hotkey':self.emergency_hotkey.status(),
+                'screenshot_hotkey':self.screenshot_hotkey.status() if self.screenshot_hotkey else {},
                 'battery_warning':self.battery_monitor.warning(
                     self.state, enabled=device_config(self.config, self.state)['battery_notifications_enabled'])}
 
@@ -447,6 +452,8 @@ class Agent(QObject):
             self.store=ConfigStore(self.root)
             self.config=self.store.data
             self.emergency_hotkey.configure(self.config['emergency_hotkey'])
+            if self.screenshot_hotkey:
+                self.screenshot_hotkey.configure(self.config['screenshot_hotkey'])
             self.apply_gamebar_shield()
             self.apply_device_cloaking()
             if hasattr(self, 'replay_engine'):
@@ -587,6 +594,9 @@ class Agent(QObject):
         # 1. 优先使用本地 4K 极清硬件编码回放缓冲区
         if self.config.get('replay_buffer_enabled', False) and hasattr(self, 'replay_engine'):
             if not self.replay_engine.is_running():
+                if sys.platform == 'darwin':
+                    self.log('后台回放未就绪；请确认回放缓存已开启并等待画面积累')
+                    return {'status':'not_ready','reason':'后台回放未就绪'}
                 self.replay_engine.start()
             self.replay_busy = True
             self.replay_device_context = self.feedback_device_context()
@@ -689,6 +699,8 @@ class Agent(QObject):
         # Release input BEFORE waiting for recording workers or other teardown.
         finish('释放输入失败',self.release)
         finish('注销紧急暂停失败',self.emergency_hotkey.close)
+        if self.screenshot_hotkey:
+            finish('注销截图快捷键失败',self.screenshot_hotkey.close)
         finish('关闭映射失败',self.engine.close)
         if hasattr(self, 'replay_engine'):
             finish('停止回放失败',self.replay_engine.stop)
