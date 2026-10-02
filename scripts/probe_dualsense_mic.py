@@ -15,6 +15,7 @@ import math
 import os
 from pathlib import Path
 import signal
+import statistics
 import sys
 import threading
 import time
@@ -23,8 +24,37 @@ import wave
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault('PYGAME_HIDE_SUPPORT_PROMPT', '1')
 from gamepadstudio.device import load_sdl_library
-from gamepadstudio.dualsense_audio import (OpusDecoder, RATE, audio_packet,
+from gamepadstudio.dualsense_audio import (FRAME_SAMPLES, OpusDecoder, RATE, audio_packet,
                                          mic_control_report, valid_extended_report)
+
+
+_PCM_FRAME_BYTES = FRAME_SAMPLES * 2
+
+
+def append_at_capture_time(pcm: bytearray, decoded: bytes, *, started: float,
+                           arrived: float) -> int:
+    """Keep missing Bluetooth audio on the capture timeline as silence."""
+    if len(decoded) != _PCM_FRAME_BYTES:
+        raise ValueError('Opus 解码结果长度错误。')
+    # The packet represents the 10 ms ending at its arrival, not the 10 ms
+    # starting there. This also keeps a packet at the deadline in range.
+    target_frame = max(0, round((arrived - started) * RATE / FRAME_SAMPLES) - 1)
+    missing = max(0, target_frame - len(pcm) // _PCM_FRAME_BYTES)
+    if missing:
+        pcm.extend(bytes(missing * _PCM_FRAME_BYTES))
+    pcm.extend(decoded)
+    return missing
+
+
+def private_output(path: Path):
+    """Keep locally captured voice and its diagnostic metadata owner-only."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        return os.fdopen(descriptor, 'wb')
+    except Exception:
+        os.close(descriptor)
+        raise
 
 
 class HidInfo(C.Structure):
@@ -121,6 +151,7 @@ class Transport:
 def initial_result(enable_mic):
     return dict(enable_requested=enable_mic, reports=0, audio_flagged=0,
                 valid_audio_packets=0, decoded_frames=0, decode_errors=0,
+                missing_audio_frames=0,
                 mic_enable_written=False, mic_disable_written=False,
                 writer_started=False, writer_stopped=True, capture_timed_out=False,
                 errors=[], speech_verified=False)
@@ -130,6 +161,9 @@ def probe(transport, seconds, enable_mic, stop, decoder=None):
     result = initial_result(enable_mic)
     sizes, identifiers = Counter(), Counter()
     pcm = bytearray()
+    audio_arrivals = []
+    reports_per_second = Counter()
+    audio_per_second = Counter()
     writer = None
     started = time.monotonic()
     try:
@@ -158,6 +192,7 @@ def probe(transport, seconds, enable_mic, stop, decoder=None):
             result['verdict'] = 'NO_EXTENDED_REPORTS'
             return result, pcm
         deadline = time.monotonic() + seconds
+        capture_started = time.monotonic()
         if enable_mic:
             if decoder is None:
                 raise RuntimeError('必须先准备 Opus 解码器，才会启用麦克风。')
@@ -195,6 +230,7 @@ def probe(transport, seconds, enable_mic, stop, decoder=None):
                 continue
             last_report = time.monotonic()
             result['reports'] += 1
+            reports_per_second[int(last_report - capture_started)] += 1
             sizes[len(report)] += 1
             identifiers[hex(report[0])] += 1
             if len(report) > 1 and report[0] == 0x31 and report[1] & 2:
@@ -203,14 +239,32 @@ def probe(transport, seconds, enable_mic, stop, decoder=None):
             if packet is not None:
                 result['valid_audio_packets'] += 1
                 if enable_mic:
+                    audio_arrivals.append(last_report)
+                    audio_per_second[int(last_report - capture_started)] += 1
+                if enable_mic:
                     try:
-                        pcm.extend(decoder.decode(packet))
+                        result['missing_audio_frames'] += append_at_capture_time(
+                            pcm, decoder.decode(packet), started=capture_started,
+                            arrived=last_report)
                         result['decoded_frames'] += 1
                     except ValueError:
                         result['decode_errors'] += 1
+        if pcm:
+            # Keep the final part of the timed capture as silence as well.
+            capture_frames = round((min(time.monotonic(), deadline) - capture_started)
+                                   * RATE / FRAME_SAMPLES)
+            trailing = max(0, capture_frames - len(pcm) // _PCM_FRAME_BYTES)
+            pcm.extend(bytes(trailing * _PCM_FRAME_BYTES))
+            result['missing_audio_frames'] += trailing
         result['capture_timed_out'] = time.monotonic() >= deadline
-        result['verdict'] = ('DECODED_AUDIO' if result['decoded_frames'] else
-                             'NO_AUDIO_FRAMES' if enable_mic else 'READ_ONLY_OK')
+        result['audio_coverage'] = round(
+            result['decoded_frames'] /
+            (result['decoded_frames'] + result['missing_audio_frames']), 3
+        ) if pcm else 0
+        result['verdict'] = ('READ_ONLY_OK' if not enable_mic else
+                             'NO_AUDIO_FRAMES' if not result['decoded_frames'] else
+                             'INCOMPLETE_AUDIO' if result['audio_coverage'] < .9 else
+                             'DECODED_AUDIO')
     except Exception as exc:
         result['errors'].append(str(exc))
         result['verdict'] = 'ERROR'
@@ -230,6 +284,18 @@ def probe(transport, seconds, enable_mic, stop, decoder=None):
         result['report_sizes'] = dict(sizes)
         result['report_ids'] = dict(identifiers)
         result['elapsed_seconds'] = round(time.monotonic() - started, 3)
+        if enable_mic:
+            result['reports_per_second'] = dict(sorted(reports_per_second.items()))
+            result['audio_packets_per_second'] = dict(sorted(audio_per_second.items()))
+            if len(audio_arrivals) > 1:
+                gaps = [(b - a) * 1000 for a, b in zip(audio_arrivals, audio_arrivals[1:])]
+                result['audio_gap_ms'] = {
+                    'median': round(statistics.median(gaps), 2),
+                    'max': round(max(gaps), 2),
+                    'over_20ms': sum(gap > 20 for gap in gaps),
+                    'over_50ms': sum(gap > 50 for gap in gaps),
+                }
+                result['audio_arrival_span_seconds'] = round(audio_arrivals[-1] - audio_arrivals[0], 3)
     if pcm:
         try:
             samples = array.array('h', pcm)
@@ -264,11 +330,12 @@ def main():
         if pcm:
             wav_path = args.output.with_suffix('.wav')
             wav_path.parent.mkdir(parents=True, exist_ok=True)
-            with wave.open(str(wav_path), 'wb') as output:
-                output.setnchannels(1)
-                output.setsampwidth(2)
-                output.setframerate(RATE)
-                output.writeframes(pcm)
+            with private_output(wav_path) as raw:
+                with wave.open(raw, 'wb') as output:
+                    output.setnchannels(1)
+                    output.setsampwidth(2)
+                    output.setframerate(RATE)
+                    output.writeframes(pcm)
             result['wav_path'] = str(wav_path.resolve())
     except Exception as exc:
         # Preserve writer ownership even if saving the WAV fails. Losing the
@@ -292,7 +359,8 @@ def main():
                 result['errors'].append('Opus 关闭失败：' + str(exc))
     try:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+        with private_output(args.output) as output:
+            output.write(json.dumps(result, ensure_ascii=False, indent=2).encode('utf-8'))
     except OSError as exc:
         result['verdict'] = 'ERROR'
         result['errors'].append('诊断 JSON 保存失败：' + str(exc))
