@@ -492,7 +492,7 @@ def test_axvalue_fallback_mismatched_readback_is_not_retried(native):
     assert len([call for call in native.calls if call[0] == 'set']) == 1
 
 
-@pytest.mark.parametrize('text', ['', ' ', None, '\0', 'a' * 100001])
+@pytest.mark.parametrize('text', ['', ' ', None, '\0', pytest.param('a' * 100001, id='over_limit')])
 def test_invalid_text_is_rejected_without_native_mutation(native, text):
     adapter = targets.MacAppTarget(native)
     with adapter.locate(CODEX) as target:
