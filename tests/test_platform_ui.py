@@ -356,6 +356,24 @@ def test_late_workspace_callbacks_do_not_touch_devices_after_shutdown(mac_worksp
     w.reflow_workspace()
 
 
+@pytest.mark.parametrize('mac_workspace', [{'remote': True}], indirect=True)
+def test_remote_workspace_shows_imported_unsupported_bindings_after_agent_started(mac_workspace):
+    window = mac_workspace.window
+    window.client.status['enabled'] = True
+    window.client.status['mapping'] = {'unsupported_bindings': [
+        {'trigger': '0', 'gesture': 'short', 'value': 'PrintScreen',
+         'reason': '此平台没有等效键盘输出'}]}
+    window.notice_timer.stop()
+    window.poll()
+    assert '不支持' in window.notice.text()
+    assert 'PrintScreen' in window.notice.toolTip()
+
+    window.client.status['mapping'] = {'unsupported_bindings': []}
+    window.poll()
+    assert '映射运行中' in window.notice.text()
+    assert window.notice.toolTip() == ''
+
+
 def test_keyboard_resize_filters_tolerate_children_destroyed_before_parent(mac_workspace):
     w = mac_workspace.window
     page = w.virtual_kbm_page

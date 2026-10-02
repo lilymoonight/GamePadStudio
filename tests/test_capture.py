@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+import json
 import pytest
 from gamepadstudio import screenshot_service as service
 
@@ -97,3 +98,41 @@ def test_list_and_delete_mp4_captures(tmp_path):
     assert not vid.exists()
     assert not thumb.exists()
     assert len(service.list_captures(tmp_path)) == 0
+
+
+def test_gallery_video_metadata_uses_actual_dimensions_and_timestamp(tmp_path):
+    vid = tmp_path / 'DS_Example_20260929_120000_replay.mp4'
+    vid.write_bytes(b'video')
+    vid.with_suffix('.json').write_text(json.dumps({
+        'title': 'Example', 'raw_title': '原始标题',
+        'created': '2026-09-29T12:00:00', 'width': 2880, 'height': 1800,
+        'resolution': '3840x2160', 'duration_seconds': 15.2,
+    }), encoding='utf-8')
+
+    row = service.list_captures(tmp_path)[0]
+    assert (row['width'], row['height']) == (2880, 1800)
+    assert row['created'] == '2026-09-29T12:00:00'
+    assert row['raw_title'] == '原始标题'
+    assert row['duration_seconds'] == 15.2
+
+
+def test_gallery_video_dimensions_use_replay_sidecar_or_remain_unknown(tmp_path):
+    replay = tmp_path / 'DS_Game_20260929_120000_replay.mp4'
+    replay.write_bytes(b'video')
+    replay.with_suffix('.json').write_text('{"resolution":"1920x1080"}', encoding='utf-8')
+    manual = tmp_path / 'manual.mp4'
+    manual.write_bytes(b'video')
+
+    rows = {Path(row['path']).name: row for row in service.list_captures(tmp_path)}
+    assert (rows[replay.name]['width'], rows[replay.name]['height']) == (1920, 1080)
+    assert (rows[manual.name]['width'], rows[manual.name]['height']) == (None, None)
+
+
+def test_gallery_hides_unfinished_recordings(tmp_path):
+    (tmp_path / '.manual.partial.mp4').write_bytes(b'unfinished')
+    (tmp_path / 'manual.partial.mp4').write_bytes(b'unfinished')
+    (tmp_path / '.hidden.png').write_bytes(b'unfinished')
+    completed = tmp_path / 'manual.mp4'
+    completed.write_bytes(b'finished')
+
+    assert [Path(row['path']).name for row in service.list_captures(tmp_path)] == [completed.name]

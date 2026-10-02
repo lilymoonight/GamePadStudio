@@ -1,5 +1,6 @@
 """Full recorder integration with generated RGB/PCM only, never live capture."""
 from collections import deque
+import json
 import math
 import re
 import subprocess
@@ -175,6 +176,10 @@ def test_recorder_writes_system_audio_with_common_origin_and_original_pts(av_rec
     assert completed == [(status['path'], '')]
     assert source.configured[2] is True
     assert source.closed and source.cancelled and not source.pending
+    with open(status['path'].removesuffix('.mp4') + '.json', encoding='utf-8') as stream:
+        gallery = json.load(stream)
+    assert gallery['audio'] is True and gallery['microphone'] is False
+    assert (gallery['width'], gallery['height']) == (64, 64)
     pts = assert_matching_av(ffmpeg, status['path'])
     # AAC may expose one encoder-delay frame before the first PCM timestamp.
     # Including that preroll with its actual PTS preserves the sound marker;

@@ -145,12 +145,13 @@ def test_windows_data_path_preserves_legacy_folder(monkeypatch, tmp_path):
     assert ipc.default_root() == old_dir
 
 
-def test_spawn_launches_actual_main_with_active_python(tmp_path):
+def test_spawn_launches_module_with_active_python_from_outside_checkout(tmp_path, monkeypatch):
     if sys.platform == 'win32':
         pytest.skip('Native Python launcher on POSIX')
+    monkeypatch.chdir(tmp_path)
     command = ipc.command_line(tmp_path, '--agent-command', 'status')
     assert command[0] == sys.executable
-    assert Path(command[1]).is_file()
+    assert command[1:3] == ['-m', 'gamepadstudio']
     process = ipc.spawn(tmp_path, '--agent-command', 'status')
     try:
         # No server exists: actual entry/IPC request code returns status failure.

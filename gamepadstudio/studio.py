@@ -799,7 +799,7 @@ class Studio(GlassWindow):
             (tr('🖥️ 双屏全景全录制 (全部显示器 7680x2160)'), 'all'),
             (tr('🖥️ 显示器 1 (主屏幕)'), 'monitor_1'),
             (tr('🖥️ 显示器 2 (副屏幕)'), 'monitor_2'),
-            (tr('🪟 当前活动独立窗口'), 'window'),
+            (tr('🪟 智能目标窗口（前台优先）'), 'window'),
         ]:
             self.mode_combo.addItem(name, value)
         cur_mode = self.config.get('capture_mode', 'game')
@@ -2106,7 +2106,13 @@ class Studio(GlassWindow):
             self.virtual_kbm_page.update_feedback(feedback, bool(state), self.client.status.get('suspended',False) if self.remote else QApplication.activeModalWidget() is not None)
             self.mapping_deck.feedback(feedback)
             if not self.notice_timer.isActive():
-                self.notice.setText(tr('映射运行中') if self.enabled else tr('映射已暂停'))
+                unsupported = feedback.get('unsupported_bindings') or []
+                if self.enabled and unsupported:
+                    self.notice.setText(tr('当前预设存在不支持的按键输出') + f' ({len(unsupported)})')
+                    self.notice.setToolTip('；'.join(f"{row['value']}：{row['reason']}" for row in unsupported[:5]))
+                else:
+                    self.notice.setText(tr('映射运行中') if self.enabled else tr('映射已暂停'))
+                    self.notice.setToolTip('')
             events = feedback.get('events',[])
             if events:
                 from .mapping_engine import trigger_label
@@ -2785,7 +2791,7 @@ class Studio(GlassWindow):
             font.setPointSize(14)
             font.setBold(True)
             painter.setFont(font)
-            painter.drawText(pix.rect(), Qt.AlignCenter, "🎬 4K 精彩回放" if row.get('is_video') else "🖼️ 截图")
+            painter.drawText(pix.rect(), Qt.AlignCenter, tr('🎬 视频录像') if row.get('is_video') else tr('🖼️ 截图'))
             painter.end()
 
         if compact:
@@ -2837,7 +2843,9 @@ class Studio(GlassWindow):
         try: rows=list_captures(self.config['save_dir'])
         except OSError as exc: self.notify(tr('无法读取截图目录：')+str(exc)); return
         columns=max(2,min(5,self.gallery_view.viewport().width()//320))
-        signature=(tuple((r['path'],r['favorite']) for r in rows),self.search.text(),self.only_favorites.isChecked(),columns)
+        signature=(tuple((r['path'],r['favorite'],r.get('thumb_path'),r.get('title'),
+                          r.get('created'),r.get('width'),r.get('height'),r.get('size_mb'))
+                         for r in rows),self.search.text(),self.only_favorites.isChecked(),columns)
         if getattr(self,'gallery_signature',None)==signature: return
         self.gallery_signature=signature
         for i in range(self.gallery_grid.rowCount()):self.gallery_grid.setRowStretch(i,0)
@@ -2896,7 +2904,7 @@ class Studio(GlassWindow):
     def preview(self, row):
         if row.get('is_video'):
             QDesktopServices.openUrl(QUrl.fromLocalFile(row['path']))
-            self.notify(f"🎬 {tr('已调用系统播放器播放精彩回放视频')}: {Path(row['path']).name}")
+            self.notify(f"🎬 {tr('已调用系统播放器播放视频录像')}: {Path(row['path']).name}")
             return
 
         dialog = QDialog(self)
@@ -2926,7 +2934,7 @@ class Studio(GlassWindow):
         name = Path(row['path']).name
         title = row.get('title', name)
         is_vid = bool(row.get('is_video'))
-        item_type = tr('回放视频') if is_vid else tr('截图')
+        item_type = tr('视频录像') if is_vid else tr('截图')
         reply = QMessageBox.question(
             self,
             tr('删除{type}', type=item_type),
@@ -3103,26 +3111,21 @@ def run():
     lock.setStaleLockTime(1500)
     if not lock.tryLock(100):
         # 尝试唤起已存在的前台界面
-        if request(root,'show',role='ui',page=args.page,timeout=400) is not None:
+        response = request(root,'show',role='ui',page=args.page,timeout=400)
+        if response and response.get('ok'):
             return
-        # 若旧界面无响应或卡死，主动清理残留并接管
-        cleanup_stale_ui(root)
-        try:
-            lock.removeStaleLockFile()
-            (root/'studio.lock').unlink(missing_ok=True)
-        except Exception:
-            pass
-        if not lock.tryLock(200):
-            try:
-                (root/'studio.lock').unlink(missing_ok=True)
-            except Exception:
-                pass
-            lock.tryLock(300)
+        # An unresponsive instance may still own inputs or be finalizing a
+        # recording. Only the IPC backend may remove a verified stale owner.
+        if not cleanup_stale_ui(root) or not lock.tryLock(400):
+            QMessageBox.warning(None, tr('GamePad Studio'),
+                                tr('已有工作台界面运行但暂时无法通信，请先退出原界面后重试。'))
+            return 1
     window=Studio(root,standalone=args.smoke_test,lang=args.lang,
                   input_device=_SmokeDevice() if args.smoke_test else None)
     def handle_ui(message):
         if message.get('command')=='exit':QTimer.singleShot(50,window.quit_app)
         elif message.get('command')=='show':window.navigate(pages.get(message.get('page'),0));window.show_home()
+        elif message.get('command')=='status':pass
         else:raise ValueError('Unknown UI command')
         return {'pid':os.getpid(),'pages':window.stack.count(),'page':window.stack.currentIndex(),'native_glass':window.native_glass}
     ui_server=LocalServer(root,handle_ui,role='ui')

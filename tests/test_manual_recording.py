@@ -1,4 +1,5 @@
 import subprocess
+import json
 import sys
 import threading
 import time
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from gamepadstudio import manual_recording as module
+from gamepadstudio.screenshot_service import list_captures
 from gamepadstudio.replay_timing import mp4_duration_seconds
 
 pytestmark = pytest.mark.skipif(sys.platform != 'darwin', reason='Mac recording replacement')
@@ -66,6 +68,20 @@ def test_full_recording_has_physical_pixels_and_original_elapsed_time(recording)
     decoded = subprocess.run([ffmpeg,'-v','error','-i',result['path'],'-frames:v','1',
                               '-f','rawvideo','-pix_fmt','rgb24','pipe:1'], capture_output=True, timeout=10)
     assert decoded.returncode == 0 and len(decoded.stdout) == 16*16*3
+    video = value.save_dir / result['path'].split('/')[-1]
+    with video.with_suffix('.jpg').open('rb') as stream:
+        assert stream.read(3) == b'\xff\xd8\xff'
+    metadata = json.loads(video.with_suffix('.json').read_text(encoding='utf-8'))
+    assert (metadata['width'], metadata['height']) == (16, 16)
+    assert metadata['resolution'] == '16x16'
+    assert metadata['mode'] == 'monitor_1'
+    assert metadata['capture_method'] == 'synthetic'
+    assert metadata['color_mode'] == 'SDR BT.709'
+    assert metadata['duration_seconds'] == pytest.approx(mp4_duration_seconds(video), abs=.001)
+    gallery = list_captures(value.save_dir)
+    assert len(gallery) == 1
+    assert (gallery[0]['width'], gallery[0]['height']) == (16, 16)
+    assert gallery[0]['thumb_path'] == str(video.with_suffix('.jpg'))
     assert source.closed
     assert not list(value.save_dir.glob('*.partial.mp4'))
     assert not list(value.save_dir.glob('.*.partial.mp4'))
@@ -189,6 +205,45 @@ def test_cancel_failure_still_joins_worker_and_reports_failure(recording, monkey
     assert completed and 'cancel refused' in completed[0][1]
 
 
+def test_stop_reports_failure_when_capture_worker_never_finishes(recording):
+    value, source = recording
+
+    class StuckWorker:
+        def __init__(self):
+            self.join_timeouts = []
+
+        def join(self, timeout):
+            self.join_timeouts.append(timeout)
+
+        def is_alive(self):
+            return True
+
+    worker = StuckWorker()
+    killed = []
+    value._worker = worker
+    value._source = source
+    value._proc = SimpleNamespace(poll=lambda: None, kill=lambda: killed.append(True))
+    value._phase = 'recording'
+
+    with pytest.raises(TimeoutError, match='录像结束超时'):
+        value.stop()
+
+    assert source.cancelled and killed == [True]
+    assert worker.join_timeouts == [6, 2]
+    assert value._stop.is_set()
+    assert value.status()['phase'] == 'stopping'
+    assert value.status()['running']
+    assert '录像结束超时' in value.status()['last_error']
+    assert value.status()['path'] == ''
+
+    notices = []
+    value.on_event = notices.append
+    assert value.request_stop()
+    value._stopper.join(timeout=1)
+    assert not value._stopper.is_alive()
+    assert any('录像结束失败：录像结束超时' in notice for notice in notices)
+
+
 def test_notice_callback_failure_does_not_corrupt_recording(recording):
     value, _ = recording
     def notice(_): raise RuntimeError('UI closed')
@@ -196,6 +251,24 @@ def test_notice_callback_failure_does_not_corrupt_recording(recording):
     assert value.start()
     finish(value)
     assert value.status()['path'] and value.status()['phase'] == 'idle'
+
+
+def test_gallery_artifact_failure_does_not_discard_playable_video(recording, monkeypatch):
+    value, _ = recording
+    monkeypatch.setattr(value, '_preview_jpeg', lambda *_: (_ for _ in ()).throw(OSError('preview unavailable')))
+    original_write = type(value.save_dir).write_text
+
+    def fail_sidecar(path, *args, **kwargs):
+        if path.suffix == '.json':
+            raise OSError('sidecar unavailable')
+        return original_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(value.save_dir), 'write_text', fail_sidecar)
+    assert value.start()
+    finish(value)
+    result = value.status()
+    assert result['phase'] == 'idle' and result['path'] and result['last_error'] == ''
+    assert len(list(value.save_dir.glob('*.mp4'))) == 1
 
 
 def test_rename_failure_never_claims_saved_file(recording,monkeypatch):

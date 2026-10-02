@@ -594,18 +594,21 @@ def test_studio_cleanup_success_is_idempotent(mac_environment):
     assert owner.closed
 
 
-def test_agent_cleanup_continues_after_recorder_failure(mac_environment):
+def test_agent_cleanup_persists_recorder_timeout_and_releases_device(mac_environment):
     env = mac_environment.make_agent(enable_setting)
     env.actor.record_toggle()
     recorder = FakeRecording.instances[0]
     def failed_stop():
         recorder.finalizations += 1
-        raise OSError('simulated recorder failure')
+        raise TimeoutError('录像结束超时，无法确认文件完整性')
     recorder.stop = failed_stop
     env.actor.close()
     assert recorder.finalizations == 1 and env.physical.handle is None
     assert not env.physical.controller_isolation_status()['active']
     assert env.actor.server.closed
+    assert env.actor.cleanup_errors == ['结束录像失败：录像结束超时，无法确认文件完整性']
+    events = (env.root / 'agent-events.jsonl').read_text(encoding='utf-8').splitlines()
+    assert any('结束录像失败：录像结束超时' in row for row in events)
 
 
 @pytest.mark.parametrize('failure_at', ['input-release', 'recorder-stop'])

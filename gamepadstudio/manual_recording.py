@@ -1,5 +1,7 @@
 """Explicit start/stop recording, independent of the rolling replay buffer."""
 from datetime import datetime
+from io import BytesIO
+import json
 import math
 from pathlib import Path
 import re
@@ -12,7 +14,7 @@ import uuid
 from .replay_capture import create_replay_capture
 from .replay_service import (get_ffmpeg_path, detect_hardware_encoder,
                              _encoder_runtime_options, _subprocess_hidden_flags)
-from .replay_timing import TimestampedRGBWriter, TimestampedAVWriter
+from .replay_timing import TimestampedRGBWriter, TimestampedAVWriter, mp4_duration_seconds
 from .screenshot_service import get_target_monitor_bbox, smart_foreground_info, sanitize_filename
 
 
@@ -82,9 +84,17 @@ class ManualRecording:
             self._phase = 'stopping'
             self._stop.set()
             if not self._stopper or not self._stopper.is_alive():
-                self._stopper = threading.Thread(target=self.stop, daemon=True, name='RecordingFinalize')
+                self._stopper = threading.Thread(target=self._stop_async, daemon=True, name='RecordingFinalize')
                 self._stopper.start()
         return True
+
+    def _stop_async(self):
+        try:
+            self.stop()
+        except TimeoutError as exc:
+            # A mapped controller button cannot block on MP4 finalization.
+            # Keep the failure visible while a later close can retry joining.
+            self._log('录像结束失败：' + str(exc))
 
     def stop(self):
         with self._lock:
@@ -109,8 +119,16 @@ class ManualRecording:
                     try:
                         proc.kill()
                     except OSError as exc:
-                        self._error += '；停止编码器失败：'+str(exc)
+                        with self._lock:
+                            self._error += '；停止编码器失败：'+str(exc)
                 worker.join(timeout=2)
+                if worker.is_alive():
+                    with self._lock:
+                        # The worker still owns the partial file. Do not report
+                        # a completed stop or let the UI close as if it did.
+                        self._phase = 'stopping'
+                        reason = self._error or '录像结束超时，无法确认文件完整性'
+                    raise TimeoutError(reason)
         return self._path or None
 
     def _command(self, source, part):
@@ -127,9 +145,47 @@ class ManualRecording:
                 '-fps_mode', 'passthrough', '-enc_time_base', '1:1000',
                 '-movflags', '+faststart', '-f', 'mp4', str(part)]
 
+    def _save_gallery_artifacts(self, path, *, title, created, width, height, first,
+                                previous, preview, source):
+        """Best-effort gallery data for an already finalized, playable MP4."""
+        metadata = {
+            'title': title, 'raw_title': title, 'created': created.isoformat(),
+            'duration_seconds': round(mp4_duration_seconds(path) or
+                                      max(0.0, previous - first + 1 / self.fps), 3),
+            'width': width, 'height': height, 'resolution': f'{width}x{height}',
+            'mode': self.capture_mode, 'capture_method': self.capture_method,
+            'color_mode': self.color_mode, 'codec': self.codec, 'encoder': self.encoder,
+            'bitrate_mbps': self.bitrate_mbps, 'fps_target': self.fps,
+            'audio': bool(getattr(source, 'audio_enabled', False)),
+            'audio_source': self.audio_scope or None, 'audio_scope': self.audio_scope,
+            'microphone': False, 'favorite': False, 'is_video': True,
+        }
+        try:
+            path.with_suffix('.json').write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding='utf-8')
+        except (OSError, ValueError) as exc:
+            self._log('录像已保存，但图库元数据写入失败：' + str(exc))
+        if preview:
+            try:
+                path.with_suffix('.jpg').write_bytes(preview)
+            except OSError as exc:
+                self._log('录像已保存，但图库封面写入失败：' + str(exc))
+
+    @staticmethod
+    def _preview_jpeg(rgb, width, height):
+        from PIL import Image
+        with Image.frombytes('RGB', (width, height), rgb) as frame:
+            frame.thumbnail((640, 360), Image.Resampling.BILINEAR)
+            with BytesIO() as output:
+                frame.save(output, format='JPEG', quality=85)
+                return output.getvalue()
+
     def _record(self):
         proc = source = errors_thread = part = final = None
-        writer = first = None
+        writer = first = preview = None
+        previous = None
+        width = height = 0
+        title = ''
+        created = None
         errors = bytearray()
         failure = ''
         try:
@@ -148,10 +204,10 @@ class ManualRecording:
                 else:
                     bbox = dict(get_target_monitor_bbox(source, self.capture_mode))
                 window_backend = target = None
-                if self.capture_mode in ('game','window','smart','monitor') and hasattr(source,'configure_window'):
+                if self.capture_mode in ('game','window','smart') and hasattr(source,'configure_window'):
                     from .screenshot_service import get_mac_window_backend
                     window_backend = get_mac_window_backend()
-                    target = window_backend.foreground_window() if self.capture_mode == 'window' else window_backend.smart_window()
+                    target = window_backend.smart_window()
                     if not target or not window_backend.verify(target):
                         raise RuntimeError('没有可录制的活动应用窗口')
                     source.configure_window(target.window_id,self.fps,include_system_audio=True,expected_pid=target.pid)
@@ -172,7 +228,8 @@ class ManualRecording:
                 self.audio_scope = str(getattr(source,'audio_scope',''))
                 self.save_dir.mkdir(parents=True, exist_ok=True)
                 title = target.title if target else smart_foreground_info()[1]
-                name = f'{sanitize_filename(title or "Screen")}_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}'
+                created = datetime.now()
+                name = f'{sanitize_filename(title or "Screen")}_{created:%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}'
                 final = self.save_dir / f'{name}.mp4'
                 part = self.save_dir / f'.{name}.partial.mp4'
                 if self._stop.is_set():
@@ -215,6 +272,11 @@ class ManualRecording:
                         if first is None:
                             first = stamp
                         writer.write_frame(shot.rgb, stamp-first)
+                        if preview is None and self._frames == 0:
+                            try:
+                                preview = self._preview_jpeg(shot.rgb, width, height)
+                            except Exception as exc:
+                                self._log('录像封面生成失败：' + str(exc))
                         self._frames += 1
                         previous = stamp
                         with self._lock:
@@ -271,6 +333,9 @@ class ManualRecording:
                     if not failure and self._frames and part and part.is_file() and part.stat().st_size:
                         part.replace(final)
                         self._path = str(final)
+                        self._save_gallery_artifacts(final, title=title or 'Screen', created=created,
+                                                     width=width, height=height, first=first,
+                                                     previous=previous, preview=preview, source=source)
                     elif self._frames and not failure:
                         failure = '编码器未生成有效的视频文件'
                 except OSError as exc:

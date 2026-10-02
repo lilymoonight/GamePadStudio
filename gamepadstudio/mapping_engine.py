@@ -483,6 +483,7 @@ class MappingRuntime:
         self.curve_blocked = set()
         self.mouse_thread = None
         self.config_signature = None
+        self.unsupported_bindings = []
         if start_mouse:
             from .virtual_kbm import VirtualMouseThread
             self.mouse_thread = VirtualMouseThread(actions)
@@ -511,8 +512,24 @@ class MappingRuntime:
         for token in tokens:
             self.output_counts[token] = max(0, self.output_counts[token] + (1 if down else -1))
 
+    def _unsupported_key_reason(self, binding):
+        """Identify a platform-unsupported key without swallowing output errors."""
+        if binding.get('action') not in ('hold', 'shortcut'):
+            return ''
+        supported = getattr(self.actions, 'supports_key', None)
+        if not callable(supported) or supported(binding.get('value', '')):
+            return ''
+        capability = getattr(self.actions, 'key_capability', None)
+        result = capability(binding.get('value', '')) if callable(capability) else None
+        return (result.get('reason') if isinstance(result, dict) else None) or '此平台不支持该键盘输出'
+
     def _dispatch(self, binding, down=True):
         action = binding.get('action', 'none')
+        # Old or imported Windows profiles can contain keys that the current
+        # platform cannot synthesize. Keep their gesture/chord arbitration but
+        # leave this one output inert; native posting failures still propagate.
+        if self._unsupported_key_reason(binding):
+            return
         if action in HOLD_ACTIONS:
             self._hold(binding, down)
         elif down and action in ('shortcut', 'mouse_click'):
@@ -589,6 +606,15 @@ class MappingRuntime:
                     blocked.update(self.inputs)
                 self.reset(blocked=blocked)
             self.config_signature = signature
+            self.unsupported_bindings = [
+                {'trigger': trigger, 'gesture': gesture,
+                 'value': binding.get('value', ''),
+                 'reason': reason}
+                for trigger, entry in mappings.items()
+                for gesture in GESTURES
+                for binding in (entry.get(gesture, {}),)
+                if (reason := self._unsupported_key_reason(binding))
+            ]
             self.touch_recognizer.reset(block_until_release=True)
             if self.mouse_thread:
                 self.mouse_thread.configure(options.get('mouse', {}))
@@ -642,7 +668,8 @@ class MappingRuntime:
         return {'preview': self.preview, 'inputs': sorted(self.inputs), 'active': list(self.engine.pressed),
                 'outputs': sorted(k for k, n in self.output_counts.items() if n),
                 'recent_outputs': sorted(k for k, until in self.recent.items() if until > self.now),
-                'events': list(self.events), 'sequence': self.seq, 'touch': dict(self.touch_activity)}
+                'events': list(self.events), 'sequence': self.seq, 'touch': dict(self.touch_activity),
+                'unsupported_bindings': [dict(item) for item in self.unsupported_bindings]}
 
     def reset(self, blocked=None):
         # Stop continuous motion even if a following key-up is rejected.
