@@ -252,19 +252,35 @@ def test_mic_exception_always_attempts_disable_and_preserves_state(failure):
     assert not pcm
 
 
-def test_enabled_probe_times_out_and_decodes_only_valid_packets(opus_packets):
+def test_enabled_probe_times_out_and_decodes_only_valid_packets(opus_packets, monkeypatch):
     packet = opus_packets.encode()
     corrupted = bytearray(report(packet, flags=2))
     corrupted[-1] ^= 1
-    transport = FakeTransport([report(), report(), bytes(corrupted), report(packet, flags=2)], delay=.002)
+    clock = Clock()
+    monkeypatch.setattr(probe, 'time', SimpleNamespace(monotonic=clock.monotonic))
+    mic_enabled = threading.Event()
+
+    class TimedTransport(FakeTransport):
+        def read(self):
+            # Let the writer enable the mic before the fake capture clock moves.
+            if self.reads == 1:
+                assert mic_enabled.wait(timeout=5)
+            return super().read()
+
+        def write(self, frame):
+            super().write(frame)
+            if frame[4] == 3:
+                mic_enabled.set()
+
+    transport = TimedTransport([report(), report(), bytes(corrupted), report(packet, flags=2)], clock=clock)
     with audio.OpusDecoder(opus_packets.library) as decoder:
-        result, pcm = probe.probe(transport, .025, True, threading.Event(), decoder)
+        result, pcm = probe.probe(transport, 1, True, threading.Event(), decoder)
     assert result['verdict'] == 'DECODED_AUDIO' and result['valid_audio_packets'] == 1
     assert result['decoded_frames'] == 1 and len(pcm) == 960
     assert result['capture_timed_out'] and result['writer_stopped'] and result['mic_disable_written']
     assert result['mic_enable_written'] and result['speech_verified'] is False
     assert transport.writes[0][4] == 3 and transport.writes[-1][4] == 2
-    assert result['elapsed_seconds'] < 1
+    assert result['elapsed_seconds'] == pytest.approx(1.25)
 
 
 def test_writer_that_cannot_stop_is_reported_as_error(monkeypatch):
