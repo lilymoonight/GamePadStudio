@@ -205,6 +205,7 @@ def trigger_label(trigger, family='generic'):
 
 def binding_label(binding, family='generic'):
     from .studio_core import ACTION_NAMES
+    from .i18n import tr
     action = binding.get('action', 'none')
     value = binding.get('value', '')
     if action == 'gamepad_button':
@@ -217,12 +218,12 @@ def binding_label(binding, family='generic'):
     if action == 'gamepad_macro':
         return '手柄连招 (' + str(len(binding.get('sequence', []))) + ' 步)'
     if action in ('hold', 'shortcut'):
-        return value + ('（按住）' if action == 'hold' else '')
+        return value + (tr('（按住）') if action == 'hold' else '')
     if action in ('mouse_hold', 'mouse_click'):
-        return '鼠标' + {'left': '左键', 'right': '右键', 'middle': '中键'}.get(value, value) + ('（按住）' if action == 'mouse_hold' else '')
+        return tr('鼠标' + {'left': '左键', 'right': '右键', 'middle': '中键'}.get(value, value)) + (tr('（按住）') if action == 'mouse_hold' else '')
     if action == 'wheel':
-        return '滚轮' + ('↑' if value == 'up' else '↓')
-    return ACTION_NAMES.get(action, action)
+        return tr('滚轮') + ('↑' if value == 'up' else '↓')
+    return tr(ACTION_NAMES.get(action, action))
 
 
 def output_tokens(binding):

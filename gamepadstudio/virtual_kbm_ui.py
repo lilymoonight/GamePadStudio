@@ -716,6 +716,16 @@ class KbmFeelDialog(QDialog):
         self.mode.addItem(tr('桌面指针'), 'desktop')
         self.mode.setCurrentIndex(max(0, self.mode.findData(self.mouse.get('mode', 'game'))))
         pointer_form.addRow(tr('用途'), self.mode)
+        self.invert_y = QComboBox()
+        self.invert_y.addItem(tr('常规'), False)
+        self.invert_y.addItem(tr('反转'), True)
+        self.invert_y.setCurrentIndex(1 if self.mouse.get('invert_y') is True else 0)
+        self.invert_y.setAccessibleName(tr('垂直视角方向'))
+        self.invert_y.setToolTip(tr('只影响游戏视角；桌面指针始终使用常规方向。'))
+        self.invert_y.setEnabled(self.mode.currentData() == 'game')
+        self.mode.currentIndexChanged.connect(
+            lambda _index: self.invert_y.setEnabled(self.mode.currentData() == 'game'))
+        pointer_form.addRow(tr('垂直视角方向'), self.invert_y)
         self.mouse_fields = {}
         for key, title, low, high, default in (
             ('sensitivity', '转向速度', 1, 100, 28),
@@ -850,6 +860,7 @@ class KbmFeelDialog(QDialog):
             mouse.update({key: field.value() / 100 if key == 'deadzone' else field.value()
                           for key, field in self.mouse_fields.items()})
             mouse['mode'] = self.mode.currentData()
+            mouse['invert_y'] = self.invert_y.currentData() is True
         inputs = copy.deepcopy(self.input_settings)
         inputs.update({key: self.input_fields[key].value() / 100
                        for key in ('stick_press', 'stick_release', 'trigger_press', 'trigger_release')
@@ -1045,6 +1056,7 @@ class VirtualKbmPage(QWidget):
         self.scheme_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.scheme_combo.setAccessibleName(tr('键鼠预设'))
         self.scheme_combo.currentTextChanged.connect(self.on_scheme_changed)
+        self.scheme_combo.activated.connect(lambda index: getattr(owner, 'use_current_as_manual', lambda name: None)(self.scheme_combo.itemData(index) or self.scheme_combo.itemText(index)) if self.current_scheme() == owner.config.get('active_profile') else None)
         tools.addWidget(self.scheme_combo, 1)
 
         self.scheme_active_badge = QLabel(tr('✓ 已加载生效'))
@@ -1065,6 +1077,13 @@ class VirtualKbmPage(QWidget):
         more = QPushButton(tr('更多设置'))
         more.setCursor(Qt.PointingHandCursor)
         more_menu = QMenu(more)
+        self.application_profiles_action = more_menu.addAction(tr('应用关联'), lambda: getattr(owner, 'open_application_profiles', lambda: None)())
+        more_menu.addAction(tr('设为手动预设'), lambda: owner.change_profile(self.current_scheme()))
+        self.swap_bindings_action = more_menu.addAction(tr('交换绑定'), self.swap_bindings)
+        more_menu.addSeparator()
+        self.import_profile_action = more_menu.addAction(tr('导入预设'), lambda: getattr(owner, 'import_profile', lambda: None)())
+        self.export_profile_action = more_menu.addAction(tr('导出此预设'), lambda: getattr(owner, 'export_profile', lambda name: None)(self.current_scheme()))
+        more_menu.addSeparator()
         more_menu.addAction(tr('后台设置'), lambda: owner.navigate(4))
         self.cloaking_action = more_menu.addAction(tr('设备隐身'), self.open_cloaking)
         if hasattr(owner, 'reset_profile'):
@@ -1388,6 +1407,17 @@ class VirtualKbmPage(QWidget):
         else:
             self.owner.edit_mapping('0', new=True, output=key, profile=scheme, mode='kbm')
 
+    def swap_bindings(self):
+        from .mapping_swap_ui import can_swap_bindings
+        from .mapping_engine import input_sources
+        profile = self.current_scheme()
+        if not can_swap_bindings(self.owner, profile):
+            return
+        current = self.bindings.list.currentItem()
+        first = current.data(Qt.UserRole) if current is not None else next(iter(input_sources(self.owner.snapshot)), None)
+        if first is not None:
+            self.owner.open_mapping_swap(profile, first)
+
     @staticmethod
     def key_token(key):
         from .actions import parse_keys
@@ -1447,6 +1477,11 @@ class VirtualKbmPage(QWidget):
         sources = input_sources(self.owner.snapshot)
         self.mouse_toggle.setVisible(bool({'RS:up', 'RS:down', 'RS:left', 'RS:right'} & set(sources)))
         self.cloaking_action.setEnabled(bool(self.owner.snapshot and self.owner.snapshot.get('vendor') and self.owner.snapshot.get('product')))
+        self.application_profiles_action.setEnabled(bool(self.owner.snapshot))
+        self.import_profile_action.setEnabled(bool(self.owner.snapshot))
+        self.export_profile_action.setEnabled(bool(self.owner.snapshot))
+        from .mapping_swap_ui import can_swap_bindings
+        self.swap_bindings_action.setEnabled(can_swap_bindings(self.owner, selected))
         self.mouse_toggle.blockSignals(True)
         self.mouse_toggle.setChecked(config.get('profile_options', {}).get(selected, {}).get('right_stick_mouse', False))
         self.mouse_toggle.blockSignals(False)
@@ -1479,6 +1514,9 @@ class VirtualKbmPage(QWidget):
         self.refresh_curve_actions(state)
         self.refresh_touch_action(state)
         self.cloaking_action.setEnabled(bool(state and state.get('vendor') and state.get('product')))
+        from .mapping_swap_ui import can_swap_bindings
+        self.swap_bindings_action.setEnabled(can_swap_bindings(self.owner, self.current_scheme()))
+        self.bindings._sync_controls()
         if hasattr(self, 'cloaking_dialog') and self.cloaking_dialog.isVisible():
             self.refresh_cloaking_status()
 

@@ -9,6 +9,18 @@ import sys
 from PySide6.QtCore import QObject, QTimer, Signal, QLockFile
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
+MAX_REQUEST_BYTES = 1024 * 1024
+MAX_REPLY_BYTES = 16 * 1024 * 1024
+STATE_BACKPRESSURE_BYTES = 128 * 1024
+
+
+def _encode_message(message, maximum):
+    data = (json.dumps(message, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
+    if len(data) > maximum:
+        raise ValueError('请求内容超过 1 MiB，无法发送' if maximum == MAX_REQUEST_BYTES
+                         else '后台回复超过 16 MiB，无法完整传送')
+    return data
+
 
 def default_root():
     local_appdata = Path(os.environ.get('LOCALAPPDATA',str(Path.home())))
@@ -60,17 +72,32 @@ def spawn(root,*args):
 
 
 def request(root, command, role='agent', timeout=1200, **values):
+    try:
+        payload = _encode_message({'command': command, **values}, MAX_REQUEST_BYTES)
+    except (ValueError, TypeError, UnicodeError) as exc:
+        return {'type': 'reply', 'ok': False, 'error': str(exc)}
     for legacy in (False, True):
-        socket=QLocalSocket();socket.connectToServer(endpoint(root,role,legacy=legacy))
+        socket=QLocalSocket();socket.setReadBufferSize(MAX_REPLY_BYTES + 1)
+        socket.connectToServer(endpoint(root,role,legacy=legacy))
         if socket.waitForConnected(timeout):
-            socket.write((json.dumps({'command':command,**values})+'\n').encode());socket.flush()
+            if socket.write(payload) < 0:
+                socket.abort();continue
+            socket.flush()
             data=bytearray()
             while socket.waitForReadyRead(timeout):
                 data.extend(bytes(socket.readAll()))
                 while b'\n' in data:
                     line,_,rest=data.partition(b'\n');data=bytearray(rest)
-                    result=json.loads(line)
+                    if len(line) + 1 > MAX_REPLY_BYTES:
+                        socket.abort()
+                        return {'type': 'reply', 'ok': False, 'error': '后台回复超过 16 MiB，无法完整传送'}
+                    try: result=json.loads(line)
+                    except (ValueError, UnicodeError): continue
+                    if not isinstance(result, dict): continue
                     if result.get('type')=='reply':socket.disconnectFromServer();return result
+                if len(data) >= MAX_REPLY_BYTES:
+                    socket.abort()
+                    return {'type': 'reply', 'ok': False, 'error': '后台回复超过 16 MiB，无法完整传送'}
             socket.abort()
     return None
 
@@ -181,7 +208,7 @@ def cleanup_stale_ui(root: Path):
 
 class LocalServer(QObject):
     def __init__(self,root,handler,role='agent',parent=None):
-        super().__init__(parent);self.handler=handler;self.clients={}
+        super().__init__(parent);self.handler=handler;self.clients={};self.pending_replies=set()
         self.server=QLocalServer(self);self.server.setSocketOptions(QLocalServer.UserAccessOption)
         if not self.server.listen(endpoint(root,role)):raise RuntimeError(self.server.errorString())
         self.server.newConnection.connect(self.accept)
@@ -189,35 +216,73 @@ class LocalServer(QObject):
     def accept(self):
         while self.server.hasPendingConnections():
             socket=self.server.nextPendingConnection();self.clients[socket]=bytearray()
+            socket.setReadBufferSize(MAX_REQUEST_BYTES + 1)
             socket.readyRead.connect(lambda s=socket:self.read(s))
             socket.disconnected.connect(lambda s=socket:self.remove(s))
+            socket.bytesWritten.connect(lambda _count, s=socket:self.reply_progress(s))
 
     def remove(self,socket):
-        self.clients.pop(socket,None);socket.deleteLater()
+        self.pending_replies.discard(socket);self.clients.pop(socket,None);socket.deleteLater()
+
+    def reply_progress(self, socket):
+        if socket not in self.clients:
+            return
+        if socket in self.pending_replies and socket.bytesToWrite() == 0:
+            self.pending_replies.discard(socket)
+            # One bounded request buffer can wait behind a large reply. Do not
+            # queue another full configuration until the previous one drains.
+            if self.clients[socket]:
+                self.read(socket)
 
     def read(self,socket):
         buffer=self.clients.get(socket)
         if buffer is None:return
         buffer.extend(bytes(socket.readAll()))
-        if len(buffer)>16384:socket.abort();return
+        if socket in self.pending_replies:
+            if len(buffer) > MAX_REQUEST_BYTES: socket.abort()
+            return
         while b'\n' in buffer:
             line,_,rest=buffer.partition(b'\n');buffer[:]=rest
+            if len(line) + 1 > MAX_REQUEST_BYTES: socket.abort();return
             try:
                 message=json.loads(line)
                 if not isinstance(message,dict):raise ValueError('Invalid message')
                 result=self.handler(message) or {}
                 self.send(socket,{'type':'reply','ok':True,**result})
             except Exception as exc:self.send(socket,{'type':'reply','ok':False,'error':str(exc)})
+            if socket not in self.clients or socket.state() == QLocalSocket.UnconnectedState:
+                return
+            if socket in self.pending_replies:
+                break
+        if len(buffer) > MAX_REQUEST_BYTES or (len(buffer) == MAX_REQUEST_BYTES and b'\n' not in buffer):
+            socket.abort()
 
     def send(self,socket,message):
-        if socket.bytesToWrite()>131072:socket.abort();return
-        socket.write((json.dumps(message,ensure_ascii=False)+'\n').encode());socket.flush()
+        reply = message.get('type') == 'reply'
+        if socket in self.pending_replies:
+            return
+        if socket.bytesToWrite()>STATE_BACKPRESSURE_BYTES:socket.abort();return
+        if reply:
+            try:
+                data = _encode_message(message, MAX_REPLY_BYTES)
+            except (ValueError, TypeError, UnicodeError) as exc:
+                data = _encode_message({'type': 'reply', 'ok': False, 'error': str(exc)}, MAX_REPLY_BYTES)
+            if socket.bytesToWrite() + len(data) > STATE_BACKPRESSURE_BYTES:
+                self.pending_replies.add(socket)
+        else:
+            data = _encode_message(message, MAX_REPLY_BYTES)
+            if len(data) > STATE_BACKPRESSURE_BYTES:
+                socket.abort();return
+        if socket.write(data) < 0:
+            self.pending_replies.discard(socket);socket.abort();return
+        socket.flush()
 
     def broadcast(self,message):
         for socket in list(self.clients):self.send(socket,message)
 
     def close(self):
         for socket in list(self.clients):socket.disconnectFromServer()
+        self.pending_replies.clear()
         self.server.close()
 
 
@@ -225,6 +290,7 @@ class AgentClient(QObject):
     event=Signal(dict)
     def __init__(self,root,parent=None):
         super().__init__(parent);self.root=root;self.socket=QLocalSocket(self);self.buffer=bytearray()
+        self.socket.setReadBufferSize(MAX_REPLY_BYTES + 1)
         self.state=None;self.status={};self.connected=False
         self.socket.connected.connect(self.online);self.socket.disconnected.connect(self.offline)
         self.socket.readyRead.connect(self.receive)
@@ -244,17 +310,23 @@ class AgentClient(QObject):
 
     def send(self,command,**values):
         if not self.connected:return False
-        self.socket.write((json.dumps({'command':command,**values})+'\n').encode());self.socket.flush();return True
+        try: payload = _encode_message({'command': command, **values}, MAX_REQUEST_BYTES)
+        except (ValueError, TypeError, UnicodeError): return False
+        if self.socket.write(payload) < 0:return False
+        self.socket.flush();return True
 
     def receive(self):
         self.buffer.extend(bytes(self.socket.readAll()))
         while b'\n' in self.buffer:
             line,_,rest=self.buffer.partition(b'\n');self.buffer[:]=rest
+            if len(line) + 1 > MAX_REPLY_BYTES:self.socket.abort();self.buffer.clear();return
             try:message=json.loads(line)
             except ValueError:continue
+            if not isinstance(message, dict):continue
             if message.get('type')=='state' or 'device' in message:
                 self.state=message.get('device');self.status=message
             self.event.emit(message)
+        if len(self.buffer) >= MAX_REPLY_BYTES:self.socket.abort();self.buffer.clear()
 
     def close(self):
         self.timer.stop();self.socket.disconnectFromServer()

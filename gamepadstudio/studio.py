@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+from collections import deque
+import re
 from datetime import datetime
 import json
 import os
@@ -14,7 +16,7 @@ from PySide6.QtGui import QColor, QFont, QIcon, QPixmap, QPainter, QKeySequence,
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QFrame, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QGridLayout, QStackedWidget, QComboBox, QScrollArea, QLineEdit,
     QDialog, QFormLayout, QKeySequenceEdit, QFileDialog, QDialogButtonBox, QSlider, QCheckBox,
-    QSystemTrayIcon, QMenu, QInputDialog, QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QSizeGrip)
+    QSystemTrayIcon, QMenu, QInputDialog, QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QSizeGrip, QFileDialog)
 
 from .ipc import AgentClient, RemoteDevice, LocalServer, request, spawn, default_root, autostart_enabled, set_autostart, cleanup_stale_agent, cleanup_stale_ui
 from .studio_core import ConfigStore, GestureEngine, BUTTONS, ACTION_NAMES
@@ -22,6 +24,8 @@ from .device import Device
 from .actions import WindowsActions, parse_keys, launch_command
 from .mapping_engine import MappingRuntime, effective_mappings, binding_label
 from .mapping_ui import BindingDialog
+from .battery_monitor import BatteryMonitor, battery_reported, normalize_power
+from .emergency_hotkey import EmergencyHotkey, normalize_hotkey_settings
 from .mapping_deck import MappingDeck
 from .virtual_kbm_ui import VirtualKbmPage
 from .curve_ui import CurveDialog, supports_curve
@@ -96,12 +100,13 @@ MappingDialog = BindingDialog
 
 
 class Studio(GlassWindow):
+    device_sample = Signal(object)
     def __init__(self, root, standalone=False, lang=None):
         super().__init__()
         root=Path(root).resolve(); self.remote=not standalone; self.closed=False
         self.store=ConfigStore(root); self.config=self.store.data
-        self.store.activate_controller(None)
         if not self.remote:
+            self.store.activate_controller(None)
             self.store.save()
         self.lang_pref = lang
         init_language(lang or self.config.get('language', 'auto'))
@@ -111,6 +116,11 @@ class Studio(GlassWindow):
         if not self.remote:self.device.preferred_key=self.config.get('preferred_controller','')
         self.actions=WindowsActions()
         self.engine=MappingRuntime(self.actions, self.dispatch, start_mouse=not self.remote)
+        if not self.remote:
+            from .application_profiles import ApplicationProfileResolver
+            self.application_resolver = ApplicationProfileResolver(protected_pids={os.getpid()})
+            self._application_profile_status = {'automatic': False, 'executable': '', 'profile': self.config['active_profile']}
+            self._last_application_check = -float('inf')
         if self.remote:
             self.client.event.connect(self.agent_event)
             if request(root,'status',timeout=200) is None:
@@ -121,6 +131,13 @@ class Studio(GlassWindow):
             from .haptic_engine import HapticEngine
             self.haptic_engine = HapticEngine(self.device)
         self.device_identity=object();self.button_names=button_labels('generic');self.mapping_boxes={}
+        self.battery_monitor = BatteryMonitor() if not self.remote else None
+        self._battery_alert_ids = set()
+        self._battery_alert_order = deque()
+        self.battery_warning = None
+        self.emergency_hotkey = None if self.remote else EmergencyHotkey(self.emergency_pause)
+        if self.emergency_hotkey:
+            self.emergency_hotkey.configure(self.config.get('emergency_hotkey'))
         self.last_touch=None; self.last_buttons=set(); self.quitting=False; self.learn=False
         self.log_rows=[]; self.nav={}; self.mapping_labels={}; self.recent_labels=[]
         main = GlassCanvas()
@@ -296,6 +313,17 @@ class Studio(GlassWindow):
         self.notice_timer=QTimer(self);self.notice_timer.setSingleShot(True);self.notice_timer.timeout.connect(lambda:self.notice.setText(tr('映射运行中') if self.enabled else tr('映射已暂停')))
         outer.addWidget(body,1)
         self.tray=QSystemTrayIcon(app_icon(),self); self.tray.setToolTip('GamePad Studio')
+        self.tray_menu = QMenu(self)
+        self.tray_open_action = self.tray_menu.addAction(tr('打开工作台'))
+        self.tray_open_action.triggered.connect(self.show_home)
+        self.tray_menu.addSeparator()
+        self.tray_exit_action = self.tray_menu.addAction(tr('退出'))
+        self.tray_exit_action.triggered.connect(self.quit_app)
+        self.tray.setContextMenu(self.tray_menu)
+        self.tray.activated.connect(lambda reason: self.show_home()
+                                    if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick) else None)
+        self.tray.messageClicked.connect(self.show_home)
+        self.tray.show()
         self.navigate(5); self.refresh_gallery(); self.update_controller_ui(None)
         self.timer=QTimer(self); self.timer.timeout.connect(self.poll); self.timer.start(16)
         self.scan_timer=QTimer(self); self.scan_timer.timeout.connect(self.scan); self.scan_timer.start(1000)
@@ -376,6 +404,7 @@ class Studio(GlassWindow):
         self.profile_combo.addItems(self.store.profiles_for(None))
         self.profile_combo.setCurrentText(self.config['active_profile'])
         self.profile_combo.currentTextChanged.connect(self.change_profile)
+        self.profile_combo.activated.connect(lambda index: self.use_current_as_manual(self.profile_combo.itemText(index)))
         self.profile_combo.setFixedWidth(148)
         self.profile_combo.setMinimumHeight(36)
         self.profile_combo.setMaxVisibleItems(10)
@@ -479,6 +508,7 @@ class Studio(GlassWindow):
         self.mapping_combo = QComboBox()
         self.mapping_combo.setMinimumWidth(180)
         self.mapping_combo.currentTextChanged.connect(self.on_mapping_combo_changed)
+        self.mapping_combo.activated.connect(lambda index: self.use_current_as_manual(self.mapping_combo.itemText(index)))
         tools.addWidget(self.mapping_combo)
 
         self.mapping_active_badge = QLabel(tr('已生效'))
@@ -500,6 +530,15 @@ class Studio(GlassWindow):
         profile_actions.addWidget(instruction, 1)
         profile_actions.addWidget(button(tr('新建手柄配置'), lambda: self.duplicate_profile(target_mode='gamepad'), icon='plus'))
         profile_actions.addWidget(button(tr('恢复默认'), self.reset_profile, icon='refresh'))
+        self.mapping_more_button = button(tr('更多设置'), lambda: None)
+        mapping_more = QMenu(self.mapping_more_button)
+        self.application_profiles_action = mapping_more.addAction(tr('应用关联'), self.open_application_profiles)
+        mapping_more.addAction(tr('设为手动预设'), lambda: self.change_profile(self.current_gamepad_profile()))
+        mapping_more.addSeparator()
+        self.import_profile_action = mapping_more.addAction(tr('导入预设'), self.import_profile)
+        self.export_profile_action = mapping_more.addAction(tr('导出此预设'), lambda: self.export_profile(self.current_gamepad_profile()))
+        self.mapping_more_button.setMenu(mapping_more)
+        profile_actions.addWidget(self.mapping_more_button)
         self.delete_profile_btn = button(tr('删除'), self.delete_profile, icon='trash')
         self.delete_profile_btn.setObjectName('danger')
         profile_actions.addWidget(self.delete_profile_btn)
@@ -677,8 +716,53 @@ class Studio(GlassWindow):
         self.events.resize(640, 400)
         self.events.setParent(self, Qt.Dialog)
         self.events.hide()
-        self.tester = InputTester(self.events.show, self.test_rumble)
+        self.tester = InputTester(self.events.show, self.test_rumble, self.open_stick_measurement)
         self.stack.addWidget(scroll(self.tester))
+
+    def open_stick_measurement(self):
+        from .stick_calibration import supports_right_stick
+        from .stick_calibration_ui import StickMeasurementDialog
+        if not supports_right_stick(self.snapshot):
+            self.notify(tr('当前设备未提供可测量的右摇杆'))
+            return
+        if self.remote and not self.client.connected:
+            self.notify(tr('后台未连接，无法测量'))
+            return
+        if self.remote:
+            self.client.send('suspend', seconds=2)
+        self.engine.reset(); self.actions.release_all()
+        try:
+            dialog = StickMeasurementDialog(self)
+            dialog.exec()
+            dialog.deleteLater()
+        finally:
+            if self.remote:
+                self.client.send('suspend', seconds=2 if QApplication.activeModalWidget() is not None else 0)
+
+    def open_mapping_swap(self, profile, first):
+        from .mapping_swap_ui import MappingSwapDialog
+        if not self.snapshot:
+            self.notify(tr('请先连接手柄'))
+            return
+        if profile not in self.store.profiles_for(self.snapshot):
+            self.notify(tr('输入设备已变化，请重新打开映射编辑。'))
+            return
+        if self.remote and not self.client.connected:
+            self.notify(tr('后台未连接，修改尚未保存'))
+            return
+        self.end_learning()
+        if self.remote:
+            self.client.send('suspend', seconds=2)
+        self.engine.reset(); self.actions.release_all()
+        try:
+            dialog = MappingSwapDialog(self, profile, str(first))
+            dialog.exec()
+            dialog.deleteLater()
+        except ValueError as exc:
+            self.notify(tr(str(exc)))
+        finally:
+            if self.remote:
+                self.client.send('suspend', seconds=2 if QApplication.activeModalWidget() is not None else 0)
 
     def build_settings(self):
         page = QWidget()
@@ -824,6 +908,15 @@ class Studio(GlassWindow):
         l_layout.addLayout(colors)
         self.led_settings_row = led_row
         hardware.add_row(led_row)
+
+        self.battery_notifications_box = Toggle(tr('启用'))
+        self.battery_notifications_box.setChecked(True)
+        self.battery_notifications_box.toggled.connect(
+            lambda value: self.setting('battery_notifications_enabled', value))
+        self.battery_settings_row = AppleRow(
+            'battery_low', (TOKENS['amber'], TOKENS['orange']), tr('低电量提醒'),
+            tr('电量低或极低时提醒一次，充电恢复后重新判断'), self.battery_notifications_box)
+        hardware.add_row(self.battery_settings_row)
 
         rumble_row = QWidget()
         r_layout = QHBoxLayout(rumble_row)
@@ -1009,6 +1102,12 @@ class Studio(GlassWindow):
         self.agent_toggle.setMinimumWidth(88)
         ag_layout.addWidget(self.agent_toggle)
         background.add_row(ag_row)
+
+        self.emergency_hotkey_button = button(tr('设置快捷键'), self.open_emergency_hotkey_editor, pill=True)
+        self.emergency_hotkey_row = AppleRow(
+            'shield', (TOKENS['amber'], TOKENS['orange']), tr('紧急暂停'),
+            tr('使用物理键盘暂停当前映射'), self.emergency_hotkey_button)
+        background.add_row(self.emergency_hotkey_row)
 
         self.autostart = Toggle(tr('启用'))
         self.autostart.setChecked(autostart_enabled())
@@ -1370,9 +1469,12 @@ class Studio(GlassWindow):
             latest = ConfigStore(self.store.root)
             self.store.data.clear(); self.store.data.update(latest.data)
             self.store._baseline = copy.deepcopy(latest.data)
-        self.store.activate_controller(state)
         if not self.remote:
-            self.store.save()
+            identity = (profile_scope(state), state.get('instance_id')) if state else None
+            if identity != getattr(self, '_activated_device_identity', object()):
+                self.store.activate_controller(state)
+                self._activated_device_identity = identity
+                self.store.save()
         title = CATALOG[family]['name'] if state else tr('通用 XInput')
         description = state.get('name', title) if state else tr('未连接设备 · 通用 XInput 键位预览')
         self.controller_heading.setText(title)
@@ -1480,13 +1582,16 @@ class Studio(GlassWindow):
 
     def agent_event(self,message):
         kind=message.get('type')
+        if kind == 'battery':
+            self.handle_battery_event(message)
+            return
         if kind=='state' and hasattr(self,'replay_hud_label'):
             replay = message.get('replay', {})
             signature = (replay.get('running'), replay.get('encoder'), replay.get('last_error'), replay.get('color_mode'))
             if signature != getattr(self, '_replay_hud_signature', None):
                 self._replay_hud_signature = signature
                 self._update_replay_hud()
-        if kind=='notice' and hasattr(self,'notice'):self.notify(message['message'])
+        if kind=='notice' and hasattr(self,'notice'):self.notify(tr(message['message']))
         elif kind=='capture':
             self.capture_button.setEnabled(True)
             if message.get('path'):self.captured(message['path'])
@@ -1590,10 +1695,74 @@ class Studio(GlassWindow):
         self.log_rows.append(dict(time=datetime.now().isoformat(),message=text))
         with (self.store.root/'events.jsonl').open('a',encoding='utf-8') as file: file.write(json.dumps(self.log_rows[-1],ensure_ascii=False)+'\n')
 
+    def _valid_battery_warning(self, event):
+        state = self.snapshot
+        if not isinstance(event, dict) or not state:
+            return False
+        level = event.get('level')
+        return (type(level) is int and level in (0, 1)
+                and event.get('device_scope') == profile_scope(state)
+                and event.get('instance_id') == state.get('instance_id')
+                and normalize_power(state) == level
+                and device_config(self.config, state).get('battery_notifications_enabled') is True)
+
+    def handle_battery_event(self, event, notify=True):
+        if not self._valid_battery_warning(event):
+            return False
+        if not notify:
+            self.battery_warning = dict(event)
+            return True
+        event_id = event.get('id')
+        if not isinstance(event_id, str) or not event_id or len(event_id) > 100:
+            return False
+        if event_id in self._battery_alert_ids:
+            return False
+        self.battery_warning = dict(event)
+        self._battery_alert_ids.add(event_id)
+        self._battery_alert_order.append(event_id)
+        if len(self._battery_alert_order) > 128:
+            self._battery_alert_ids.discard(self._battery_alert_order.popleft())
+        title = tr('手柄电量极低') if event['level'] == 0 else tr('手柄电量低')
+        description = tr('请尽快连接电源，避免游戏中断。') if event['level'] == 0 else tr('建议为手柄充电。')
+        name = str(self.snapshot.get('name') or tr('当前手柄'))
+        self.notify(f'{title} · {name}：{description}')
+        if self.tray.isVisible() and QSystemTrayIcon.supportsMessages():
+            self.tray.showMessage(title, name + '\n' + description, QSystemTrayIcon.Warning, 5000)
+        return True
+
+    def refresh_battery_status(self):
+        state = self.snapshot
+        enabled = device_config(self.config, state).get('battery_notifications_enabled') is True
+        if not self.remote:
+            event = self.battery_monitor.sample(state, time.monotonic(), enabled=enabled)
+            if event:
+                self.handle_battery_event(event)
+            warning = self.battery_monitor.warning(state, enabled=enabled)
+        else:
+            warning = self.client.status.get('battery_warning') if self.client.connected else None
+        self.battery_warning = dict(warning) if self._valid_battery_warning(warning) else None
+        tip = (tr('请尽快连接电源，避免游戏中断。') if self.battery_warning['level'] == 0
+               else tr('建议为手柄充电。')) if self.battery_warning else ''
+        self.power_label.setToolTip(tip)
+        reported = battery_reported(state)
+        if reported != getattr(self, '_battery_reported_last', None):
+            self._battery_reported_last = reported
+            self.refresh_device_settings_ui(state)
+
     def setting(self,key,value):
+        previous_hotkey = copy.deepcopy(self.config.get('emergency_hotkey')) if key == 'emergency_hotkey' else None
         self.store.set_setting(key, value, self.snapshot)
-        self.store.save()
+        try:
+            self.store.save()
+        except Exception:
+            if key == 'emergency_hotkey':
+                self.config['emergency_hotkey'] = previous_hotkey
+            raise
         if self.remote:self.client.send('reload')
+        if key == 'emergency_hotkey':
+            if self.emergency_hotkey:
+                self.emergency_hotkey.configure(self.config.get('emergency_hotkey'))
+            self.refresh_emergency_hotkey_status()
         if key=='long_press': self.engine.threshold=value
         if key=='touch_mouse': self.last_touch=None
         if not self.remote and (key in DEVICE_SETTING_KEYS or key == 'capture_sound_enabled'):
@@ -1630,6 +1799,7 @@ class Studio(GlassWindow):
         has_rumble = bool(state and state.get('rumble'))
         has_touch = supports_touch(state)
         for row, visible in ((self.led_settings_row, has_led),
+                             (self.battery_settings_row, battery_reported(state)),
                              (self.rumble_settings_row, has_rumble),
                              (self.haptic_settings_row, has_rumble),
                              (self.shutter_haptics_row, has_rumble),
@@ -1649,7 +1819,7 @@ class Studio(GlassWindow):
             tr('左右扳机马达 · 应用反馈已启用') if settings.get('trigger_rumble_enabled') else
             tr('左右扳机马达 · 默认关闭'))
         self.hardware_empty.setVisible(not (has_led or has_rumble or has_touch or capabilities['trigger_axes']
-                                            or capabilities['trigger_rumble']))
+                                            or capabilities['trigger_rumble'] or battery_reported(state)))
         for control, value in ((self.rumble_slider, round(settings['rumble'] * 100)),
                                (self.long_press_slider, round(settings['long_press'] * 100))):
             control.blockSignals(True)
@@ -1658,11 +1828,13 @@ class Studio(GlassWindow):
         self.rumble_value.setText(f"{round(settings['rumble'] * 100)}%")
         self.long_press_value.setText(f"{settings['long_press']:.2f} " + tr('秒'))
         for control, value in ((self.touch_mouse_box, settings['touch_mouse']),
+                               (self.battery_notifications_box, settings['battery_notifications_enabled']),
                                (self.shutter_haptics_box, settings['capture_haptics_enabled'])):
             control.blockSignals(True)
             control.setChecked(bool(value))
             control.blockSignals(False)
         self.rumble_slider.setEnabled(has_rumble)
+        self.battery_notifications_box.setEnabled(battery_reported(state))
         self.shutter_haptics_box.setEnabled(has_rumble)
         for swatch in self.led_buttons:
             swatch.setEnabled(has_led)
@@ -1685,6 +1857,8 @@ class Studio(GlassWindow):
     def poll(self):
         try:
             state=self.device.read(); self.snapshot=state; connected=state is not None
+            if not self.remote:
+                self.device_sample.emit(state)
             identity=(state.get('instance_id'),profile_scope(state)) if state else None
             profile_changed=self.remote and (self.client.status.get('profile',self.config['active_profile'])!=self.config['active_profile'] or self.client.status.get('mapping_revision',0)!=self.config.get('mapping_revision',0))
             if profile_changed:
@@ -1693,6 +1867,9 @@ class Studio(GlassWindow):
             if identity!=self.device_identity or profile_changed or capabilities_changed:
                 self.engine.reset();self.actions.release_all();self.last_buttons=set();self.device_identity=identity
                 self.update_controller_ui(state)
+            if not self.remote:
+                self.update_application_profile()
+            self.refresh_battery_status()
             self.controllers.set_devices(self.device.available,state.get('instance_id') if state else None,state)
             if self.remote:
                 online=self.client.connected; self.enabled=self.client.status.get('enabled',False)
@@ -1709,6 +1886,7 @@ class Studio(GlassWindow):
                     now=time.monotonic()
                     if now-getattr(self,'last_suspend',0)>.5:
                         self.client.send('suspend',seconds=2);self.last_suspend=now
+            self.refresh_emergency_hotkey_status()
             if connected != self.previous_connected:
                 self.engine.reset(); self.actions.release_all(); self.last_touch=None
                 self.previous_connected=connected
@@ -1760,6 +1938,7 @@ class Studio(GlassWindow):
             else:
                 feedback = self.engine.feedback() if state else {}
             self.virtual_kbm_page.set_device_state(state)
+            self.refresh_application_profile_status()
             self.virtual_kbm_page.update_feedback(feedback, bool(state), self.client.status.get('suspended',False) if self.remote else QApplication.activeModalWidget() is not None)
             self.mapping_deck.feedback(feedback)
             if not self.notice_timer.isActive():
@@ -1834,6 +2013,62 @@ class Studio(GlassWindow):
         self.config['mapping_enabled']=enable;self.store.save();self.enabled=enable
         self.pause_button.setText(tr('暂停映射') if self.enabled else tr('恢复映射'));self.pause_button.set_symbol('pause' if self.enabled else 'play'); self.notify(tr('映射已恢复') if self.enabled else tr('映射已暂停 · 设备监测继续运行'))
 
+    def emergency_pause(self):
+        if self.closed or self.remote:
+            return
+        self.enabled = False
+        self.config['mapping_enabled'] = False
+        errors = []
+        for release in (self.engine.reset, self.actions.release_all):
+            try:
+                release()
+            except Exception as exc:
+                errors.append(str(exc))
+        try:
+            self.store.save()
+        except Exception as exc:
+            errors.append(str(exc))
+        self.pause_button.setText(tr('恢复映射'))
+        self.pause_button.set_symbol('play')
+        self.notify(tr('已紧急暂停映射，请在工作台手动恢复。')
+                    + (' ' + tr('暂停状态保存或输入释放失败：') + '; '.join(errors) if errors else ''))
+
+    def open_emergency_hotkey_editor(self):
+        from .emergency_hotkey_ui import EmergencyHotkeyDialog
+        self.engine.reset()
+        self.actions.release_all()
+        if self.remote:
+            self.client.send('suspend', seconds=2)
+        try:
+            EmergencyHotkeyDialog(self).exec()
+        finally:
+            if self.remote:
+                self.client.send('suspend', seconds=0)
+                self.last_suspend = 0
+
+    def refresh_emergency_hotkey_status(self):
+        if self.remote:
+            status = self.client.status.get('emergency_hotkey', {}) if self.client.connected else {}
+            online = self.client.connected
+        else:
+            status = self.emergency_hotkey.status()
+            online = True
+        settings = normalize_hotkey_settings(self.config.get('emergency_hotkey'))
+        registered = bool(online and status.get('registered') and settings['enabled']
+                          and status.get('shortcut') == settings['shortcut'])
+        if not settings['enabled']:
+            text = tr('默认关闭 · 使用物理键盘暂停映射')
+        elif not online:
+            text = tr('后台离线，快捷键未生效')
+        elif registered:
+            text = settings['shortcut'] + ' · ' + tr('已生效')
+        else:
+            text = tr(status.get('error') or '快捷键未生效，请检查后台状态')
+        self.emergency_hotkey_row.subtitle_label.setText(text)
+        pause_hint = tr('暂停手柄映射') if self.enabled else tr('恢复手柄映射')
+        self.pause_button.setToolTip(pause_hint + (' · ' + tr('紧急暂停') + ': ' + settings['shortcut']
+                                                  if registered else ''))
+
     def current_gamepad_profile(self):
         from .studio_core import profile_mode
         active = self.config.get('active_profile', '')
@@ -1857,9 +2092,126 @@ class Studio(GlassWindow):
             self.change_profile(profile)
 
     def change_profile(self,name):
-        if not name or name not in self.config['profiles'] or name == self.config['active_profile']: return
+        if not name or name not in self.config['profiles']: return
         if self.mapping_change({'op': 'select', 'profile': name}):
             if not self.snapshot: self.update_controller_ui(None)
+
+    def use_current_as_manual(self, name):
+        if self.application_profile_status().get('automatic'):
+            self.change_profile(name)
+
+    def open_application_profiles(self):
+        if not self.snapshot:
+            self.notify(tr('请先连接手柄'))
+            return
+        from .application_profiles_ui import ApplicationProfilesDialog
+        if self.remote:
+            self.client.send('suspend', seconds=2)
+        self.engine.reset(); self.actions.release_all()
+        dialog = ApplicationProfilesDialog(self)
+        dialog.exec()
+        dialog.deleteLater()
+        if self.remote:
+            self.client.send('suspend', seconds=2 if QApplication.activeModalWidget() is not None else 0)
+
+    def export_profile(self, profile):
+        if not self.snapshot:
+            self.notify(tr('请先连接手柄'))
+            return
+        from .profile_transfer import export_profile, save_profile_file
+        if self.remote:
+            self.client.send('suspend', seconds=2)
+        self.engine.reset(); self.actions.release_all()
+        try:
+            package = export_profile(self.config, self.snapshot, profile)
+            filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', profile) + '.gpsprofile.json'
+            path, _ = QFileDialog.getSaveFileName(self, tr('导出预设'), filename,
+                tr('GamePad Studio 预设 (*.gpsprofile.json *.json)'), options=QFileDialog.DontUseNativeDialog)
+            if path:
+                save_profile_file(path, package)
+                self.notify(tr('预设已导出'))
+        except (OSError, ValueError) as exc:
+            self.notify(tr(str(exc)))
+        finally:
+            if self.remote:
+                self.client.send('suspend', seconds=2 if QApplication.activeModalWidget() is not None else 0)
+
+    def import_profile(self):
+        if not self.snapshot:
+            self.notify(tr('请先连接手柄'))
+            return
+        from .profile_transfer import load_profile_file
+        from .profile_transfer_ui import ProfileImportDialog
+        if self.remote:
+            self.client.send('suspend', seconds=2)
+        self.engine.reset(); self.actions.release_all()
+        try:
+            path, _ = QFileDialog.getOpenFileName(self, tr('导入预设'), '',
+                tr('GamePad Studio 预设 (*.gpsprofile.json *.json)'), options=QFileDialog.DontUseNativeDialog)
+            if not path:
+                return
+            package = load_profile_file(path)
+            dialog = ProfileImportDialog(self, package)
+            dialog.exec()
+            dialog.deleteLater()
+        except (OSError, ValueError) as exc:
+            self.notify(tr(str(exc)))
+        finally:
+            if self.remote:
+                self.client.send('suspend', seconds=2 if QApplication.activeModalWidget() is not None else 0)
+
+    def application_profile_status(self):
+        if self.remote:
+            return self.client.status.get('application_profile', {})
+        return getattr(self, '_application_profile_status', {})
+
+    def update_application_profile(self, now=None, force=False):
+        from .application_profiles import foreground_application
+        now = time.monotonic() if now is None else now
+        if not force and now - self._last_application_check < .25:
+            return False
+        self._last_application_check = now
+        resolved = self.application_resolver.resolve(
+            self.config, self.snapshot, foreground_application(), now,
+            editing=bool(self.learn or self.virtual_kbm_page.is_capturing or
+                         QApplication.activeModalWidget() is not None or self.testing_protected()),
+            preview=self.preview_requested())
+        target = resolved.get('profile', '')
+        changed = target in self.config['profiles'] and target != self.config['active_profile']
+        if changed:
+            self.engine.reset(); self.actions.release_all(); self.last_touch = None
+            self.config['active_profile'] = target
+            self.config['mapping_revision'] = self.config.get('mapping_revision', 0) + 1
+            self.store.save()
+        resolved['profile'] = self.config['active_profile']
+        self._application_profile_status = resolved
+        if changed:
+            self.refresh_mappings()
+        return changed
+
+    def refresh_application_profile_status(self):
+        status = self.application_profile_status()
+        automatic = bool(status.get('automatic') and status.get('profile') == self.config.get('active_profile'))
+        import ntpath
+        tip = tr('应用自动切换：{app}', app=ntpath.basename(status.get('executable', ''))) if automatic else ''
+        if hasattr(self, 'application_profiles_action'):
+            self.application_profiles_action.setEnabled(bool(self.snapshot))
+            self.import_profile_action.setEnabled(bool(self.snapshot))
+            self.export_profile_action.setEnabled(bool(self.snapshot))
+        if hasattr(self, 'virtual_kbm_page'):
+            self.virtual_kbm_page.application_profiles_action.setEnabled(bool(self.snapshot))
+            self.virtual_kbm_page.import_profile_action.setEnabled(bool(self.snapshot))
+            self.virtual_kbm_page.export_profile_action.setEnabled(bool(self.snapshot))
+            active = self.virtual_kbm_page.current_scheme() == self.config.get('active_profile')
+            if active:
+                self.virtual_kbm_page.scheme_active_badge.setText(tr('应用自动生效') if automatic else tr('✓ 已加载生效'))
+            self.virtual_kbm_page.scheme_active_badge.setToolTip(tip if active else '')
+        if hasattr(self, 'mapping_active_badge'):
+            active = self.current_gamepad_profile() == self.config.get('active_profile')
+            if active:
+                self.mapping_active_badge.setText(tr('应用自动生效') if automatic else tr('已生效'))
+            self.mapping_active_badge.setToolTip(tip if active else '')
+        self.profile_combo.setToolTip(tip)
 
     def duplicate_profile(self, target_mode=None):
         if not target_mode:
@@ -2027,6 +2379,7 @@ class Studio(GlassWindow):
 
         if hasattr(self, 'virtual_kbm_page'):
             self.virtual_kbm_page.refresh_display()
+        self.refresh_application_profile_status()
         self.mapping_deck.refresh()
 
         target_gamepad = self.current_gamepad_profile()
@@ -2081,17 +2434,34 @@ class Studio(GlassWindow):
     def mapping_change(self, change):
         try:
             if self.remote:
-                result = request(self.store.root, 'mapping_change', change=change, device_scope=profile_scope(self.snapshot))
+                context = {'device_scope': profile_scope(self.snapshot)}
+                if change.get('op') in ('import_profile', 'pointer_deadzone', 'swap_bindings'):
+                    context['instance_id'] = (self.snapshot or {}).get('instance_id')
+                result = request(self.store.root, 'mapping_change', change=change, **context)
                 if not result or not result.get('ok', True) or 'config' not in result:
                     raise ValueError((result or {}).get('error', '后台未连接，修改尚未保存'))
                 data = result['config']
                 self.store.data.clear(); self.store.data.update(data)
                 self.store._baseline = copy.deepcopy(data)
+                if change.get('op') in ('select', 'create'):
+                    self.client.status['application_profile'] = {
+                        'automatic': False, 'executable': '', 'profile': data['active_profile']}
+                if change.get('op') == 'import_profile':
+                    self.last_imported_profile = result.get('imported_profile', '')
             else:
                 self.engine.reset()
                 self.store.apply_mapping_change(change, self.snapshot)
+                if change.get('op') in ('select', 'create'):
+                    self.application_resolver.manual_selection(self.config['active_profile'])
+                    self._application_profile_status = {'automatic': False, 'executable': '', 'profile': self.config['active_profile']}
+                if change.get('op') in ('application_profiles', 'select', 'create'):
+                    self.update_application_profile(force=True)
+                if change.get('op') == 'import_profile':
+                    self.last_imported_profile = self.store.last_imported_profile
             self.refresh_mappings()
-            if (change.get('op') == 'binding' and str(change.get('trigger', '')).startswith('TP:') and
+            if change.get('op') == 'import_profile':
+                self.notify(tr('已导入预设：{name}', name=self.last_imported_profile))
+            elif (change.get('op') == 'binding' and str(change.get('trigger', '')).startswith('TP:') and
                     change.get('mapping', {}).get('short', {}).get('action', 'none') not in ('none', 'suppress')):
                 self.notify('手势已绑定并启用' if self.config.get('active_profile') == change.get('profile')
                             else '手势已绑定；此预设尚未生效，请设为当前生效。')
@@ -2099,7 +2469,7 @@ class Studio(GlassWindow):
                 self.notify('映射已保存')
             return True
         except (ValueError, OSError) as exc:
-            self.notify(str(exc)); return False
+            self.notify(tr(str(exc))); return False
 
     def edit_mapping(self, key, new=False, output=None, capture=False, profile=None, mode=None):
         target_profile = profile or (self.virtual_kbm_page.current_scheme() if self.stack.currentIndex() == 6 else self.current_gamepad_profile())
@@ -2387,6 +2757,8 @@ class Studio(GlassWindow):
         self.closed=True
         self.timer.stop(); self.scan_timer.stop(); self.gallery_timer.stop()
         self.notice_timer.stop();self.events.close()
+        if self.emergency_hotkey:
+            self.emergency_hotkey.close()
         if self.remote:
             if self.client and self.client.connected:
                 try: self.client.send('preview', seconds=0)

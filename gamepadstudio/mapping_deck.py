@@ -231,6 +231,13 @@ class MappingDeck(QWidget):
         self.input_heading = _text(tr('当前按键'), self)
         header.addWidget(self.input_heading)
         header.addStretch()
+        self.swap_btn = QPushButton(tr('交换'))
+        self.swap_btn.setCursor(Qt.PointingHandCursor)
+        self.swap_btn.setStyleSheet(f"font-size: 11px; color: {TOKENS['ink_2']}; padding: 2px 6px; min-height: 22px; border: none;")
+        self.swap_btn.setAccessibleName(tr('交换绑定'))
+        self.swap_btn.setToolTip(tr('与另一输入交换完整映射'))
+        self.swap_btn.clicked.connect(self.swap)
+        header.addWidget(self.swap_btn)
         self.clear_btn = QPushButton(tr('清除映射'))
         self.clear_btn.setCursor(Qt.PointingHandCursor)
         self.clear_btn.setStyleSheet(f"font-size: 11px; color: {TOKENS['ink_3']}; padding: 2px 6px; min-height: 22px; border: none;")
@@ -301,6 +308,9 @@ class MappingDeck(QWidget):
         self.refresh_curve_controls()
         self.clear_btn.setEnabled(any(entry.get(g, {}).get('action', 'none') != 'none' for g in ('short', 'long')))
         self.clear_btn.setText(tr('清除映射'))
+        from .mapping_swap_ui import can_swap_bindings
+        self.swap_btn.setEnabled(can_swap_bindings(self.owner, profile, self.selected_trigger))
+        self.swap_btn.setText(tr('交换'))
         self.combo_heading.setText(tr('组合映射'))
         self.combo_btn.setText('+ ' + tr('添加组合'))
         _clear(self.combo_layout)
@@ -382,6 +392,11 @@ class MappingDeck(QWidget):
 
     def clear(self):
         self.owner.mapping_change({'op': 'unbind', 'trigger': self.selected_trigger, 'profile': self._profile()})
+
+    def swap(self):
+        from .mapping_swap_ui import can_swap_bindings
+        if can_swap_bindings(self.owner, self._profile(), self.selected_trigger):
+            self.owner.open_mapping_swap(self._profile(), self.selected_trigger)
 
     def feedback(self, data):
         self._feedback_data = data
