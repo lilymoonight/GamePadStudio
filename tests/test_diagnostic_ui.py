@@ -6,7 +6,7 @@ from types import ModuleType
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog, QSizePolicy
 
 from gamepadstudio.input_tester import InputTester
 from gamepadstudio.i18n import init_language
@@ -52,11 +52,16 @@ def test_offline_test_page_keeps_activity_and_diagnostic_actions_available():
         assert not tester.rumble_description.isVisible()
         assert tester.trigger_gauges[0].toolTip() == tester.trigger_description.text()
         assert tester.motor_status.toolTip() == tester.rumble_description.text()
+        assert tester.stick_gauges[0].sizePolicy().verticalPolicy() == QSizePolicy.Ignored
+        assert tester.trigger_gauges[0].sizePolicy().verticalPolicy() == QSizePolicy.Ignored
         assert tester.events_button.isVisible()
         assert tester.export_diagnostic_button.isVisible()
         tester.events_button.click()
         tester.export_diagnostic_button.click()
         assert actions == ['events', 'diagnostic']
+        tester.resize(960, 640)
+        app.processEvents()
+        assert tester.stick_gauges[0].sizePolicy().verticalPolicy() == QSizePolicy.Expanding
     finally:
         tester.close()
 
