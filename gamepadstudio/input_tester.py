@@ -420,6 +420,11 @@ class InputTester(QWidget):
         self.drift_spec.setVisible(not compact)
         self.trigger_description.setVisible(not compact)
         self.rumble_description.setVisible(not compact)
+        # The gauges expand inside their cards. In a compact workspace their
+        # 120px preferred heights must not force the whole page to scroll.
+        gauge_policy = QSizePolicy.Ignored if compact else QSizePolicy.Expanding
+        for gauge in (*self.stick_gauges, *self.trigger_gauges):
+            gauge.setSizePolicy(QSizePolicy.Expanding, gauge_policy)
         self._dashboard_layout.setSpacing(8 if compact else 14)
         margins = (14, 8, 14, 8) if compact else (18, 16, 18, 16)
         for card_layout in self._card_layouts:
