@@ -10,6 +10,7 @@ import argparse
 import array
 from collections import Counter
 import ctypes as C
+from dataclasses import asdict
 import json
 import math
 import os
@@ -24,11 +25,52 @@ import wave
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault('PYGAME_HIDE_SUPPORT_PROMPT', '1')
 from gamepadstudio.device import load_sdl_library
-from gamepadstudio.dualsense_audio import (FRAME_SAMPLES, OpusDecoder, RATE, audio_packet,
+from gamepadstudio.dualsense_audio import (FRAME_SAMPLES, OpusDecoder, OpusPacketInspector,
+                                         RATE, audio_packet,
                                          mic_control_report, valid_extended_report)
 
 
 _PCM_FRAME_BYTES = FRAME_SAMPLES * 2
+
+
+class ReportCadence:
+    """Count CRC-valid header transitions without retaining HID payloads.
+
+    These are observed modulo counters, not a claim about where packets were
+    lost. In particular, the audio header byte has not been established as a
+    reliable loss counter on every controller firmware.
+    """
+
+    def __init__(self):
+        self.previous_sequence = self.previous_audio_counter = None
+        self.sequence_deltas, self.audio_counter_deltas = Counter(), Counter()
+        self.arrivals = []
+        self.flags = Counter()
+
+    def observe(self, report, arrived):
+        if not valid_extended_report(report):
+            return
+        sequence = report[1] >> 4
+        if self.previous_sequence is not None:
+            self.sequence_deltas[(sequence - self.previous_sequence) & 15] += 1
+        self.previous_sequence = sequence
+        self.flags[report[1] & 15] += 1
+        self.arrivals.append(arrived)
+        if report[1] & 2:
+            counter = report[2]
+            if self.previous_audio_counter is not None:
+                self.audio_counter_deltas[(counter - self.previous_audio_counter) & 255] += 1
+            self.previous_audio_counter = counter
+
+    def summary(self):
+        result = dict(extended_sequence_deltas=dict(sorted(self.sequence_deltas.items())),
+                      audio_header_counter_deltas=dict(sorted(self.audio_counter_deltas.items())),
+                      extended_report_flags=dict(sorted(self.flags.items())))
+        if len(self.arrivals) > 1:
+            gaps = [(b - a) * 1000 for a, b in zip(self.arrivals, self.arrivals[1:])]
+            result['extended_report_gap_ms'] = dict(
+                median=round(statistics.median(gaps), 3), max=round(max(gaps), 3))
+        return result
 
 
 def append_at_capture_time(pcm: bytearray, decoded: bytes, *, started: float,
@@ -157,18 +199,29 @@ def initial_result(enable_mic):
                 errors=[], speech_verified=False)
 
 
-def probe(transport, seconds, enable_mic, stop, decoder=None):
+def probe(transport, seconds, enable_mic, stop, decoder=None, mic_keepalive_seconds=.5,
+          packet_inspector=None):
     result = initial_result(enable_mic)
     sizes, identifiers = Counter(), Counter()
     pcm = bytearray()
     audio_arrivals = []
     reports_per_second = Counter()
     audio_per_second = Counter()
+    cadence = ReportCadence()
+    packet_formats = Counter()
     writer = None
     started = time.monotonic()
     try:
         if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not 0 < seconds <= 30:
             raise ValueError('探测时长必须为大于 0 且不超过 30 秒的有限数值。')
+        if (isinstance(mic_keepalive_seconds, bool)
+                or not isinstance(mic_keepalive_seconds, (int, float))
+                or not math.isfinite(mic_keepalive_seconds)
+                or not .01 <= mic_keepalive_seconds <= 1):
+            raise ValueError('麦克风控制间隔必须在 10–1000 毫秒之间。')
+        result['mic_keepalive_ms'] = mic_keepalive_seconds * 1000
+        result['mic_enable_writes'] = 0
+        result['max_mic_write_ms'] = 0
         # A full control report must be readable before attempting an output.
         baseline_deadline = started + 3
         extended = False
@@ -201,10 +254,16 @@ def probe(transport, seconds, enable_mic, stop, decoder=None):
                 sequence = 0
                 try:
                     while not stop.is_set() and time.monotonic() < deadline:
+                        write_started = time.monotonic()
                         transport.write(mic_control_report(sequence, True))
+                        result['max_mic_write_ms'] = max(
+                            result['max_mic_write_ms'],
+                            round((time.monotonic() - write_started) * 1000, 3))
+                        result['mic_enable_writes'] += 1
                         result['mic_enable_written'] = True
                         sequence = (sequence + 1) & 15
-                        if stop.wait(min(.5, max(0, deadline - time.monotonic()))):
+                        if stop.wait(min(mic_keepalive_seconds,
+                                         max(0, deadline - time.monotonic()))):
                             break
                 except Exception as exc:
                     result['errors'].append(str(exc))
@@ -233,11 +292,17 @@ def probe(transport, seconds, enable_mic, stop, decoder=None):
             reports_per_second[int(last_report - capture_started)] += 1
             sizes[len(report)] += 1
             identifiers[hex(report[0])] += 1
+            cadence.observe(report, last_report)
             if len(report) > 1 and report[0] == 0x31 and report[1] & 2:
                 result['audio_flagged'] += 1
             packet = audio_packet(report)
             if packet is not None:
                 result['valid_audio_packets'] += 1
+                if packet_inspector is not None:
+                    try:
+                        packet_formats[packet_inspector.inspect(packet)] += 1
+                    except ValueError:
+                        result['packet_header_errors'] = result.get('packet_header_errors', 0) + 1
                 if enable_mic:
                     audio_arrivals.append(last_report)
                     audio_per_second[int(last_report - capture_started)] += 1
@@ -257,6 +322,7 @@ def probe(transport, seconds, enable_mic, stop, decoder=None):
             pcm.extend(bytes(trailing * _PCM_FRAME_BYTES))
             result['missing_audio_frames'] += trailing
         result['capture_timed_out'] = time.monotonic() >= deadline
+        result['capture_seconds'] = round(min(time.monotonic(), deadline) - capture_started, 3)
         result['audio_coverage'] = round(
             result['decoded_frames'] /
             (result['decoded_frames'] + result['missing_audio_frames']), 3
@@ -284,6 +350,11 @@ def probe(transport, seconds, enable_mic, stop, decoder=None):
         result['report_sizes'] = dict(sizes)
         result['report_ids'] = dict(identifiers)
         result['elapsed_seconds'] = round(time.monotonic() - started, 3)
+        result.update(cadence.summary())
+        result['encoded_packet_formats'] = [dict(asdict(info), packets=count)
+                                           for info, count in packet_formats.items()]
+        result['pcm_output_sample_rate_hz'] = RATE
+        result['pcm_output_channels'] = 1
         if enable_mic:
             result['reports_per_second'] = dict(sorted(reports_per_second.items()))
             result['audio_packets_per_second'] = dict(sorted(audio_per_second.items()))
@@ -312,10 +383,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--enable-mic', action='store_true')
     parser.add_argument('--seconds', type=float, default=8)
+    parser.add_argument('--mic-keepalive-ms', type=float, default=500,
+                        help='Experimental control-only keepalive interval, 10–1000 ms.')
+    parser.add_argument('--no-save-audio', action='store_true',
+                        help='Inspect and decode in memory; save only JSON diagnostics, no WAV.')
     parser.add_argument('--output', type=Path, required=True, help='Local JSON result path; WAV uses same stem.')
     args = parser.parse_args()
-    if sys.platform != 'darwin' or not 1 <= args.seconds <= 30:
-        parser.error('仅支持 macOS，时长必须在 1–30 秒之间。')
+    if sys.platform != 'darwin':
+        parser.error('仅支持 macOS。')
+    if not 1 <= args.seconds <= 30:
+        parser.error('时长必须在 1–30 秒之间。')
+    if not 10 <= args.mic_keepalive_ms <= 1000:
+        parser.error('麦克风控制间隔必须在 10–1000 毫秒之间。')
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
@@ -324,10 +403,13 @@ def main():
     try:
         if args.enable_mic:
             decoder = OpusDecoder()
+        inspector = OpusPacketInspector(decoder.lib) if decoder else None
         transport = Transport()
-        result, pcm = probe(transport, args.seconds, args.enable_mic, stop, decoder)
+        result, pcm = probe(transport, args.seconds, args.enable_mic, stop, decoder,
+                            args.mic_keepalive_ms / 1000, inspector)
         result['device_name'] = transport.name
-        if pcm:
+        result['audio_saved'] = False
+        if pcm and not args.no_save_audio:
             wav_path = args.output.with_suffix('.wav')
             wav_path.parent.mkdir(parents=True, exist_ok=True)
             with private_output(wav_path) as raw:
@@ -337,6 +419,7 @@ def main():
                     output.setframerate(RATE)
                     output.writeframes(pcm)
             result['wav_path'] = str(wav_path.resolve())
+            result['audio_saved'] = True
     except Exception as exc:
         # Preserve writer ownership even if saving the WAV fails. Losing the
         # writer_stopped=False marker could race SDL_hid_close with a write.
