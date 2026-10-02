@@ -84,6 +84,33 @@ def test_old_portable_v1_without_invert_y_is_compatible_and_defaults_off():
     assert result['profile'] == original['profile']
 
 
+def test_toggle_bindings_roundtrip_without_changing_old_hold_bindings(tmp_path):
+    target = state()
+    original = package({'0': mapping('hold', 'W', mode='toggle'),
+                        '1': mapping('mouse_hold', 'left', mode='toggle'),
+                        '2': mapping('hold', 'S')})
+    exported = export_profile(config(original, target), target, '我的预设')
+    path = tmp_path / 'toggle.gamepadstudio-profile.json'
+    save_profile_file(path, exported)
+    result = preview_profile_import(load_profile_file(path), target)
+    assert result['profile']['mappings'] == original['profile']['mappings']
+    assert 'mode' not in result['profile']['mappings']['2']['short']
+
+
+@pytest.mark.parametrize('mode', [None, True, 1, '', 'turbo', 'TOGGLE', [], {}])
+def test_portable_toggle_rejects_invalid_modes(mode):
+    original = package({'0': mapping('hold', 'W', mode=mode)})
+    with pytest.raises(ValueError, match='模式'):
+        preview_profile_import(original, state())
+
+
+def test_portable_toggle_rejects_touch_and_non_hold_actions():
+    with pytest.raises(ValueError, match='触摸板手势'):
+        preview_profile_import(package({'TP:tap': mapping('hold', 'W', mode='toggle')}), state())
+    with pytest.raises(ValueError):
+        preview_profile_import(package({'0': mapping('shortcut', 'W', mode='toggle')}), state())
+
+
 @pytest.mark.parametrize('value', [0, 1, 0., 1., 'true', 'false', '0', '1', None, [], {}])
 def test_portable_invert_y_rejects_every_non_boolean(value):
     original = package()
