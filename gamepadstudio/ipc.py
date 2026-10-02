@@ -67,25 +67,39 @@ def endpoint(root, role='agent', legacy=False):
     return prefix+role+'-'+hashlib.sha256(identity.encode()).hexdigest()[:20]
 
 
+def _source_checkout_root():
+    """Return the project root only when this module runs from a checkout."""
+    if getattr(sys, 'frozen', False):
+        return None
+    root = Path(__file__).resolve().parents[1]
+    return root if (root / 'main.py').is_file() and (root / 'pyproject.toml').is_file() else None
+
+
 def command_line(root, *args):
     if getattr(sys,'frozen',False):
         command=[sys.executable]
     else:
-        project_root = Path(__file__).resolve().parents[1]
         if sys.platform == 'win32':
-            venv_pythonw = project_root / '.venv' / 'Scripts' / 'pythonw.exe'
-            if venv_pythonw.exists():
+            source_root = _source_checkout_root()
+            venv_pythonw = source_root / '.venv' / 'Scripts' / 'pythonw.exe' if source_root else None
+            if venv_pythonw is not None and venv_pythonw.exists():
                 python = venv_pythonw
             else:
                 python = Path(sys.executable).with_name('pythonw.exe')
         else:
             python = Path(sys.executable)
-        command = [str(python), str(project_root / 'main.py')]
+        command = [str(python), '-m', 'gamepadstudio']
     return [*command,'--data-dir',str(Path(root).resolve()),*args]
 
 
 def spawn(root,*args):
     options = {}
+    source_root = _source_checkout_root()
+    if source_root is not None:
+        # An editable checkout need not be pip-installed. The child module is
+        # importable from its working directory even when the UI was launched
+        # through an absolute path from somewhere else.
+        options['cwd'] = str(source_root)
     if sys.platform == 'win32':
         flags = subprocess.CREATE_NO_WINDOW
         flags |= getattr(subprocess, 'DETACHED_PROCESS', 0x00000008)
@@ -93,6 +107,16 @@ def spawn(root,*args):
         options['creationflags'] = flags
     return subprocess.Popen(command_line(root,*args),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,close_fds=True,**options)
+
+
+def _windows_run_command_line(root):
+    command = command_line(root, '--agent')
+    source_root = _source_checkout_root()
+    if source_root is not None:
+        # HKCU Run has no working-directory field; use the absolute source
+        # launcher there while ordinary child processes use python -m.
+        command[1:3] = [str(source_root / 'main.py')]
+    return command
 
 
 def request(root, command, role='agent', timeout=1200, **values):
@@ -216,23 +240,62 @@ def cleanup_stale_agent(root: Path):
 
 
 def cleanup_stale_ui(root: Path):
-    """检测并清理之前残留或卡死的旧 Studio 界面进程与孤儿锁"""
+    """Return whether a previous UI has exited and its lock can be reclaimed.
+
+    An unresponsive macOS UI may still own held input or an in-progress
+    recording. Never SIGKILL the PID from its lock file: the PID may also
+    have been reused by an unrelated process. The caller must not launch a
+    second UI unless this function and a new QLockFile.tryLock both succeed.
+    """
     root = Path(root).resolve()
     lock_path = root / 'studio.lock'
     old_pid = read_lock_pid(lock_path)
-    if old_pid and old_pid != os.getpid() and is_process_alive(old_pid):
-        try:
-            request(root, 'exit', role='ui', timeout=300)
+    if old_pid == os.getpid():
+        return False
+    if old_pid and is_process_alive(old_pid):
+        if sys.platform == 'darwin':
+            # Verify the responding UI against the lock before issuing an
+            # action. A stale PID may now belong to an unrelated process.
+            try:
+                status = request(root, 'status', role='ui', timeout=300)
+            except Exception:
+                status = None
+            if not isinstance(status, dict) or not status.get('ok') or status.get('pid') != old_pid:
+                return False
+            try:
+                response = request(root, 'exit', role='ui', timeout=300)
+            except Exception:
+                response = None
+            if not isinstance(response, dict) or not response.get('ok') or response.get('pid') != old_pid:
+                return False
+            deadline = time.monotonic() + 2.0
+            while is_process_alive(old_pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if is_process_alive(old_pid):
+                return False
+        else:
+            try:
+                request(root, 'exit', role='ui', timeout=300)
+            except Exception:
+                pass
             time.sleep(0.1)
-        except Exception:
-            pass
-        if is_process_alive(old_pid):
-            terminate_pid(old_pid, timeout_ms=500)
-    try:
+            if is_process_alive(old_pid) and not terminate_pid(old_pid, timeout_ms=500):
+                return False
+            if is_process_alive(old_pid):
+                return False
+    if sys.platform == 'darwin':
+        # Qt checks whether the lock is stale before removing it. A new owner
+        # may acquire the file during the handoff; never unlink that live lock.
+        lock = QLockFile(str(lock_path))
+        lock.setStaleLockTime(0)
         if lock_path.exists():
-            lock_path.unlink(missing_ok=True)
-    except Exception:
-        pass
+            lock.removeStaleLockFile()
+        return not lock_path.exists()
+    try:
+        lock_path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return not lock_path.exists()
 
 
 class LocalServer(QObject):
@@ -445,10 +508,11 @@ def _set_mac_autostart(root, enabled):
         path.unlink(missing_ok=True)
         return
     arguments = command_line(root, '--agent')
+    source_root = _source_checkout_root()
     document = {'Label': MAC_AGENT_LABEL, 'ProgramArguments': arguments,
                 'RunAtLoad': True, 'ProcessType': 'Interactive',
                 'LimitLoadToSessionType': 'Aqua',
-                'WorkingDirectory': str(Path(arguments[0]).parent),
+                'WorkingDirectory': str(source_root or Path(arguments[0]).parent),
                 'ThrottleInterval': 10}
     previous = path.read_bytes() if path.exists() else None
     # A second click must not restart the backend currently owning held keys.
@@ -521,7 +585,7 @@ def set_autostart(root,enabled):
     import winreg
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER,RUN_KEY) as key:
         if enabled:
-            winreg.SetValueEx(key,RUN_NAME,0,winreg.REG_SZ,subprocess.list2cmdline(command_line(root,'--agent')))
+            winreg.SetValueEx(key,RUN_NAME,0,winreg.REG_SZ,subprocess.list2cmdline(_windows_run_command_line(root)))
             try: winreg.DeleteValue(key,LEGACY_RUN_NAME)
             except FileNotFoundError: pass
         else:

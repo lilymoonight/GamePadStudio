@@ -80,6 +80,8 @@ def test_settings_reload_keeps_buffer_and_only_restarts_for_capture_changes(tmp_
     store.data['replay_buffer_enabled'] = True
     store.save()
     device = Mock()
+    device.controller_isolation_status.return_value = {
+        'active': False, 'restore_pending': False, 'reason': ''}
     agent = Agent(tmp_path, device, Mock())
     agent.timer.stop(); agent.scan_timer.stop(); agent.broadcast_timer.stop()
     try:

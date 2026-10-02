@@ -14,6 +14,8 @@ from gamepadstudio.studio_core import ConfigStore
 from gamepadstudio import replay_service
 from gamepadstudio.replay_timing import TimestampedRGBWriter
 
+HOST_FFMPEG = get_ffmpeg_path()
+
 
 @pytest.fixture(autouse=True)
 def portable_encoder_policy(monkeypatch):
@@ -29,9 +31,10 @@ def test_calculate_estimated_ram_gb():
     assert calculate_estimated_ram_gb(1, 35) > 0
 
 
-def test_detect_hardware_encoder():
-    ffmpeg = get_ffmpeg_path()
+def test_detect_hardware_encoder(monkeypatch):
+    ffmpeg = HOST_FFMPEG
     if ffmpeg:
+        monkeypatch.setattr(replay_service, 'get_ffmpeg_path', lambda: ffmpeg)
         hevc_enc = detect_hardware_encoder('hevc')
         assert hevc_enc in ('hevc_amf', 'hevc_nvenc', 'hevc_qsv', 'hevc_mf', 'libx265')
         av1_enc = detect_hardware_encoder('av1')
@@ -287,13 +290,14 @@ def test_stop_terminates_encoder_before_closing_a_blocked_stdin(tmp_path):
     assert order == ['terminate', 'close']
 
 
-def test_save_short_replay_reports_actual_movie_duration_not_buffer_budget(tmp_path):
+def test_save_short_replay_reports_actual_movie_duration_not_buffer_budget(tmp_path, monkeypatch):
     import random
     import subprocess
     from gamepadstudio.replay_timing import mp4_duration_seconds
-    ffmpeg = get_ffmpeg_path()
+    ffmpeg = HOST_FFMPEG
     if not ffmpeg:
         pytest.skip('FFmpeg unavailable')
+    monkeypatch.setattr(replay_service, 'get_ffmpeg_path', lambda: ffmpeg)
     stream = io.BytesIO()
     writer = TimestampedRGBWriter(stream, 64, 64, 30)
     pixels = random.Random(7)
@@ -325,13 +329,14 @@ def test_save_short_replay_reports_actual_movie_duration_not_buffer_budget(tmp_p
     assert metadata['buffer_minutes'] == 5
 
 
-def test_real_encoded_ring_exports_recent_minute_on_media_timeline(tmp_path):
+def test_real_encoded_ring_exports_recent_minute_on_media_timeline(tmp_path, monkeypatch):
     import random
     import subprocess
     from gamepadstudio.replay_timing import mp4_duration_seconds
-    ffmpeg = get_ffmpeg_path()
+    ffmpeg = HOST_FFMPEG
     if not ffmpeg:
         pytest.skip('FFmpeg unavailable')
+    monkeypatch.setattr(replay_service, 'get_ffmpeg_path', lambda: ffmpeg)
     engine = ReplayBufferEngine(tmp_path, minutes=1, codec='h264', bitrate_mbps=10)
     engine._current_width = engine._current_height = 64
     stream = io.BytesIO()

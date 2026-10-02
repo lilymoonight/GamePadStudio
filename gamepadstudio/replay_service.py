@@ -621,6 +621,11 @@ class ReplayBufferEngine:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_filename = f"DS_{clean_title}_{timestamp}_replay.mp4"
         out_path = self.save_dir / out_filename
+        # Publish only a complete MP4. The gallery may refresh while FFmpeg
+        # is still writing or after a failed mux; its hidden partial-file
+        # filter keeps both cases out of the user's saved recordings.
+        partial_path = out_path.with_name(f'.{out_path.stem}.partial.mp4')
+        proc = None
 
         try:
             # Lead-in packets retained for the decoder do not extend the
@@ -636,7 +641,7 @@ class ReplayBufferEngine:
                 "-c", "copy",
                 "-avoid_negative_ts", "make_zero",
                 "-movflags", "+faststart",
-                str(out_path)
+                str(partial_path)
             ]
 
             t0 = time.perf_counter()
@@ -650,7 +655,8 @@ class ReplayBufferEngine:
             proc.communicate(input=valid_ts, timeout=60)
             elapsed = time.perf_counter() - t0
 
-            if proc.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 1000:
+            if proc.returncode == 0 and partial_path.is_file() and partial_path.stat().st_size > 1000:
+                partial_path.replace(out_path)
                 # 瞬间为画廊生成一帧高保真封面预览图 (供画廊秒级展示，零卡顿)
                 thumb_jpg = out_path.with_suffix('.jpg')
                 try:
@@ -662,9 +668,15 @@ class ReplayBufferEngine:
                         "-q:v", "3",
                         str(thumb_jpg)
                     ]
-                    subprocess.run(cmd_thumb, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_subprocess_hidden_flags())
+                    thumbnail = subprocess.run(cmd_thumb, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                               timeout=10, **_subprocess_hidden_flags())
+                    if thumbnail.returncode != 0:
+                        thumb_jpg.unlink(missing_ok=True)
                 except Exception:
-                    pass
+                    try:
+                        thumb_jpg.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
                 # 保存元数据 sidecar
                 sidecar_json = out_path.with_suffix('.json')
@@ -698,11 +710,14 @@ class ReplayBufferEngine:
                 size_mb = out_path.stat().st_size / (1024 * 1024)
                 self.log(f"🎬 极清回放录像已瞬间保存: {out_filename} ({size_mb:.1f}MB, 耗时 {elapsed:.2f}s, 零磁盘读写损耗)")
                 return str(out_path)
+            self.log('回放封装失败，未保存不完整的视频')
         except Exception as exc:
-            if isinstance(exc, subprocess.TimeoutExpired):
+            if isinstance(exc, subprocess.TimeoutExpired) and proc is not None:
                 proc.kill()
                 proc.communicate()
             self.log(f"合并保存回放失败: {exc}")
+        finally:
+            partial_path.unlink(missing_ok=True)
         return None
 
     def _buffered_seconds_locked(self):

@@ -38,6 +38,7 @@ class Agent(QObject):
             configure_window_exclusions({os.getpid(),read_lock_pid(self.root/'studio.lock')})
         self.device.preferred_key=self.config.get('preferred_controller','')
         self.engine=MappingRuntime(self.actions, self.dispatch)
+        self._unsupported_notice_signature = ()
         self.state=None;self.enabled=bool(self.config.get('mapping_enabled', True));self.suspended_until=0.;self.blocked=set();self.last_touch=None
         self.preview_until = 0.
         self.application_resolver = ApplicationProfileResolver()
@@ -245,6 +246,30 @@ class Agent(QObject):
         if hasattr(self, 'server') and self.server:
             self.server.broadcast({'type':'notice',**row})
 
+    def report_unsupported_bindings(self):
+        """Report profile compatibility once per changed set, without pausing input."""
+        rows = getattr(self.engine, 'unsupported_bindings', [])
+        signature = (profile_scope(self.state), self.config.get('active_profile'),
+                     tuple((row['trigger'], row['gesture'], row['value'], row['reason']) for row in rows))
+        if signature == getattr(self, '_unsupported_notice_signature', ()):
+            return
+        self._unsupported_notice_signature = signature
+        if not rows:
+            return
+        examples = '；'.join(f"{row['trigger']} {row['gesture']} → {row['value']}（{row['reason']}）"
+                            for row in rows[:2])
+        extra = f'；另有 {len(rows)-2} 条' if len(rows) > 2 else ''
+        message = f'当前预设有 {len(rows)} 条此平台不支持的键盘输出，已跳过对应动作，其他映射继续运行：{examples}{extra}'
+        try:
+            self.log(message)
+        except Exception:
+            # A full/unwritable event log must not disable otherwise valid
+            # mappings. The state reply still carries the exact binding list.
+            try:
+                self.server.broadcast({'type':'notice','time':datetime.now().isoformat(),'message':message})
+            except Exception:
+                pass
+
     def release(self):
         try:
             self.engine.reset()
@@ -343,6 +368,7 @@ class Agent(QObject):
                 self.log(f"按键输入: {' / '.join(names)}")
             running = self.enabled and time.monotonic() >= self.suspended_until
             self.engine.update(self.state, self.config, enabled=running, preview=time.monotonic()<self.preview_until)
+            self.report_unsupported_bindings()
         except Exception as exc:
             self.enabled=False
             self.config['mapping_enabled']=False

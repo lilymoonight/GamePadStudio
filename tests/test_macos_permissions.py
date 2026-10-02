@@ -58,7 +58,26 @@ def test_denied_replay_does_not_start_capture_or_encoding(native, monkeypatch, t
     assert '屏幕录制' in engine.get_status()['last_error']
 
 
-def test_mac_panorama_is_explicitly_unavailable(monkeypatch, tmp_path):
+def test_mac_panorama_accepts_only_verified_equal_refresh_displays(monkeypatch, tmp_path):
     monkeypatch.setattr(replay_service, 'sys', SimpleNamespace(platform='darwin'))
+    monitors = [dict(left=0, top=0, width=200, height=100),
+                dict(left=0, top=0, width=100, height=100),
+                dict(left=100, top=0, width=100, height=100)]
+
+    class Capture:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+    capture = Capture()
+    capture.monitors = monitors
+    monkeypatch.setattr(replay_service, 'create_replay_capture', lambda: capture)
+    rows = [dict(monitor, refresh_hz=60) for monitor in monitors[1:]]
+    monkeypatch.setattr(replay_service, 'enumerate_displays', lambda: rows)
     engine = replay_service.ReplayBufferEngine(tmp_path, capture_mode='all')
-    assert '单个屏幕' in engine._panorama_error()
+    assert engine._panorama_error() == ''
+
+    rows[1]['refresh_hz'] = 59.94
+    assert '刷新率不同' in engine._panorama_error()

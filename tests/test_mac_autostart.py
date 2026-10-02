@@ -1,5 +1,6 @@
 """Login-job tests use private temporary files and an in-memory launchctl."""
 import plistlib
+from pathlib import Path
 import stat
 import subprocess
 import sys
@@ -45,11 +46,21 @@ def test_status_is_read_only_and_explicit_enable_registers_this_users_job(login_
     assert document['RunAtLoad'] and document['Label'] == ipc.MAC_AGENT_LABEL
     assert document['LimitLoadToSessionType'] == 'Aqua'
     assert document['ProcessType'] == 'Interactive'
+    assert Path(document['WorkingDirectory']) == ipc._source_checkout_root()
     assert stat.S_IMODE(login_job.path.stat().st_mode) == 0o600
     domain = f'gui/{ipc.os.getuid()}'
     assert ['/bin/launchctl', 'bootstrap', domain, str(login_job.path)] in login_job.calls
     assert ipc.autostart_enabled() and ipc.autostart_enabled(tmp_path)
     assert not ipc.autostart_enabled(tmp_path / 'other-data')
+
+
+def test_installed_package_login_job_uses_interpreter_directory(login_job, tmp_path, monkeypatch):
+    installed = tmp_path / 'site-packages' / 'gamepadstudio' / 'ipc.py'
+    monkeypatch.setattr(ipc, '__file__', str(installed))
+    ipc.set_autostart(tmp_path, True)
+    document = plistlib.loads(login_job.path.read_bytes())
+    assert document['ProgramArguments'][1:3] == ['-m', 'gamepadstudio']
+    assert document['WorkingDirectory'] == str(Path(sys.executable).parent)
 
 
 def test_repeated_enable_preserves_live_backend_and_disable_removes_job(login_job, tmp_path):

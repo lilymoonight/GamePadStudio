@@ -382,7 +382,10 @@ def list_captures(folder):
     if not folder_path.exists():
         return rows
 
-    candidates = list(folder_path.glob('*.png')) + list(folder_path.glob('*.mp4'))
+    # Recordings are written to a hidden .partial.mp4 file before an atomic
+    # rename. Never present an unfinished encoder output in the gallery.
+    candidates = [path for path in (*folder_path.glob('*.png'), *folder_path.glob('*.mp4'))
+                  if not path.name.startswith('.') and not path.name.lower().endswith('.partial.mp4')]
     for path in sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True):
         if path.suffix.lower() == '.mp4':
             sidecar = path.with_suffix('.json')
@@ -393,7 +396,17 @@ def list_captures(folder):
                 except (OSError, ValueError):
                     data = {}
             thumb = path.with_suffix('.jpg')
-            raw_title = data.get('title') or path.stem.replace("DS_", "").replace("_replay", "")
+            raw_title = data.get('raw_title') or data.get('title') or path.stem.replace("DS_", "").replace("_replay", "")
+            resolution = re.fullmatch(r'(\d+)\s*[xX×]\s*(\d+)', str(data.get('resolution') or '').strip())
+            fallback_width, fallback_height = (int(resolution[1]), int(resolution[2])) if resolution else (None, None)
+            width, height = data.get('width'), data.get('height')
+            if isinstance(width, bool) or not isinstance(width, int) or width < 1:
+                width = fallback_width
+            if isinstance(height, bool) or not isinstance(height, int) or height < 1:
+                height = fallback_height
+            created = data.get('created')
+            if not isinstance(created, str) or not created:
+                created = datetime.fromtimestamp(path.stat().st_mtime).isoformat()
             size_mb = round(path.stat().st_size / (1024 * 1024), 1)
             rows.append({
                 **data,
@@ -401,12 +414,12 @@ def list_captures(folder):
                 'thumb_path': str(thumb) if thumb.is_file() else str(path),
                 'title': f"🎬 {raw_title}",
                 'raw_title': raw_title,
-                'created': datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+                'created': created,
                 'favorite': bool(data.get('favorite')),
                 'is_video': True,
                 'size_mb': size_mb,
-                'width': 3840,
-                'height': 2160,
+                'width': width,
+                'height': height,
             })
         else:
             data = extract_png_metadata(path)

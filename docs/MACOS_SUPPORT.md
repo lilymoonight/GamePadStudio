@@ -39,7 +39,7 @@ Insert、Pause、ScrollLock、NumLock、PrintScreen 和 F21–F24 尚无保持�
 | 游戏／前台窗口识别 | NSWorkspace、CoreGraphics 与进程启动时间核对目标；排除本软件界面和后台，不把所有 Python 应用都当作工作台 |
 | 截图 | ScreenCaptureKit；保留 `game`、`window`、`all`、`monitor_N` 范围，保存真实像素；需要屏幕录制权限 |
 | 内存回放 | ScreenCaptureKit 逐帧时间戳、显示器跟随及同刷新率多屏；Mac 包附带 FFmpeg，实际探测 VideoToolbox，失败时软件回退 |
-| 开始／结束整段录像 | 已加入项目内录像服务，替代 Windows Game Bar 的录屏开关；系统音轨与界面／后台集成正在验收 |
+| 开始／结束整段录像 | 已加入项目内录像服务，替代 Windows Game Bar 的录屏开关；系统音轨与界面／后台已通过离线合成源测试，真实游戏待验收 |
 | HDR 屏幕内容 | macOS 15+、Apple Silicon 且实际浮点缓冲与颜色附件确认后，转换为 SDR；没有原始 HDR 视频导出承诺 |
 | 快门声音 | 使用 macOS afplay |
 | 设备隐身／系统手柄弹窗屏蔽 | 使用所选物理手柄的 IOKit 独占访问替代；严格限定已验证 SDL 后端，真实游戏和 PS／Home 键效果待验收 |
@@ -51,7 +51,7 @@ Insert、Pause、ScrollLock、NumLock、PrintScreen 和 F21–F24 尚无保持�
 
 截图和录制通过系统权限预检，启动不会自动弹出权限申请。设置页提供明确的授权入口；授权变更后可能需要重启应用。
 
-截图的 `game` 范围选择游戏所在显示器，`window` 只捕获经身份复验的目标窗口，`all` 拼接全部屏幕，`monitor_N` 精确选择当前枚举的显示器。`window` 目标消失或进程重启、指定显示器断开时明确失败。Retina 的逻辑点与物理像素分别保存，负坐标及混合缩放按显示器几何拼接；截图实际尺寸取捕获图像，不用逻辑窗口宽高冒充像素。窗口捕获、跟随与多屏路由已由模拟窗口和合成图片验证，尚未录制用户屏幕或真实游戏。
+截图的 `game` 范围选择游戏所在显示器，`window` 只捕获经身份复验的目标窗口，`all` 拼接全部屏幕，`monitor_N` 精确选择当前枚举的显示器。录像的窗口模式同样使用智能目标选择并锁定原窗口身份；显式显示器／全部屏幕模式保持显示器捕获。`window` 目标消失或进程重启、指定显示器断开时明确失败。Retina 的逻辑点与物理像素分别保存，负坐标及混合缩放按显示器几何拼接；截图实际尺寸取捕获图像，不用逻辑窗口宽高冒充像素。窗口捕获、跟随与多屏路由已由模拟窗口和合成图片验证，尚未录制用户屏幕或真实游戏。
 
 录制沿用独立的 `replay_capture_mode`。多屏实测刷新率相同才允许合并录制；不同或无法确认时提示选择单屏，不把未知刷新率当成 60 Hz。Mac HDR 路径要求 ScreenCaptureKit 实际返回 RGBA half 和线性颜色信息，高光压缩发生在浮点域；输出是 SDR PNG 或 SDR BT.709 视频。它不会把普通 8 位捕获标成 HDR。详见 [录制颜色与时间轴](RECORDING_COLOR_AND_TIMING.md)。
 
@@ -109,10 +109,10 @@ Mac 源码依赖安装会同时安装匹配本机架构的 `imageio-ffmpeg`，�
 
 自动测试使用虚拟手柄和模拟输出，不向真实桌面发送按键或修改系统权限。窗口启动和后台通信检查不能代替 DS5 蓝牙的震动、触摸、断线、游戏镜头和实际输入验收。Windows 分支代码可以在 Mac 上做逻辑回归；Windows 原生 API 和驱动仍需 Windows 实机验收。
 
-2026-10-02 本轮新增窗口识别、截图路由、显示器／捕获协议、CapsLock／媒体键、手柄隔离及音视频封装测试。窗口路由使用模拟目标与合成图片；Matroska 音视频轨使用合成 PCM 和 RGB，经 FFmpeg 编码、解码验证音轨存在、采样格式、原始时间戳、时长及音画同步。语音测试覆盖草稿保留、进程重启、跨窗口停止、延迟状态、点击超时与测试上限。整段录像、系统音轨和最终包仍在集成验收；**本轮完整测试数量及最终打包结果待收尾后填入，不沿用此前版本的汇总数字**。
+2026-10-02 本轮新增窗口识别、截图／录像路由、显示器／捕获协议、CapsLock／媒体键、手柄隔离及音视频封装测试。窗口路由使用模拟目标与合成图片；Matroska 音视频轨使用合成 PCM 和 RGB，经 FFmpeg 编码、解码验证音轨存在、采样格式、原始时间戳、时长及音画同步。手动录像保存后提供封面与实际分辨率／音轨元数据，未完成文件不进入图库。旧 Windows 预设中 Mac 不支持的键只停该输出，其他映射继续。语音测试覆盖草稿保留、进程重启、跨窗口停止、延迟状态、点击超时与测试上限。全量离线回归 `.venv/bin/python scripts/test_macos.py --jobs 4` 共 2,405 项：2,404 通过、1 项 Windows 专属进程标志测试跳过。最新 `dist/GamePadStudio.app` 为 arm64、ad hoc 签名，包含 FFmpeg 与原生捕获组件，`codesign --verify --deep --strict` 及模拟设备的打包界面冒烟测试通过。这些离线测试不代表真实 DS5、游戏画面或麦克风验收。
 
 此前 Apple Silicon 原生 Cocoa 设置窗口启动、渲染及退出，应用包后台跨会话通信、暂停及正常退出，以及 HEVC/H264 VideoToolbox 合成 RGB 编码、解码已验证。这些检查不代表最新捕获组件已完成真实游戏录像验收。
 
-此前应用包成功读到蓝牙 DualSense（054c:0ce6）、17 个可用按键、6 轴、双指触摸能力及 FULL 电量档；独立进程连续读取 60 秒、2,792 次，没有读取缺失或断线。本轮收尾时设备已掉线。实际按键/摇杆/扳机/触摸操作、灯光/震动输出及目标游戏尚未验收；能力报告不能替代这些操作测试。辅助功能尚未授权，未发送真实键鼠事件。全局热键原生注册、重复占用和注销已验证，真实按键触发尚待验证；登录启动只通过临时目录和模拟 launchctl 验证，没有修改真实用户登录项。Windows 原生行为仍待 Windows 设备回归。
+此前应用包成功读到蓝牙 DualSense（054c:0ce6）、17 个可用按键、6 轴、双指触摸能力及 FULL 电量档；独立进程连续读取 60 秒、2,792 次，没有读取缺失或断线。用户已重新连接手柄，但暂不在场，本轮没有启动新的真实手柄操作测试。实际按键/摇杆/扳机/触摸操作、灯光/震动输出及目标游戏尚未验收；能力报告不能替代这些操作测试。辅助功能尚未授权，未发送真实键鼠事件。全局热键原生注册、重复占用和注销已验证，真实按键触发尚待验证；登录启动只通过临时目录和模拟 launchctl 验证，没有修改真实用户登录项。Windows 原生行为仍待 Windows 设备回归。
 
 原生 API 依据：[Apple CoreGraphics](https://developer.apple.com/documentation/coregraphics/core-graphics-functions)、[ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit/capturing-screen-content-in-macos)、[SCScreenshotManager](https://developer.apple.com/documentation/screencapturekit/scscreenshotmanager)、[系统音频捕获](https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/capturesaudio)、[IOHIDDeviceOpen](https://developer.apple.com/documentation/iokit/iohiddeviceopen(_:_:))、[Qt Mac 修饰键说明](https://doc.qt.io/qt-6/macos-issues.html)、[PyInstaller Mac 应用打包](https://pyinstaller.org/en/stable/spec-files.html#spec-file-options-for-a-macos-bundle)。
