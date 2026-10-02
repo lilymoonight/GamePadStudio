@@ -24,7 +24,7 @@ from typing import Callable, Deque, Dict, List, Optional, Tuple
 import mss
 from .replay_capture import create_replay_capture
 from .display_info import match_monitors, enumerate_displays
-from .replay_timing import TimestampedRGBWriter, TransportStreamClock, mp4_duration_seconds
+from .replay_timing import TimestampedRGBWriter, TimestampedAVWriter, TransportStreamClock, mp4_duration_seconds
 
 from .screenshot_service import (
     foreground_info,
@@ -39,7 +39,7 @@ from .screenshot_service import (
 def get_ffmpeg_path() -> Optional[str]:
     """获取可用 FFmpeg 可执行文件路径"""
     # 1. 优先检查项目自身 bin 目录
-    proj_bin = Path(__file__).resolve().parents[1] / 'bin' / 'ffmpeg.exe'
+    proj_bin = Path(__file__).resolve().parents[1] / 'bin' / ('ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg')
     if proj_bin.is_file():
         return str(proj_bin)
     
@@ -52,10 +52,20 @@ def get_ffmpeg_path() -> Optional[str]:
     candidates = [
         Path(r"D:\voxcpm\tools\ffmpeg.exe"),
         Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "ffmpeg" / "bin" / "ffmpeg.exe",
-    ]
+    ] if sys.platform == 'win32' else [Path('/opt/homebrew/bin/ffmpeg'), Path('/usr/local/bin/ffmpeg')]
     for c in candidates:
         if c.is_file():
             return str(c)
+    if sys.platform == 'darwin':
+        try:
+            # The project-local wheel supplies a standalone FFmpeg when the
+            # user has no Homebrew installation; packaged builds prefer bin/.
+            import imageio_ffmpeg
+            bundled = Path(imageio_ffmpeg.get_ffmpeg_exe())
+            if bundled.is_file() and os.access(bundled, os.X_OK):
+                return str(bundled)
+        except Exception:
+            return None
     return None
 
 
@@ -124,10 +134,18 @@ def _assign_process_to_job(proc):
 _CACHED_ENCODERS: Dict[str, str] = {}
 
 
+def _encoder_runtime_options(encoder):
+    if encoder in ('hevc_videotoolbox', 'h264_videotoolbox'):
+        # A successful probe must prove that hardware works; VideoToolbox's
+        # own software implementation must not masquerade as acceleration.
+        return ['-allow_sw', '0', '-realtime', '1']
+    return []
+
+
 def detect_hardware_encoder(codec: str = "hevc") -> str:
     """
     智能探针：根据本机 GPU 型号与驱动，探测可用的高吞吐硬件加速编码器
-    优先级：AMD AMF -> NVIDIA NVENC -> Intel QSV -> MediaFoundation -> 软件回退
+    macOS 优先验证 VideoToolbox；其他平台保留现有 GPU 优先级与软件回退。
     """
     global _CACHED_ENCODERS
     if codec in _CACHED_ENCODERS:
@@ -149,8 +167,14 @@ def detect_hardware_encoder(codec: str = "hevc") -> str:
     else:
         candidates = ["hevc_amf", "hevc_nvenc", "libx265"]
 
+    if sys.platform == 'darwin':
+        candidates = {'hevc': ['hevc_videotoolbox', 'libx265'],
+                      'h264': ['h264_videotoolbox', 'libx264'],
+                      'av1': ['libaom-av1']}.get(codec, ['hevc_videotoolbox', 'libx265'])
+
     for enc in candidates:
         try:
+            options = _encoder_runtime_options(enc)
             cmd = [
                 ffmpeg,
                 "-y",
@@ -158,6 +182,8 @@ def detect_hardware_encoder(codec: str = "hevc") -> str:
                 "-i", "testsrc=size=256x256:rate=30",
                 "-t", "0.1",
                 "-c:v", enc,
+                *options,
+                *(['-pix_fmt', 'yuv420p'] if options else []),
                 "-f", "null", "NUL" if sys.platform == "win32" else "/dev/null"
             ]
             res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2, **_subprocess_hidden_flags())
@@ -237,6 +263,8 @@ class ReplayBufferEngine:
         self._encoder_errors = collections.deque(maxlen=8)
         self.capture_method = ''
         self.color_mode = ''
+        self.audio_enabled = False
+        self.audio_format = None
         self._captured_frames = 0
         self._capture_seconds = 0.0
         self.encoder = None
@@ -278,6 +306,12 @@ class ReplayBufferEngine:
         return ''
 
     def start(self) -> bool:
+        if sys.platform == 'darwin':
+            from .macos_permissions import screen_capture_permission_status
+            permission = screen_capture_permission_status()
+            if not permission['granted']:
+                self._fail(permission['reason'])
+                return False
         if not self.running and (self._ffmpeg_proc is not None or self._worker_thread is not None
                                  or self._capture_source is not None):
             self.stop()
@@ -412,8 +446,10 @@ class ReplayBufferEngine:
         video_filter = getattr(source, 'encoder_filter', fallback_filter)
         color_args = getattr(source, 'output_color_args', (
             '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', 'tv'))
+        audio_args = ['-map','0:v:0','-map','0:a:0','-c:a','aac','-b:a','192k'] if getattr(source,'audio_format',None) else []
         return [ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
-                '-f', 'matroska', '-i', 'pipe:0', '-vf', video_filter, '-c:v', encoder,
+                '-f', 'matroska', '-i', 'pipe:0', *audio_args, '-vf', video_filter, '-c:v', encoder,
+                *_encoder_runtime_options(encoder),
                 '-b:v', f'{self.bitrate_mbps}M', '-pix_fmt', 'yuv420p', *color_args,
                 '-fps_mode', 'passthrough', '-enc_time_base', '1:1000',
                 '-g', str(self.fps * 2), '-force_key_frames', 'expr:gte(t,n_forced*2)',
@@ -450,14 +486,23 @@ class ReplayBufferEngine:
                 w, h = int(bbox['width']) & ~1, int(bbox['height']) & ~1
                 if w < 2 or h < 2:
                     raise RuntimeError('录制区域尺寸无效')
-                self._current_width, self._current_height = w, h
-                crop_bbox = dict(left=bbox['left'], top=bbox['top'], width=w, height=h)
+                crop_bbox = dict(bbox) if sys.platform == 'darwin' else dict(left=bbox['left'], top=bbox['top'], width=w, height=h)
                 if hasattr(sct, 'configure'):
-                    sct.configure(crop_bbox, self.fps)
+                    if sys.platform == 'darwin' and callable(getattr(sct, 'read_audio', None)):
+                        sct.configure(crop_bbox, self.fps, include_system_audio=True)
+                    else:
+                        sct.configure(crop_bbox, self.fps)
+                if sys.platform == 'darwin' and getattr(sct, 'frame_size', None):
+                    w, h = sct.frame_size
+                    if min(w, h) < 2 or w % 2 or h % 2:
+                        raise RuntimeError('macOS 捕获物理像素尺寸无效')
+                self._current_width, self._current_height = w, h
                 if not self.running:
                     return
                 self.capture_method = str(getattr(sct, 'capture_method', 'MSS'))
                 self.color_mode = str(getattr(sct, 'color_mode', 'SDR'))
+                self.audio_format = getattr(sct, 'audio_format', None)
+                self.audio_enabled = bool(self.audio_format)
 
                 # Raw RGB in Matroska carries capture PTS. Input -r would
                 # overwrite them; passthrough also prevents CFR duplicates.
@@ -475,7 +520,8 @@ class ReplayBufferEngine:
                     thread = threading.Thread(target=target, args=(proc,), daemon=True, name=name)
                     setattr(self, attr, thread)
                     thread.start()
-                writer = TimestampedRGBWriter(proc.stdin, w, h, self.fps)
+                writer = (TimestampedAVWriter(proc.stdin, w, h, self.fps, *self.audio_format)
+                          if self.audio_enabled else TimestampedRGBWriter(proc.stdin, w, h, self.fps))
                 frame_interval = 1.0 / self.fps
                 first_timestamp = last_timestamp = None
                 last_display_check = time.monotonic()
@@ -504,6 +550,8 @@ class ReplayBufferEngine:
                         self._capture_seconds = writer.write_frame(shot.rgb, timestamp - first_timestamp)
                         self._captured_frames += 1
                         last_timestamp = timestamp
+                    if self.audio_enabled and first_timestamp is not None:
+                        self._drain_audio(sct, writer, first_timestamp)
                     # Target FPS is an upper bound; slow capture keeps its
                     # real elapsed time instead of accelerating playback.
                     elapsed = time.perf_counter() - t_start
@@ -528,6 +576,18 @@ class ReplayBufferEngine:
                         proc.kill()
                     except Exception:
                         pass
+
+    @staticmethod
+    def _drain_audio(source, writer, first_timestamp):
+        # Keep source PTS even when audio arrives after a newer video frame.
+        # Bound each drain so malformed sources cannot hang capture shutdown.
+        for _ in range(1024):
+            frame = source.read_audio()
+            if frame is None:
+                return
+            writer.write_audio(frame.pcm, frame.timestamp-first_timestamp,
+                               sample_rate=frame.sample_rate, channels=frame.channels)
+        raise RuntimeError('系统音频数据持续积压，请降低录制负载后重新启动')
 
     def save_replay(self, title: Optional[str] = None) -> Optional[str]:
         """
@@ -624,6 +684,9 @@ class ReplayBufferEngine:
                     "mode": self.capture_mode,
                     "capture_method": self.capture_method,
                     "color_mode": self.color_mode,
+                    "audio": self.audio_enabled,
+                    "audio_source": "system" if self.audio_enabled else None,
+                    "microphone": False,
                     "favorite": False,
                     "is_video": True
                 }
@@ -674,6 +737,10 @@ class ReplayBufferEngine:
             "capture_mode": self.capture_mode,
             "capture_method": self.capture_method,
             "color_mode": self.color_mode,
+            "audio": self.audio_enabled,
+            "audio_source": "system" if self.audio_enabled else None,
+            "audio_format": self.audio_format,
+            "microphone": False,
             "last_error": self._last_error,
             "captured_fps": round((self._captured_frames - 1) / self._capture_seconds, 1) if self._capture_seconds > 0 else 0.0,
             "buffered_seconds": round(buffered_sec, 1),

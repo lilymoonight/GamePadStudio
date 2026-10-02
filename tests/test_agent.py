@@ -1,4 +1,5 @@
 import os
+import sys
 import pytest
 os.environ['QT_QPA_PLATFORM']='offscreen'
 from PySide6.QtWidgets import QApplication
@@ -91,7 +92,7 @@ def test_xbox_system_buttons_work_in_kbm_without_system_overlay(tmp_path, monkey
         device.state['buttons'] = []; agent.poll()
         assert captures == [True]
         agent.config['replay_buffer_enabled'] = False
-        assert agent.handle({'command':'save_replay'})['status'] == 'disabled'
+        assert agent.handle({'command':'save_replay'})['status'] == ('disabled' if sys.platform == 'win32' else 'not_ready')
         agent.record_toggle()
         assert not agent.actions.shortcuts
     finally:
@@ -177,7 +178,10 @@ def test_create_button_long_press_triggers_replay_record(tmp_path):
         # Exceed threshold (0.65s) -> fires long press
         agent.engine.update({**device.state, 'buttons':[4]}, agent.config, now=now + 0.70)
         agent.executor.submit(lambda: None).result(timeout=2)
-        assert 'Win+Alt+G' in actions.held and not actions.shortcuts
+        if sys.platform == 'win32':
+            assert 'Win+Alt+G' in actions.held and not actions.shortcuts
+        else:
+            assert not actions.held and not actions.shortcuts
         assert not captures
 
         # Release does not fire short
@@ -317,6 +321,9 @@ def test_device_cloaking_preference_only_changes_selected_controller(tmp_path, m
     agent = Agent(tmp_path, ScopedDeviceStub(first), ActionsStub())
     try:
         agent.poll()
+        # This regression exercises the Windows HidHide path on every host.
+        from types import SimpleNamespace
+        monkeypatch.setattr('gamepadstudio.agent.sys', SimpleNamespace(platform='win32'))
         result = agent.handle({'command': 'set_device_cloaking', 'enabled': False,
                                'device_scope': profile_scope(first)})
         assert result['applied'] and calls == [(0x054c, 0x0ce6)]
@@ -328,8 +335,11 @@ def test_device_cloaking_preference_only_changes_selected_controller(tmp_path, m
 
 
 def test_cloaking_commands_forward_selected_physical_path_and_never_guess(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from gamepadstudio import agent as agent_module
     app = QApplication.instance() or QApplication([])
     calls = []
+    monkeypatch.setattr(agent_module, 'sys', SimpleNamespace(platform='win32'))
 
     class CloakingStub:
         def is_driver_installed(self):
@@ -347,6 +357,8 @@ def test_cloaking_commands_forward_selected_physical_path_and_never_guess(tmp_pa
     state = {**scoped_state('pad:first'), 'device_path': r'\\?\HID#VID_054C&PID_0CE6#FIRST'}
     device = ScopedDeviceStub(state)
     agent = Agent(tmp_path, device, ActionsStub())
+    agent._user32 = SimpleNamespace(GetAsyncKeyState=lambda key: 0)
+    agent._last_prtsc_down = False
     try:
         assert not calls
         agent.poll()

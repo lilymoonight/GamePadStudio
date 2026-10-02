@@ -17,15 +17,17 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QFrame, QLabe
     QVBoxLayout, QHBoxLayout, QGridLayout, QStackedWidget, QComboBox, QScrollArea, QLineEdit,
     QDialog, QFormLayout, QKeySequenceEdit, QFileDialog, QDialogButtonBox, QSlider, QCheckBox,
     QSystemTrayIcon, QMenu, QInputDialog, QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QSizeGrip, QFileDialog)
+from shiboken6 import isValid
 
-from .ipc import AgentClient, RemoteDevice, LocalServer, request, spawn, default_root, autostart_enabled, set_autostart, cleanup_stale_agent, cleanup_stale_ui
+from .ipc import AgentClient, RemoteDevice, LocalServer, request, spawn, default_root, autostart_enabled, autostart_supported, set_autostart, cleanup_stale_agent, cleanup_stale_ui, read_lock_pid, is_process_alive
 from .studio_core import ConfigStore, GestureEngine, BUTTONS, ACTION_NAMES
 from .device import Device
-from .actions import WindowsActions, parse_keys, launch_command
+from .actions import create_actions, input_permission_status, request_input_permission, parse_keys, launch_command
 from .mapping_engine import MappingRuntime, effective_mappings, binding_label
 from .mapping_ui import BindingDialog
 from .battery_monitor import BatteryMonitor, battery_reported, normalize_power
-from .emergency_hotkey import EmergencyHotkey, normalize_hotkey_settings
+from .emergency_hotkey import EmergencyHotkey, emergency_hotkey_supported, normalize_hotkey_settings
+from .application_profiles import application_profiles_supported
 from .mapping_deck import MappingDeck
 from .virtual_kbm_ui import VirtualKbmPage
 from .curve_ui import CurveDialog, supports_curve
@@ -37,6 +39,7 @@ from .controller_catalog import CATALOG, button_labels, capture_button, button_o
 from .studio_core import device_config, profile_scope, DEVICE_SETTING_KEYS
 from .mapping_engine import profile_family, input_sources, canonical_trigger, trigger_label
 from .screenshot_service import take_screenshot, list_captures, set_favorite, delete_capture
+from .manual_recording import ManualRecording
 
 from .glass import (TOKENS, tag_style, token, token_color, STYLE, GlassWindow, GlassCanvas, GlassPanel, TitleBar,
                     IconButton, Indicator, Toggle, glyph, app_icon,
@@ -45,6 +48,9 @@ from .te_widgets import DotMatrixDisplay, SpeakerGrille, RotaryKnob, RockerSwitc
 from .i18n import (tr, tr_button, tr_profile, get_language, set_language,
                    init_language, get_language_preference)
 
+WINDOWS_FEATURES = sys.platform == 'win32'
+ACCESSIBILITY_SETTINGS_URL = 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'
+SCREEN_CAPTURE_SETTINGS_URL = 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
 
 
 def label(text, kind=None, wrap=False):
@@ -101,7 +107,8 @@ MappingDialog = BindingDialog
 
 class Studio(GlassWindow):
     device_sample = Signal(object)
-    def __init__(self, root, standalone=False, lang=None):
+    recording_finished = Signal(str,str)
+    def __init__(self, root, standalone=False, lang=None, input_device=None):
         super().__init__()
         root=Path(root).resolve(); self.remote=not standalone; self.closed=False
         self.store=ConfigStore(root); self.config=self.store.data
@@ -112,9 +119,9 @@ class Studio(GlassWindow):
         init_language(lang or self.config.get('language', 'auto'))
         self.setWindowTitle('GamePad Studio'); self.setWindowIcon(app_icon()); self.resize(1440,900); self.setMinimumSize(960,640)
         self.client=AgentClient(root,self) if self.remote else None
-        self.device=RemoteDevice(self.client) if self.remote else Device()
+        self.device=RemoteDevice(self.client) if self.remote else input_device if input_device is not None else Device()
         if not self.remote:self.device.preferred_key=self.config.get('preferred_controller','')
-        self.actions=WindowsActions()
+        self.actions=create_actions()
         self.engine=MappingRuntime(self.actions, self.dispatch, start_mouse=not self.remote)
         if not self.remote:
             from .application_profiles import ApplicationProfileResolver
@@ -127,6 +134,11 @@ class Studio(GlassWindow):
                 cleanup_stale_agent(root)
                 spawn(root,'--agent')
         self.snapshot=None; self.previous_connected=False; self.enabled=bool(self.config.get('mapping_enabled',True)); self.last_capture=0; self.worker=None
+        self.manual_recording = None
+        self.recording_finished.connect(self.on_recording_finished)
+        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
+            from .macos_windows import configure_window_exclusions
+            configure_window_exclusions({os.getpid(), read_lock_pid(root / 'agent.lock')})
         if not self.remote:
             from .haptic_engine import HapticEngine
             self.haptic_engine = HapticEngine(self.device)
@@ -135,7 +147,7 @@ class Studio(GlassWindow):
         self._battery_alert_ids = set()
         self._battery_alert_order = deque()
         self.battery_warning = None
-        self.emergency_hotkey = None if self.remote else EmergencyHotkey(self.emergency_pause)
+        self.emergency_hotkey = None if self.remote or not emergency_hotkey_supported() else EmergencyHotkey(self.emergency_pause)
         if self.emergency_hotkey:
             self.emergency_hotkey.configure(self.config.get('emergency_hotkey'))
         self.last_touch=None; self.last_buttons=set(); self.quitting=False; self.learn=False
@@ -636,7 +648,9 @@ class Studio(GlassWindow):
         self.stack.addWidget(scroll(page))
 
     def eventFilter(self, watched, event):
-        if hasattr(self, 'mapping_inputs') and watched is self.mapping_inputs.viewport() and event.type() == QEvent.Resize:
+        if (event.type() == QEvent.Resize and not getattr(self, 'closed', False)
+                and hasattr(self, 'mapping_inputs') and isValid(self.mapping_inputs)
+                and watched is self.mapping_inputs.viewport()):
             self.reflow_mapping_inputs(event.size().width())
         return super().eventFilter(watched, event)
 
@@ -866,12 +880,13 @@ class Studio(GlassWindow):
         cap.add_row(self.shutter_haptics_row)
 
         # 屏蔽 Windows 截图与 Game Bar 弹窗开关
-        from .gamebar_shield import is_gamebar_shield_active
         self.gamebar_shield_box = Toggle(tr('启用'))
-        init_shield = bool(self.config.get('gamebar_shield_enabled', False))
+        init_shield = bool(WINDOWS_FEATURES and self.config.get('gamebar_shield_enabled', False))
         self.gamebar_shield_box.setChecked(init_shield)
+        self.gamebar_shield_box.setEnabled(WINDOWS_FEATURES)
+        self.gamebar_shield_box.setToolTip('' if WINDOWS_FEATURES else tr('请先连接并选择原生手柄；启用后游戏也无法直接读取该手柄'))
         self.gamebar_shield_box.toggled.connect(self.on_toggle_gamebar_shield)
-        cap.add_row(AppleRow('shield', (TOKENS['purple'], TOKENS['accent_lo']), tr('屏蔽 Windows 截图与 Game Bar 弹窗'), tr('关闭 Windows 的手柄游戏栏与游戏录制响应'), self.gamebar_shield_box))
+        cap.add_row(AppleRow('shield', (TOKENS['purple'], TOKENS['accent_lo']), tr('屏蔽 Windows 截图与 Game Bar 弹窗') if WINDOWS_FEATURES else tr('屏蔽手柄触发系统弹窗'), tr('关闭 Windows 的手柄游戏栏与游戏录制响应') if WINDOWS_FEATURES else tr('隔离所选手柄的原始输入；系统菜单抑制效果需设备实测'), self.gamebar_shield_box))
 
         grid.addWidget(cap, 0, 0)
 
@@ -1104,15 +1119,32 @@ class Studio(GlassWindow):
         background.add_row(ag_row)
 
         self.emergency_hotkey_button = button(tr('设置快捷键'), self.open_emergency_hotkey_editor, pill=True)
+        self.emergency_hotkey_button.setEnabled(emergency_hotkey_supported())
+        self.emergency_hotkey_button.setToolTip('' if emergency_hotkey_supported() else tr('当前平台不支持全局紧急快捷键，请使用窗口中的暂停按钮'))
         self.emergency_hotkey_row = AppleRow(
             'shield', (TOKENS['amber'], TOKENS['orange']), tr('紧急暂停'),
-            tr('使用物理键盘暂停当前映射'), self.emergency_hotkey_button)
+            tr('使用物理键盘暂停当前映射') if emergency_hotkey_supported() else tr('当前平台不支持全局紧急快捷键，请使用窗口中的暂停按钮'), self.emergency_hotkey_button)
         background.add_row(self.emergency_hotkey_row)
 
+        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
+            self.input_permission_button = button(tr('授权辅助功能'), self.authorize_input, pill=True)
+            self.input_permission_row = AppleRow(
+                'shield', (TOKENS['accent'], TOKENS['accent_lo']), tr('macOS 键鼠输出权限'),
+                tr('请在系统设置 → 隐私与安全性 → 辅助功能中授权当前运行程序'), self.input_permission_button)
+            background.add_row(self.input_permission_row)
+            self.screen_permission_button = button(tr('授权屏幕录制'), self.authorize_screen_capture, pill=True)
+            self.screen_permission_row = AppleRow(
+                'camera', (TOKENS['purple'], TOKENS['accent_lo']), tr('macOS 截图与录制权限'),
+                tr('请在系统设置 → 隐私与安全性 → 屏幕录制中授权当前运行程序'), self.screen_permission_button)
+            background.add_row(self.screen_permission_row)
+            self.refresh_input_permission_status()
+
         self.autostart = Toggle(tr('启用'))
-        self.autostart.setChecked(autostart_enabled())
+        self.autostart.setChecked(autostart_enabled(self.store.root))
+        self.autostart.setEnabled(autostart_supported())
+        self.autostart.setToolTip('' if autostart_supported() else tr('当前平台不支持登录启动，请手动启动应用'))
         self.autostart.toggled.connect(self.toggle_autostart)
-        background.add_row(AppleRow('autostart', (TOKENS['green'], TOKENS['green']), tr('系统开机自动启动'), tr('Windows 登录后在后台安静自启运行'), self.autostart))
+        background.add_row(AppleRow('autostart', (TOKENS['green'], TOKENS['green']), tr('系统开机自动启动'), tr('登录后在后台自动启动当前配置的映射服务') if autostart_supported() else tr('当前平台不支持登录启动，请手动启动应用'), self.autostart))
         grid.addWidget(background, 1, 1)
 
         # 5. 4K 极清硬件加速回放录制 (HEVC / AV1 Replay Buffer)
@@ -1233,7 +1265,10 @@ class Studio(GlassWindow):
 
         grid.addWidget(replay_group, 2, 0, 1, 2)
 
-        self.settings_groups = [cap, hardware, general, background, replay_group]
+        from .voice_entry_ui import VoiceEntryGroup
+        self.voice_entry_group = VoiceEntryGroup(platform=sys.platform)
+        grid.addWidget(self.voice_entry_group, 3, 0, 1, 2)
+        self.settings_groups = [cap, hardware, general, background, replay_group, self.voice_entry_group]
         for group in self.settings_groups:
             group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
             group.vbox.setAlignment(Qt.AlignTop)
@@ -1281,15 +1316,15 @@ class Studio(GlassWindow):
 
     def refresh_recording_displays(self):
         from .display_info import enumerate_displays, match_monitors, format_refresh
-        import mss
+        from .replay_capture import create_replay_capture
         try:
-            with mss.mss() as capture:
+            with create_replay_capture() as capture:
                 rows = match_monitors(capture.monitors, enumerate_displays())
         except Exception:
             rows = [{'index': 0, 'recording_enabled': False,
                      'recording_reason': tr('无法确认所有显示器的刷新率，请选择单个屏幕录制')}]
         self.recording_displays = rows
-        if rows and rows[0].get('recording_enabled') and rows[0].get('display_count', 0) > 1 and rows[0].get('hdr_enabled'):
+        if WINDOWS_FEATURES and rows and rows[0].get('recording_enabled') and rows[0].get('display_count', 0) > 1 and rows[0].get('hdr_enabled'):
             rows[0]['recording_enabled'] = False
             rows[0]['recording_reason'] = tr('HDR 跨屏录制暂不支持，请选择单个屏幕录制')
         current = self.config.get('replay_capture_mode') or self.config.get('capture_mode', 'game')
@@ -1333,8 +1368,11 @@ class Studio(GlassWindow):
                 if path:
                     self.notify(f"🎬 {tr('精彩回放已保存')}: {Path(path).name}")
                     return
-            self.actions.shortcut('Win+Alt+G')
-            self.notify(tr("已触发系统回放录制 (Win+Alt+G)"))
+            if sys.platform == 'darwin' and not WINDOWS_FEATURES:
+                self.notify(tr('请先启用回放缓存，等待画面积累后保存'))
+            else:
+                self.actions.shortcut('Win+Alt+G')
+                self.notify(tr("已触发系统回放录制 (Win+Alt+G)"))
 
     def test_haptic_pattern(self, pattern: str):
         if not self.snapshot or not self.snapshot.get('rumble'):
@@ -1401,6 +1439,14 @@ class Studio(GlassWindow):
             return False
 
     def on_toggle_gamebar_shield(self, checked: bool):
+        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
+            result = self.set_controller_isolation(checked)
+            self.notify(result['message'])
+            self.refresh_controller_isolation()
+            return
+        if not WINDOWS_FEATURES:
+            self.notify(tr('此功能仅支持 Windows'))
+            return
         from .gamebar_shield import set_gamebar_shield
         if self.remote:
             result = request(self.store.root, 'set_gamebar_shield', enabled=checked, timeout=4000)
@@ -1425,6 +1471,38 @@ class Studio(GlassWindow):
             self.virtual_kbm_page.gamebar_shield_toggle.setChecked(self.config.get('gamebar_shield_enabled', False))
             self.virtual_kbm_page.gamebar_shield_toggle.blockSignals(False)
 
+    def set_controller_isolation(self, enabled):
+        if self.remote:
+            result = request(self.store.root, 'set_device_cloaking', enabled=enabled,
+                             device_scope=profile_scope(self.snapshot), timeout=4000)
+            if not result or not result.get('ok') or 'applied' not in result:
+                return {'applied':False,'message':(result or {}).get('error') or tr('后台未能应用隔离设置')}
+            latest = ConfigStore(self.store.root)
+            self.store.data.clear(); self.store.data.update(latest.data)
+            self.store._baseline = copy.deepcopy(latest.data)
+            return result
+        from .controller_isolation_service import set_controller_isolation
+        def release():
+            try:
+                self.engine.reset()
+            finally:
+                self.actions.release_all()
+        try:
+            return set_controller_isolation(self.store,self.device,self.snapshot,enabled,release)
+        except (ValueError,OSError,RuntimeError) as exc:
+            return {'applied':False,'message':str(exc)}
+
+    def refresh_controller_isolation(self):
+        if sys.platform != 'darwin' or not hasattr(self,'gamebar_shield_box'):
+            return
+        from .controller_isolation_service import isolation_status
+        status = isolation_status(self.device)
+        self.gamebar_shield_box.blockSignals(True)
+        self.gamebar_shield_box.setChecked(bool(status.get('active') or status.get('restore_pending')))
+        self.gamebar_shield_box.setEnabled(bool(self.snapshot and (status.get('supported') or status.get('restore_pending'))))
+        self.gamebar_shield_box.blockSignals(False)
+        self.gamebar_shield_box.setToolTip(status.get('reason') or tr('隔离也会阻止游戏的原生手柄输入；关闭或退出软件时恢复'))
+
     def show_help(self):
         title = tr('使用指南')
         if get_language() == 'en':
@@ -1446,6 +1524,33 @@ class Studio(GlassWindow):
                 "后台随登录运行，关闭窗口不影响映射。键盘映射不屏蔽原始输入，Xbox 键的系统功能由 Windows 管理。游戏触觉和自适应扳机取决于游戏支持。\n\n"
                 "产品图片来自品牌官网，通用手柄使用标注的示例机型。"
             )
+        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
+            if get_language() == 'en':
+                msg = (
+                    "Select a gamepad in the Controller Library, then choose or edit a preset. "
+                    "One selected controller is mapped at a time. Keys are released when switching or disconnecting.\n\n"
+                    "Keyboard and mouse mapping requires Accessibility permission. Screenshots and replay require "
+                    "Screen Recording permission. Authorize the running app from System Settings in the app's Settings page, "
+                    "then restart the background service if macOS requires it.\n\n"
+                    "Ctrl means the physical Control key. Cmd (Win / Meta in existing presets) means Command. "
+                    "Controller isolation is opt-in and applies only to the selected supported native HID controller. "
+                    "It also blocks games from reading that controller directly; turn it off to restore native input.\n\n"
+                    "macOS supports game/window/display screenshots and same-refresh multi-display recording. "
+                    "HDR-to-SDR capture requires macOS 15 or later on Apple Silicon. "
+                    "Emergency Pause, login startup and .app preset associations are available in Settings. "
+                    "Emergency shortcuts and login startup stay off until enabled. "
+                    "Start/stop recording uses the Mac capture backend and saves a complete local MP4."
+                )
+            else:
+                msg = (
+                    "在控制器库中选择手柄，再选择或编辑预设。当前一次只为所选手柄执行映射，切换或断开时释放按键。\n\n"
+                    "键鼠映射需要辅助功能权限；截图与回放需要屏幕录制权限。请在应用的系统设置页中授权当前运行程序，"
+                    "系统要求时重新启动后台服务。\n\n"
+                    "Ctrl 对应实际 Control 键，Cmd（兼容预设中的 Win / Meta）对应 Command 键。"
+                    "设备隐身需明确开启，仅隔离所选支持的原生手柄；启用后游戏也不能直接读取该手柄，关闭时恢复原始输入。\n\n"
+                    "macOS 支持游戏、窗口和显示器截图，以及同刷新率多屏录制。HDR 转标准颜色需要 macOS 15 或更新版本及 Apple Silicon。"
+                    "录屏开关会保存从开始到停止的完整本地 MP4。系统设置中可配置紧急暂停、登录启动与 .app 应用关联；热键与登录启动默认关闭，需手动启用。"
+                )
         QMessageBox.information(self, title, msg)
 
     def select_controller(self,instance):
@@ -1568,15 +1673,51 @@ class Studio(GlassWindow):
                 bool(state.get('led')), bool(state.get('touchpad')))
 
     def toggle_autostart(self,enabled):
+        if not autostart_supported():
+            self.notify(tr('当前平台不支持登录启动，请手动启动应用'))
+            return
         try:
             set_autostart(self.store.root,enabled)
+            self._cancel_autostart_handoff()
             if enabled and self.remote and not self.client.connected:spawn(self.store.root,'--agent')
+            if not enabled and self.remote and self.client.connected and sys.platform == 'darwin':
+                # Unloading a LaunchAgent stops its process. Keep the open
+                # workspace running with a manual backend after it releases
+                # its input and lock, without changing the saved pause state.
+                self._autostart_handoff_deadline = time.monotonic() + 30
+                self._autostart_handoff_timer = QTimer(self)
+                self._autostart_handoff_timer.setInterval(500)
+                self._autostart_handoff_timer.timeout.connect(self._finish_autostart_handoff)
+                self._autostart_handoff_timer.start()
             self.notify(tr('登录启动已开启') if enabled else tr('登录启动已关闭'))
         except OSError as exc:
             self.autostart.blockSignals(True); self.autostart.setChecked(not enabled); self.autostart.blockSignals(False); self.notify(tr('设置失败：')+str(exc))
 
+    def _cancel_autostart_handoff(self):
+        timer = getattr(self, '_autostart_handoff_timer', None)
+        if timer:
+            timer.stop()
+            timer.deleteLater()
+            self._autostart_handoff_timer = None
+
+    def _finish_autostart_handoff(self):
+        if self.closed or time.monotonic() > self._autostart_handoff_deadline:
+            self._cancel_autostart_handoff()
+            return
+        status = request(self.store.root, 'status', timeout=150)
+        if status and status.get('ok'):
+            self._cancel_autostart_handoff()
+            return
+        pid = read_lock_pid(self.store.root / 'agent.lock')
+        if pid and is_process_alive(pid):
+            return
+        self._cancel_autostart_handoff()
+        cleanup_stale_agent(self.store.root)
+        spawn(self.store.root, '--agent')
+
     def toggle_agent(self):
         if not self.remote:return
+        self._cancel_autostart_handoff()
         if self.client.connected:self.client.send('stop')
         else:spawn(self.store.root,'--agent');self.notify(tr('后台启动中'))
 
@@ -1603,6 +1744,8 @@ class Studio(GlassWindow):
                 self.notify(tr("已触发系统回放录制 (Win+Alt+G)"))
             else:
                 self.notify(message.get("error") or "回放尚未就绪")
+        elif kind=='recording':
+            self.on_recording_finished(message.get('path',''), message.get('error',''))
         elif kind=='buttons' and self.learn:
             valid=[b for b in message['buttons'] if b in BUTTONS]
             if valid:self.end_learning();QTimer.singleShot(0,lambda:self.edit_mapping(valid[0]))
@@ -1649,6 +1792,8 @@ class Studio(GlassWindow):
             self.leave_fullscreen()
 
     def reflow_workspace(self):
+        if self.closed:
+            return
         compact = self.width() <= 1200
         self.content_layout.setSpacing(12 if compact else 18)
         self.rail.setFixedWidth(64 if compact else 212)
@@ -1676,10 +1821,13 @@ class Studio(GlassWindow):
         grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1 if columns == 2 else 0)
         for index, group in enumerate(self.settings_groups):
             if columns == 2:
-                grid.addWidget(group, index // 2, index % 2, 1, 2 if index == 4 else 1, Qt.AlignTop)
+                if index >= 4:
+                    grid.addWidget(group, index - 2, 0, 1, 2, Qt.AlignTop)
+                else:
+                    grid.addWidget(group, index // 2, index % 2, Qt.AlignTop)
             else:
                 grid.addWidget(group, index, 0, Qt.AlignTop)
-        grid.setRowStretch(3 if columns == 2 else 5, 1)
+        grid.setRowStretch(len(self.settings_groups) - 2 if columns == 2 else len(self.settings_groups), 1)
 
     def show_home(self):
         self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
@@ -1763,6 +1911,7 @@ class Studio(GlassWindow):
             if self.emergency_hotkey:
                 self.emergency_hotkey.configure(self.config.get('emergency_hotkey'))
             self.refresh_emergency_hotkey_status()
+            self.refresh_input_permission_status()
         if key=='long_press': self.engine.threshold=value
         if key=='touch_mouse': self.last_touch=None
         if not self.remote and (key in DEVICE_SETTING_KEYS or key == 'capture_sound_enabled'):
@@ -1843,8 +1992,11 @@ class Studio(GlassWindow):
         if has_led and not self.remote:
             self.device.led(settings['led'])
         self.apply_device_feedback_settings(state)
+        self.refresh_controller_isolation()
 
     def scan(self):
+        if self.closed:
+            return
         try: self.device.scan()
         except Exception as exc: self.notify(tr('设备扫描失败：')+str(exc))
 
@@ -1855,6 +2007,8 @@ class Studio(GlassWindow):
         return self.stack.currentIndex() in (1,6) and self.isActiveWindow() and self.virtual_kbm_page.preview_toggle.isChecked()
 
     def poll(self):
+        if self.closed:
+            return
         try:
             state=self.device.read(); self.snapshot=state; connected=state is not None
             if not self.remote:
@@ -1867,6 +2021,14 @@ class Studio(GlassWindow):
             if identity!=self.device_identity or profile_changed or capabilities_changed:
                 self.engine.reset();self.actions.release_all();self.last_buttons=set();self.device_identity=identity
                 self.update_controller_ui(state)
+                if sys.platform == 'darwin' and not self.remote:
+                    from .controller_isolation_service import isolation_requested
+                    self._isolation_apply_pending = bool(state and isolation_requested(self.config,state))
+            if sys.platform == 'darwin' and not self.remote and getattr(self,'_isolation_apply_pending',False):
+                from .controller_isolation_service import controller_neutral
+                if controller_neutral(state):
+                    self._isolation_apply_pending = False
+                    self.notify(self.set_controller_isolation(True)['message'])
             if not self.remote:
                 self.update_application_profile()
             self.refresh_battery_status()
@@ -1887,6 +2049,8 @@ class Studio(GlassWindow):
                     if now-getattr(self,'last_suspend',0)>.5:
                         self.client.send('suspend',seconds=2);self.last_suspend=now
             self.refresh_emergency_hotkey_status()
+            self.refresh_controller_isolation()
+            self.refresh_input_permission_status()
             if connected != self.previous_connected:
                 self.engine.reset(); self.actions.release_all(); self.last_touch=None
                 self.previous_connected=connected
@@ -1997,11 +2161,41 @@ class Studio(GlassWindow):
         if not down or action=='none': return
         if action=='capture': self.capture()
         elif action=='replay_record': self.trigger_manual_replay()
+        elif action=='record_toggle': self.record_toggle()
         elif action in ('gallery','home'):
             self.navigate(2 if action=='gallery' else 0); self.show_home()
         elif action=='shortcut': self.actions.shortcut(binding['value'])
         elif action=='launch': launch_command(binding['executable'],binding.get('arguments',''))
         else: self.actions.media(action)
+
+    def record_toggle(self):
+        if self.remote:
+            self.client.send('record_toggle')
+            return
+        if sys.platform != 'darwin':
+            self.actions.shortcut('Win+Alt+R')
+            return
+        if self.manual_recording and self.manual_recording.status()['running']:
+            self.manual_recording.request_stop()
+            self.notify(tr('正在结束并保存录像'))
+            return
+        self.manual_recording = ManualRecording(
+            self.config['save_dir'],
+            capture_mode=self.config.get('replay_capture_mode') or self.config.get('capture_mode','game'),
+            codec=self.config.get('replay_codec','hevc'), fps=self.config.get('replay_fps',30),
+            bitrate_mbps=self.config.get('replay_bitrate_mbps',50),
+            on_saved=self.recording_finished.emit)
+        if self.manual_recording.start():
+            self.notify(tr('正在启动录像；再次按键停止并保存'))
+        else:
+            self.notify(self.manual_recording.status()['last_error'])
+
+    def on_recording_finished(self, path, error):
+        if error:
+            self.notify(tr('录像失败：')+error)
+        elif path:
+            self.notify(tr('录像已保存：')+Path(path).name)
+            self.refresh_gallery()
 
     def toggle_pause(self):
         if self.remote:
@@ -2034,6 +2228,9 @@ class Studio(GlassWindow):
                     + (' ' + tr('暂停状态保存或输入释放失败：') + '; '.join(errors) if errors else ''))
 
     def open_emergency_hotkey_editor(self):
+        if not emergency_hotkey_supported():
+            self.notify(tr('当前平台不支持全局紧急快捷键，请使用窗口中的暂停按钮'))
+            return
         from .emergency_hotkey_ui import EmergencyHotkeyDialog
         self.engine.reset()
         self.actions.release_all()
@@ -2047,6 +2244,10 @@ class Studio(GlassWindow):
                 self.last_suspend = 0
 
     def refresh_emergency_hotkey_status(self):
+        if not emergency_hotkey_supported():
+            self.emergency_hotkey_row.subtitle_label.setText(tr('当前平台不支持全局紧急快捷键，请使用窗口中的暂停按钮'))
+            self.pause_button.setToolTip(tr('暂停手柄映射') if self.enabled else tr('恢复手柄映射'))
+            return
         if self.remote:
             status = self.client.status.get('emergency_hotkey', {}) if self.client.connected else {}
             online = self.client.connected
@@ -2068,6 +2269,52 @@ class Studio(GlassWindow):
         pause_hint = tr('暂停手柄映射') if self.enabled else tr('恢复手柄映射')
         self.pause_button.setToolTip(pause_hint + (' · ' + tr('紧急暂停') + ': ' + settings['shortcut']
                                                   if registered else ''))
+
+    def refresh_input_permission_status(self, force=False):
+        if not hasattr(self, 'input_permission_row'):
+            return
+        now = time.monotonic()
+        if not force and now - getattr(self, '_last_permission_check', -float('inf')) < 1:
+            return
+        self._last_permission_check = now
+        status = self.client.status.get('input_permission', {}) if self.remote and self.client.connected else {}
+        if not status:
+            status = input_permission_status()
+        granted = bool(status.get('granted'))
+        self.input_permission_row.subtitle_label.setText(
+            tr('辅助功能已授权，键鼠映射可以输出') if granted
+            else tr('请在系统设置 → 隐私与安全性 → 辅助功能中授权当前运行程序'))
+        self.input_permission_row.subtitle_label.setToolTip(status.get('reason', ''))
+        self.input_permission_button.setText(tr('打开系统设置') if granted else tr('授权辅助功能'))
+        self.input_permission_button.setToolTip(tr('权限变更后可能需要重新启动后台服务'))
+        from .macos_permissions import screen_capture_permission_status
+        screen = screen_capture_permission_status()
+        screen_granted = bool(screen.get('granted'))
+        self.screen_permission_row.subtitle_label.setText(
+            tr('屏幕录制已授权，截图与录制可以使用') if screen_granted
+            else tr('请在系统设置 → 隐私与安全性 → 屏幕录制中授权当前运行程序'))
+        self.screen_permission_row.subtitle_label.setToolTip(screen.get('reason', ''))
+        self.screen_permission_button.setText(tr('打开系统设置') if screen_granted else tr('授权屏幕录制'))
+        self.screen_permission_button.setToolTip(tr('权限变更后可能需要重新启动后台服务'))
+
+    def authorize_input(self):
+        self.request_macos_permission(request_input_permission, ACCESSIBILITY_SETTINGS_URL)
+
+    def authorize_screen_capture(self):
+        from .macos_permissions import request_screen_capture_permission
+        self.request_macos_permission(request_screen_capture_permission, SCREEN_CAPTURE_SETTINGS_URL)
+
+    def request_macos_permission(self, requester, settings_url):
+        error = ''
+        try:
+            status = requester()
+        except (OSError, AttributeError, RuntimeError) as exc:
+            status = {'granted': False}
+            error = tr('授权请求失败，请在系统设置中手动授权：') + str(exc)
+        self.refresh_input_permission_status(force=True)
+        QDesktopServices.openUrl(QUrl(settings_url))
+        if not status.get('granted'):
+            self.notify(error or tr('权限变更后可能需要重新启动后台服务'))
 
     def current_gamepad_profile(self):
         from .studio_core import profile_mode
@@ -2101,6 +2348,9 @@ class Studio(GlassWindow):
             self.change_profile(name)
 
     def open_application_profiles(self):
+        if not application_profiles_supported():
+            self.notify(tr('当前平台不支持应用关联'))
+            return
         if not self.snapshot:
             self.notify(tr('请先连接手柄'))
             return
@@ -2161,11 +2411,15 @@ class Studio(GlassWindow):
                 self.client.send('suspend', seconds=2 if QApplication.activeModalWidget() is not None else 0)
 
     def application_profile_status(self):
+        if not application_profiles_supported():
+            return {'automatic': False, 'executable': '', 'profile': self.config.get('active_profile', '')}
         if self.remote:
             return self.client.status.get('application_profile', {})
         return getattr(self, '_application_profile_status', {})
 
     def update_application_profile(self, now=None, force=False):
+        if not application_profiles_supported():
+            return False
         from .application_profiles import foreground_application
         now = time.monotonic() if now is None else now
         if not force and now - self._last_application_check < .25:
@@ -2195,11 +2449,12 @@ class Studio(GlassWindow):
         import ntpath
         tip = tr('应用自动切换：{app}', app=ntpath.basename(status.get('executable', ''))) if automatic else ''
         if hasattr(self, 'application_profiles_action'):
-            self.application_profiles_action.setEnabled(bool(self.snapshot))
+            self.application_profiles_action.setEnabled(bool(application_profiles_supported() and self.snapshot))
+            self.application_profiles_action.setToolTip('' if application_profiles_supported() else tr('当前平台不支持应用关联'))
             self.import_profile_action.setEnabled(bool(self.snapshot))
             self.export_profile_action.setEnabled(bool(self.snapshot))
         if hasattr(self, 'virtual_kbm_page'):
-            self.virtual_kbm_page.application_profiles_action.setEnabled(bool(self.snapshot))
+            self.virtual_kbm_page.application_profiles_action.setEnabled(bool(application_profiles_supported() and self.snapshot))
             self.virtual_kbm_page.import_profile_action.setEnabled(bool(self.snapshot))
             self.virtual_kbm_page.export_profile_action.setEnabled(bool(self.snapshot))
             active = self.virtual_kbm_page.current_scheme() == self.config.get('active_profile')
@@ -2577,6 +2832,8 @@ class Studio(GlassWindow):
         return box
 
     def refresh_gallery(self,*args):
+        if self.closed:
+            return
         try: rows=list_captures(self.config['save_dir'])
         except OSError as exc: self.notify(tr('无法读取截图目录：')+str(exc)); return
         columns=max(2,min(5,self.gallery_view.viewport().width()//320))
@@ -2626,6 +2883,8 @@ class Studio(GlassWindow):
 
     def resizeEvent(self,event):
         super().resizeEvent(event)
+        if getattr(self, 'closed', False):
+            return
         if hasattr(self,'size_grip'):
             self.reflow_workspace()
         if hasattr(self,'recent_row'):QTimer.singleShot(0,self.refresh_gallery)
@@ -2750,15 +3009,33 @@ class Studio(GlassWindow):
             self.notify(tr('GamePad Studio 已最小化至系统托盘'))
             event.ignore()
             return
-        self.cleanup();event.accept()
+        if hasattr(self, 'voice_entry_group') and not self.voice_entry_group.close_service():
+            self.navigate(4)
+            self.notify(self.voice_entry_group.status_label.text())
+            event.ignore()
+            return
+        if self.cleanup():
+            event.accept()
+        else:
+            event.ignore()
 
     def cleanup(self):
-        if self.closed:return
+        if self.closed:return True
+        if hasattr(self,'voice_entry_group') and not self.voice_entry_group.close_service():
+            return False
         self.closed=True
-        self.timer.stop(); self.scan_timer.stop(); self.gallery_timer.stop()
-        self.notice_timer.stop();self.events.close()
+        self.enabled=False
+        errors=[]
+        def finish(label, operation):
+            try:
+                operation()
+            except Exception as exc:
+                errors.append(label+'：'+str(exc))
+        finish(tr('停止登录启动交接'), self._cancel_autostart_handoff)
+        for timer in (self.timer,self.scan_timer,self.gallery_timer,self.notice_timer):
+            finish(tr('停止界面计时器'), timer.stop)
         if self.emergency_hotkey:
-            self.emergency_hotkey.close()
+            finish(tr('注销紧急暂停'), self.emergency_hotkey.close)
         if self.remote:
             if self.client and self.client.connected:
                 try: self.client.send('preview', seconds=0)
@@ -2769,15 +3046,39 @@ class Studio(GlassWindow):
                 request(self.store.root, 'stop', timeout=600)
             except Exception:
                 pass
-        self.engine.reset(); self.actions.release_all()
-        self.engine.close()
+        finish(tr('释放映射'), self.engine.reset)
+        finish(tr('释放键鼠输入'), self.actions.release_all)
+        finish(tr('关闭映射引擎'), self.engine.close)
+        if self.manual_recording:
+            finish(tr('结束录像'), self.manual_recording.stop)
         if hasattr(self, 'haptic_engine'):
-            self.haptic_engine.close()
-        self.device.close(); self.tray.hide()
-        if self.worker and self.worker.isRunning(): self.worker.wait()
+            finish(tr('停止触觉反馈'), self.haptic_engine.close)
+        finish(tr('恢复手柄共享访问'), self.device.close)
+        if self.worker and self.worker.isRunning():
+            finish(tr('结束截图'), self.worker.wait)
+        self.cleanup_errors=errors
+        if errors:
+            self.closed=False
+            self.notify(tr('退出尚未完成，请重试：')+'；'.join(errors))
+            return False
+        self.events.close(); self.tray.hide()
+        return True
 
     def quit_app(self):
-        self.quitting=True; self.close(); QApplication.quit()
+        self.quitting=True
+        self.close()
+        if self.closed:
+            QApplication.quit()
+
+
+class _SmokeDevice:
+    """Startup/render checks must not open or exercise connected controllers."""
+    available=[]
+    def scan(self): pass
+    def read(self): return None
+    def close(self): pass
+    def rumble(self,*_): return False
+    def led(self,*_): return False
 
 
 def run():
@@ -2817,7 +3118,8 @@ def run():
             except Exception:
                 pass
             lock.tryLock(300)
-    window=Studio(root,standalone=args.smoke_test,lang=args.lang)
+    window=Studio(root,standalone=args.smoke_test,lang=args.lang,
+                  input_device=_SmokeDevice() if args.smoke_test else None)
     def handle_ui(message):
         if message.get('command')=='exit':QTimer.singleShot(50,window.quit_app)
         elif message.get('command')=='show':window.navigate(pages.get(message.get('page'),0));window.show_home()
@@ -2840,5 +3142,3 @@ def run():
             window.quit_app()
         QTimer.singleShot(1200,smoke_finish)
     window.showFullScreen(); code=app.exec(); ui_server.close(); lock.unlock(); return code
-
-

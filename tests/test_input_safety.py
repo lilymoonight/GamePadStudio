@@ -1,7 +1,16 @@
 """Native API failure tests: no keyboard or mouse input reaches Windows."""
 import ctypes
+from types import SimpleNamespace
 import pytest
+from gamepadstudio import actions as actions_module
 from gamepadstudio.actions import WindowsActions
+
+
+@pytest.fixture(autouse=True)
+def isolated_windows_input(monkeypatch):
+    native_ctypes = SimpleNamespace(**vars(ctypes))
+    native_ctypes.get_last_error = lambda: 0
+    monkeypatch.setattr(actions_module, 'C', native_ctypes)
 
 
 class NativeInput:
@@ -32,7 +41,7 @@ def actions(native):
 
 
 def test_partial_shortcut_rolls_back_modifier_before_propagating_error(monkeypatch):
-    monkeypatch.setattr(ctypes, 'get_last_error', lambda: 0)
+    monkeypatch.setattr(actions_module.C, 'get_last_error', lambda: 0)
     native = NativeInput([1])  # Alt goes down but the following letter fails.
     output = actions(native)
     with pytest.raises(OSError):
@@ -43,7 +52,7 @@ def test_partial_shortcut_rolls_back_modifier_before_propagating_error(monkeypat
 
 
 def test_failed_access_denied_retry_is_not_reported_as_success(monkeypatch):
-    monkeypatch.setattr(ctypes, 'get_last_error', lambda: 5)
+    monkeypatch.setattr(actions_module.C, 'get_last_error', lambda: 5)
     monkeypatch.setattr('gamepadstudio.actions.attach_to_default_desktop', lambda: None)
     native = NativeInput([0, 0])
     output = actions(native)
@@ -54,7 +63,7 @@ def test_failed_access_denied_retry_is_not_reported_as_success(monkeypatch):
 
 
 def test_one_refused_release_does_not_skip_other_keys_or_mouse(monkeypatch):
-    monkeypatch.setattr(ctypes, 'get_last_error', lambda: 0)
+    monkeypatch.setattr(actions_module.C, 'get_last_error', lambda: 0)
     native = NativeInput([0])
     native.down = {18, 71}
     output = actions(native)

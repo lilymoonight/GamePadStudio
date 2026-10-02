@@ -9,6 +9,7 @@ SimpleBlock, V_UNCOMPRESSED/UncompressedFourCC).
 import math
 from pathlib import Path
 import struct
+import threading
 
 
 def _size(value):
@@ -80,6 +81,107 @@ class TimestampedRGBWriter:
         _write_all(self.stream, rgb)
         self.stream.flush()
         return milliseconds / 1000
+
+
+class TimestampedAVWriter:
+    """RGB24 plus interleaved signed PCM16LE, on one shared capture clock.
+
+    The caller subtracts the same recording origin from both source timestamps.
+    Audio timestamps identify the first sample, rather than callback delivery.
+    Tracks keep independent ordering, so delayed audio delivery does not shift
+    its PTS to the newest video frame. One-microsecond ticks retain PCM timing.
+    See https://www.matroska.org/technical/codec_specs.html#a_pcmintlit.
+    """
+    def __init__(self, stream, width, height, fps, sample_rate=48000, channels=2):
+        def integer(value, name, low, high):
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                raise ValueError(f'Invalid {name}')
+            return value
+
+        self.width = integer(width, 'video width', 1, 65535)
+        self.height = integer(height, 'video height', 1, 65535)
+        self.sample_rate = integer(sample_rate, 'audio sample rate', 8000, 384000)
+        self.channels = integer(channels, 'audio channels', 1, 8)
+        if isinstance(fps, bool) or not isinstance(fps, (int, float)) or not math.isfinite(fps) or not 0 < fps <= 240:
+            raise ValueError('Invalid video FPS')
+        self.stream = stream
+        self.frame_bytes = self.width * self.height * 3
+        self.last_timestamp = self.last_audio_timestamp = -1
+        self._audio_end = None
+        self._lock = threading.Lock()
+        header = (_uint(b'\x42\x86', 1) + _uint(b'\x42\xf7', 1)
+                  + _uint(b'\x42\xf2', 4) + _uint(b'\x42\xf3', 8)
+                  + _element(b'\x42\x82', b'matroska')
+                  + _uint(b'\x42\x87', 4) + _uint(b'\x42\x85', 2))
+        info = (_uint(b'\x2a\xd7\xb1', 1000)
+                + _element(b'\x4d\x80', b'GamePadStudio')
+                + _element(b'\x57\x41', b'GamePadStudio'))
+        video = (_uint(b'\xb0', self.width) + _uint(b'\xba', self.height)
+                 + _element(b'\x2e\xb5\x24', b'RGB\x18'))
+        video_track = (_uint(b'\xd7', 1) + _uint(b'\x73\xc5', 1) + _uint(b'\x83', 1)
+                       + _uint(b'\x9c', 0)
+                       + _uint(b'\x23\xe3\x83', round(1_000_000_000 / fps))
+                       + _element(b'\x86', b'V_UNCOMPRESSED') + _element(b'\xe0', video))
+        audio = (_element(b'\xb5', struct.pack('>d', float(self.sample_rate)))
+                 + _uint(b'\x9f', self.channels) + _uint(b'\x62\x64', 16))
+        audio_track = (_uint(b'\xd7', 2) + _uint(b'\x73\xc5', 2) + _uint(b'\x83', 2)
+                       + _uint(b'\x9c', 0) + _element(b'\x86', b'A_PCM/INT/LIT')
+                       + _element(b'\xe1', audio))
+        tracks = _element(b'\xae', video_track) + _element(b'\xae', audio_track)
+        _write_all(stream, _element(b'\x1a\x45\xdf\xa3', header)
+                   + b'\x18\x53\x80\x67\x01\xff\xff\xff\xff\xff\xff\xff'
+                   + _element(b'\x15\x49\xa9\x66', info)
+                   + _element(b'\x16\x54\xae\x6b', tracks))
+
+    @staticmethod
+    def _timestamp(timestamp, kind):
+        if (isinstance(timestamp, bool) or not isinstance(timestamp, (int, float))
+                or not math.isfinite(timestamp) or not 0 <= timestamp < (1 << 64) / 1_000_000):
+            raise ValueError(f'Invalid {kind} capture timestamp')
+        return round(timestamp * 1_000_000)
+
+    def _block(self, track, data, microseconds):
+        timecode = _uint(b'\xe7', microseconds)
+        # Independent blocks use their original per-track timestamp, even if
+        # an earlier audio packet arrives after a later video callback.
+        block = b'\xa3' + _size(4 + len(data)) + bytes((0x80 | track, 0, 0, 0x80))
+        prefix = b'\x1f\x43\xb6\x75' + _size(len(timecode) + len(block) + len(data))
+        _write_all(self.stream, prefix + timecode + block)
+        _write_all(self.stream, data)
+        self.stream.flush()
+
+    def write_frame(self, rgb, timestamp):
+        if len(rgb) != self.frame_bytes:
+            raise ValueError('The captured frame dimensions changed during recording')
+        microseconds = self._timestamp(timestamp, 'video')
+        with self._lock:
+            if microseconds < self.last_timestamp:
+                raise ValueError('Video capture timestamps moved backwards')
+            self._block(1, rgb, microseconds)
+            self.last_timestamp = microseconds
+        return microseconds / 1_000_000
+
+    def write_audio(self, pcm, timestamp, *, sample_rate=None, channels=None):
+        """Write one aligned PCM packet; format changes/overlap fail explicitly."""
+        if ((sample_rate is not None and sample_rate != self.sample_rate)
+                or (channels is not None and channels != self.channels)):
+            raise ValueError('The audio sample rate or channel count changed during recording')
+        if not isinstance(pcm, (bytes, bytearray, memoryview)):
+            raise ValueError('Audio must contain PCM s16le bytes')
+        data = memoryview(pcm).cast('B')
+        sample_bytes = self.channels * 2
+        if not data or len(data) % sample_bytes:
+            raise ValueError('Audio PCM packet does not contain complete interleaved samples')
+        microseconds = self._timestamp(timestamp, 'audio')
+        with self._lock:
+            if microseconds < self.last_audio_timestamp:
+                raise ValueError('Audio capture timestamps moved backwards')
+            if self._audio_end is not None and timestamp < self._audio_end - 1 / self.sample_rate:
+                raise ValueError('Audio PCM packets overlap')
+            self._block(2, data, microseconds)
+            self.last_audio_timestamp = microseconds
+            self._audio_end = timestamp + len(data) / sample_bytes / self.sample_rate
+        return microseconds / 1_000_000
 
 
 class TransportStreamClock:

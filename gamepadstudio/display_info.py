@@ -1,9 +1,10 @@
 """Read physical display timing/color state without changing Windows settings.
 
-``enumerate_displays`` returns native display rows in desktop pixels.
+``enumerate_displays`` returns native display rows: Windows desktop pixels,
+macOS CG points with explicit physical-pixel dimensions and Retina scale.
 ``match_monitors`` associates them with MSS's monitor indices by geometry.
 ``capture_display_info`` aggregates the screens touched by a capture rectangle.
-Unknown refresh/HDR values are None, including on non-Windows hosts.
+Unknown refresh/HDR values are None; unknown rates are never replaced by 60 Hz.
 
 Win32 layouts and semantics are based on Microsoft Learn and the public SDK:
 https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-querydisplayconfig
@@ -293,6 +294,12 @@ def _fallback_mode(user32, device_name):
 
 def enumerate_displays():
     """Return active native monitor information; unsupported/error -> no guessed rows."""
+    if sys.platform == 'darwin':
+        from .macos_display import enumerate_displays as mac_displays
+        try:
+            return mac_displays()
+        except (OSError, RuntimeError, ValueError):
+            return []
     if sys.platform != 'win32':
         return []
     try:

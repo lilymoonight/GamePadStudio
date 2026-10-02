@@ -17,10 +17,13 @@ keywords = [
     "virtual-kbm", "remapping", "haptics", "hidhide", "replay-recorder"
 ]
 dependencies = [
-    "pygame>=2.6.0",
+    "pygame>=2.6.0; sys_platform != 'darwin'",
+    "pygame==2.6.1; sys_platform == 'darwin'",
     "mss>=10.0.0",
     "PySide6>=6.6.0",
     "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+    "imageio-ffmpeg==0.6.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
@@ -36,4 +39,4 @@ where = ["."]
 include = ["gamepadstudio*"]
 
 [tool.setuptools.package-data]
-gamepadstudio = ["assets/*", "assets/controllers/*"]
+gamepadstudio = ["assets/*", "assets/controllers/*", "native/*.swift"]

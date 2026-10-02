@@ -15,6 +15,14 @@ from gamepadstudio import replay_service
 from gamepadstudio.replay_timing import TimestampedRGBWriter
 
 
+@pytest.fixture(autouse=True)
+def portable_encoder_policy(monkeypatch):
+    # Exercise the common encoder/panorama policy with fake sources. Native
+    # macOS consent and single-display limits have separate focused tests.
+    import sys
+    monkeypatch.setattr(replay_service, 'sys', SimpleNamespace(platform='linux'))
+
+
 def test_calculate_estimated_ram_gb():
     assert calculate_estimated_ram_gb(5, 50) == 1.75 or calculate_estimated_ram_gb(5, 50) == 1.88 or 1.5 < calculate_estimated_ram_gb(5, 50) < 2.0
     assert calculate_estimated_ram_gb(10, 50) > calculate_estimated_ram_gb(5, 50)
@@ -469,4 +477,3 @@ def test_restart_refuses_to_overlap_a_worker_that_has_not_finished_stopping(tmp_
         new_thread.assert_not_called()
     finally:
         engine._worker_thread = None
-

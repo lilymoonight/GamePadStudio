@@ -235,6 +235,8 @@ class VirtualMouseThread(threading.Thread):
         self.acc_x = 0.0
         self.acc_y = 0.0
         self.outer_hold_time = 0.0
+        self._output_error = None
+        self._output_failed = False
 
     def configure(self, settings: Dict[str, Any]):
         settings = settings if isinstance(settings, dict) else {}
@@ -253,6 +255,8 @@ class VirtualMouseThread(threading.Thread):
 
     def update_stick(self, rx: float, ry: float, is_desktop: bool = False):
         with self._lock:
+            if self._output_failed:
+                rx = ry = 0.0
             if is_desktop != self.is_desktop or (rx == 0 and ry == 0):
                 self._reset_motion()
             self.stick_x = rx
@@ -262,6 +266,26 @@ class VirtualMouseThread(threading.Thread):
     def set_click_lock(self, locked: bool):
         with self._lock:
             self.click_locked = locked
+
+    def _fail_output(self, error):
+        """Caller holds the output lock; freeze until the owner resets mapping."""
+        self._output_error = error
+        self._output_failed = True
+        self.stick_x = self.stick_y = 0.0
+        self._reset_motion()
+
+    def consume_output_error(self):
+        """Deliver a worker failure once without allowing more native output."""
+        with self._lock:
+            error, self._output_error = self._output_error, None
+            return error
+
+    def clear_output_error(self):
+        with self._lock:
+            self._output_error = None
+            self._output_failed = False
+            self.stick_x = self.stick_y = 0.0
+            self._reset_motion()
 
     def run(self):
         try:
@@ -312,16 +336,18 @@ class VirtualMouseThread(threading.Thread):
                         if hasattr(self.actions, 'guard_cursor_edge'):
                             try:
                                 self.actions.guard_cursor_edge()
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                self._fail_output(exc)
+                                continue
                     self.acc_x += target_vx * dt
                     self.acc_y += target_vy * dt
                     dx, dy = int(self.acc_x), int(self.acc_y)
                     if dx or dy:
                         try:
                             self.actions.move_mouse(dx, dy)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            self._fail_output(exc)
+                            continue
                         self.acc_x -= dx
                         self.acc_y -= dy
         finally:

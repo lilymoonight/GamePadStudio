@@ -1,6 +1,7 @@
 import os
 os.environ['QT_QPA_PLATFORM']='offscreen'
 import time
+import sys
 import pytest
 from PySide6.QtWidgets import QApplication, QScrollArea
 from PySide6.QtCore import Qt
@@ -119,7 +120,12 @@ def test_keyboard_capture_supports_modifiers_and_two_ordinary_keys(view):
     owner,page=view;field=KeySequenceField();field.start_recording()
     QTest.keyPress(field,Qt.Key_Control);QTest.keyPress(field,Qt.Key_Shift);QTest.keyPress(field,Qt.Key_S)
     QTest.keyRelease(field,Qt.Key_S);QTest.keyRelease(field,Qt.Key_Shift);QTest.keyRelease(field,Qt.Key_Control)
-    assert field.text()=='Ctrl+Shift+S' and not field.recording
+    assert field.text()==('Cmd+Shift+S' if sys.platform == 'darwin' else 'Ctrl+Shift+S') and not field.recording
+    if sys.platform == 'darwin':
+        field.start_recording()
+        QTest.keyPress(field, Qt.Key_Meta)
+        QTest.keyRelease(field, Qt.Key_Meta)
+        assert field.text() == 'Ctrl'
     field.start_recording();QTest.keyPress(field,Qt.Key_W);QTest.keyPress(field,Qt.Key_Space)
     QTest.keyRelease(field,Qt.Key_W);QTest.keyRelease(field,Qt.Key_Space)
     assert field.text()=='W+Space'
@@ -211,5 +217,3 @@ def test_binding_list_collapsed_by_default_to_maximize_keyboard_space(view):
     assert not page.bindings.isHidden()
     page.toggle_bindings_list()
     assert page.bindings.isHidden()
-
-

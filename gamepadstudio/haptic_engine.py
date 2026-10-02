@@ -9,10 +9,14 @@ from contextlib import nullcontext
 import math
 from pathlib import Path
 import sys
+import subprocess
 import threading
 import time
 from typing import Optional, Callable
-import winsound
+if sys.platform == 'win32':
+    import winsound
+else:
+    winsound = None
 
 
 def ensure_shutter_sound_file(target_path: Path):
@@ -109,8 +113,12 @@ class HapticEngine:
         def _worker():
             try:
                 if self.shutter_wav.is_file():
-                    winsound.PlaySound(str(self.shutter_wav), winsound.SND_FILENAME | winsound.SND_ASYNC)
-                else:
+                    if winsound is not None:
+                        winsound.PlaySound(str(self.shutter_wav), winsound.SND_FILENAME | winsound.SND_ASYNC)
+                    elif sys.platform == 'darwin':
+                        subprocess.run(['/usr/bin/afplay', str(self.shutter_wav)],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+                elif winsound is not None:
                     # 系统提示音回退
                     winsound.MessageBeep(winsound.MB_OK)
             except Exception:

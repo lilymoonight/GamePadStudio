@@ -18,7 +18,8 @@ def attach_to_default_desktop():
 
 
 KEYS = {'Ctrl': 0x11, 'Control': 0x11, 'Alt': 0x12, 'Shift': 0x10,
-        'Meta': 0x5b, 'Win': 0x5b, 'Enter': 13, 'Return': 13, 'Esc': 27,
+        'Meta': 0x5b, 'Win': 0x5b, 'Cmd': 0x5b, 'Command': 0x5b,
+        'Enter': 13, 'Return': 13, 'Esc': 27,
         'Escape': 27, 'Space': 32, 'Tab': 9, 'Backspace': 8, 'Delete': 46,
         'Up': 38, 'Down': 40, 'Left': 37, 'Right': 39, 'Home': 36, 'End': 35,
         'PgUp': 33, 'PgDown': 34, 'PgDn': 34, 'RShift': 16, 'RCtrl': 17, 'RAlt': 18, 'Menu': 93, 'Insert': 45, 'Print': 44, 'Pause': 19,
@@ -370,8 +371,52 @@ class WindowsActions:
             raise OSError('Windows 拒绝了滚轮输入')
 
 
+def create_actions():
+    """Select the native output backend without importing other platforms."""
+    if sys.platform == 'win32':
+        return WindowsActions()
+    if sys.platform == 'darwin':
+        from .macos_actions import MacActions
+        return MacActions()
+    raise OSError(f'暂不支持此操作系统的键鼠映射：{sys.platform}')
+
+
+def input_permission_status():
+    if sys.platform == 'darwin':
+        from .macos_actions import input_permission_status as status
+        return status()
+    return {'supported': sys.platform == 'win32',
+            'granted': sys.platform == 'win32', 'reason': ''}
+
+
+def request_input_permission():
+    if sys.platform == 'darwin':
+        from .macos_actions import request_input_permission as request
+        return request()
+    return input_permission_status()
+
+
+def supports_key(value):
+    try:
+        keys = parse_keys(value)
+    except ValueError:
+        return False
+    if sys.platform == 'darwin':
+        from .macos_actions import SUPPORTED_KEYS
+        return bool(keys) and all(key in SUPPORTED_KEYS for key in keys)
+    return sys.platform == 'win32' and bool(keys)
+
+
 def launch_command(executable, arguments=''):
     if not executable.strip():
         raise ValueError('请先选择可执行文件')
-    args = [part.strip('"') for part in shlex.split(arguments, posix=False)]
+    if sys.platform == 'win32':
+        args = [part.strip('"') for part in shlex.split(arguments, posix=False)]
+    else:
+        args = shlex.split(arguments, posix=True)
+    if sys.platform == 'darwin':
+        from pathlib import Path
+        application = Path(executable)
+        if application.suffix.lower() == '.app' and application.is_dir():
+            return subprocess.Popen(['/usr/bin/open', '-a', str(application), '--args', *args], shell=False)
     return subprocess.Popen([executable, *args], shell=False)

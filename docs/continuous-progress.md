@@ -30,7 +30,7 @@
 
 `WindowsActions.gamepad_button` 仅修改 `held_gamepad_buttons` 集合；`gamepad_chord` 转调该方法；`gamepad_turbo` 仅存储 `held_turbo` 速率。没有生成操作系统虚拟手柄报告的后端，依赖清单也未提供虚拟手柄库。因此这些界面和内部状态 **不能作为真实手柄映射／连发已完成的证据**。此前仅根据编辑器选项认定其完整可用的研究结论已纠正。
 
-键盘、鼠标、滚轮通过 Windows `SendInput` 执行，属于当前真实可用输出路径；新增键鼠触发方式仍需各自验收。
+键盘、鼠标、滚轮在 Windows 通过 `SendInput` 执行；2026-10-02 的 Mac 适配改为 CoreGraphics，CapsLock 与媒体动作使用 IOKit／AppKit。共用映射逻辑不代表目标游戏一定接受合成输出。Mac 实现与实机验证边界见 [平台功能对齐矩阵](MACOS_PARITY.md)；真实虚拟手柄仍是两平台共同缺口。
 
 2026-10-02 后续只读设备核查：本次 `Device.scan/read` 返回可用设备数 0、未连接。运行时具备 SDL 传感器 API，但没有实际设备句柄，不能完成传感器读取、单位、USB／蓝牙路径或漂移校准的实机验收。因此陀螺仪仍未通过实施门槛；这一结果仅描述本次连接状态，不能推断所有 DualSense 没有陀螺仪能力。
 

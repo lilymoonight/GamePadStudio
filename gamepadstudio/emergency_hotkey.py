@@ -1,4 +1,4 @@
-"""An opt-in Windows thread hotkey for stopping controller output."""
+"""An opt-in native global hotkey for stopping controller output."""
 from __future__ import annotations
 
 import ctypes as C
@@ -12,6 +12,7 @@ from PySide6.QtCore import QAbstractNativeEventFilter, QCoreApplication, QObject
 
 DEFAULT_SHORTCUT = 'Ctrl+Alt+F10'
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_NOREPEAT = 1, 2, 4, 0x4000
+MOD_COMMAND = 8  # Logical modifier; translated to Carbon's cmdKey on macOS.
 WM_HOTKEY = 0x0312
 _IDS = itertools.count(0x6000)
 _MODIFIERS = {'ctrl': ('Ctrl', MOD_CONTROL), 'control': ('Ctrl', MOD_CONTROL),
@@ -32,32 +33,52 @@ _RESERVED = {'win', 'windows', 'meta', 'cmd', 'super', 'f12', 'print',
 _FORMAT_ERROR = '请使用至少两个 Ctrl、Alt、Shift 修饰键加一个普通按键'
 
 
+def emergency_hotkey_supported():
+    """Whether this OS has a native implementation; does not register a key."""
+    return sys.platform in ('win32', 'darwin')
+
+
 def parse_shortcut(shortcut):
-    """Return a canonical single shortcut, Win32 modifiers and virtual key."""
+    """Return a canonical shortcut, logical modifier bits and profile keycode.
+
+    Existing Windows modifier/key values are retained. On macOS Ctrl means
+    the physical Control key, and Cmd/Command/Meta/Win mean Command.
+    """
+    mac = sys.platform == 'darwin'
+    format_error = ('请使用至少两个 Ctrl、Alt、Shift、Cmd 修饰键加一个普通按键'
+                    if mac else _FORMAT_ERROR)
     if not isinstance(shortcut, str) or not shortcut or len(shortcut) > 64:
-        raise ValueError(_FORMAT_ERROR)
+        raise ValueError(format_error)
     if any(ord(char) < 32 for char in shortcut):
-        raise ValueError(_FORMAT_ERROR)
+        raise ValueError(format_error)
     parts = [part.strip().casefold() for part in shortcut.split('+')]
-    if any(part in _RESERVED for part in parts):
+    if not mac and any(part in _RESERVED for part in parts):
         raise ValueError('该快捷键由 Windows 或调试器保留，请选择其他按键')
-    if len(parts) not in (3, 4) or not all(parts) or parts[-1] not in _KEYS:
-        raise ValueError(_FORMAT_ERROR)
+    modifiers_by_name = _MODIFIERS
+    if mac:
+        modifiers_by_name = dict(_MODIFIERS, **{
+            alias: ('Cmd', MOD_COMMAND) for alias in ('cmd', 'command', 'meta', 'win', 'windows', 'super')})
+    if len(parts) not in ((3, 4, 5) if mac else (3, 4)) or not all(parts) or parts[-1] not in _KEYS:
+        raise ValueError(format_error)
     modifiers, names = 0, set()
     for part in parts[:-1]:
-        if part not in _MODIFIERS:
-            raise ValueError(_FORMAT_ERROR)
-        name, modifier = _MODIFIERS[part]
+        if part not in modifiers_by_name:
+            raise ValueError(format_error)
+        name, modifier = modifiers_by_name[part]
         if name in names:
             raise ValueError('修饰键不能重复')
         modifiers |= modifier
         names.add(name)
     if len(names) < 2:
-        raise ValueError(_FORMAT_ERROR)
+        raise ValueError(format_error)
     name, vk = _KEYS[parts[-1]]
-    if vk == 46 and modifiers & (MOD_ALT | MOD_CONTROL) == MOD_ALT | MOD_CONTROL:
+    if mac:
+        from .macos_actions import VK_TO_MAC
+        if vk not in VK_TO_MAC:
+            raise ValueError('macOS 不支持该快捷键的按键，请选择其他按键')
+    elif vk == 46 and modifiers & (MOD_ALT | MOD_CONTROL) == MOD_ALT | MOD_CONTROL:
         raise ValueError('Ctrl+Alt+Del 由 Windows 保留，请选择其他按键')
-    canonical = '+'.join([item for item in ('Ctrl', 'Alt', 'Shift') if item in names] + [name])
+    canonical = '+'.join([item for item in ('Ctrl', 'Alt', 'Shift', 'Cmd') if item in names] + [name])
     return canonical, modifiers, vk
 
 
@@ -141,6 +162,7 @@ class EmergencyHotkey(QObject):
         self._hotkey_id = None
         self._message_parameter = None
         self._user32 = None
+        self._mac_hotkey = None
         self._app = None
         self._quit_connected = False
         self._filter = _NativeFilter(self)
@@ -153,6 +175,18 @@ class EmergencyHotkey(QObject):
     def status(self):
         return dict(self._settings, registered=self._registered, error=self._error)
 
+    def _invoke_callback(self):
+        if self._closed or not self._registered:
+            return
+        try:
+            self._callback()
+        except Exception:
+            self._error = '紧急暂停未能完成，请使用界面上的暂停按钮'
+
+    def _mac_failure(self, message):
+        self._registered = False
+        self._error = message
+
     def _remove_filter(self):
         if self._filter_installed:
             self._app.removeNativeEventFilter(self._filter)
@@ -162,6 +196,11 @@ class EmergencyHotkey(QObject):
         self._registered = False
         self._message_parameter = None
         self._remove_filter()
+        if self._mac_hotkey is not None:
+            if self._mac_hotkey.unregister():
+                return True
+            self._error = '旧快捷键未能释放，请重启软件后再试'
+            return False
         if self._hotkey_id is None:
             return True
         try:
@@ -193,7 +232,7 @@ class EmergencyHotkey(QObject):
             return self.status()
         if not settings['enabled']:
             return self.status()
-        if sys.platform != 'win32':
+        if sys.platform not in ('win32', 'darwin'):
             self._error = '当前系统不支持全局紧急暂停快捷键'
             return self.status()
         if app is None:
@@ -203,6 +242,8 @@ class EmergencyHotkey(QObject):
             self._app = app
             app.aboutToQuit.connect(self.close)
             self._quit_connected = True
+        if sys.platform == 'darwin':
+            return self._configure_mac(settings)
         try:
             if self._user32 is None:
                 self._user32 = _load_user32()
@@ -228,8 +269,26 @@ class EmergencyHotkey(QObject):
             self._unregister()
         return self.status()
 
+    def _configure_mac(self, settings):
+        try:
+            from .macos_hotkey import MacHotkey
+            if self._mac_hotkey is None:
+                self._mac_hotkey = MacHotkey(self)
+                self._mac_hotkey.triggered.connect(self._invoke_callback)
+                self._mac_hotkey.failed.connect(self._mac_failure)
+            _, modifiers, vk = parse_shortcut(settings['shortcut'])
+            self._mac_hotkey.register(vk, modifiers)
+            self._registered = True
+        except (OSError, AttributeError, TypeError, RuntimeError, ValueError) as exc:
+            self._error = ('该快捷键已被其他软件占用，请更换快捷键'
+                           if getattr(exc, 'code', None) == -9878
+                           else '快捷键注册失败，请更换快捷键后再试')
+            self._unregister()
+        return self.status()
+
     def close(self, *_):
-        if self._closed and self._hotkey_id is None:
+        if (self._closed and self._hotkey_id is None
+                and (self._mac_hotkey is None or not self._mac_hotkey.has_resources)):
             return
         if self._app is not None and QThread.currentThread() != self._app.thread():
             raise RuntimeError('EmergencyHotkey must close on the Qt main thread')

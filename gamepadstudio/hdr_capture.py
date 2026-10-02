@@ -393,6 +393,16 @@ def tone_map_scrgb(fp16bytes: bytes, width: int, height: int, white_nits: float,
     return np.concatenate(tuple(encoded), axis=0).tobytes()
 
 
+def tone_map_edr(fp16bytes: bytes, width: int, height: int, *, transfer='bt709') -> bytes:
+    """Apple extended-linear-sRGB uses relative SDR white 1, not measured nits.
+
+    The shared shoulder accepts Windows' 80-nit scRGB reference as a unit
+    conversion of exactly one. No macOS SDR luminance measurement is invented.
+    This is also the CPU reference for the native Core Image float pipeline.
+    """
+    return tone_map_scrgb(fp16bytes, width, height, 80.0, transfer=transfer)
+
+
 def scrgb_to_sdr_filter(white_nits: float, *, transfer: str = "bt709",
                         knee: float = 0.75, output_format: str | None = None) -> str:
     """A high-precision FFmpeg graph for already converted GBRPF32LE input.
