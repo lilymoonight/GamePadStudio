@@ -205,7 +205,11 @@ static int diagnose(double observeSeconds) {
                @"source": source, @"getter_abi_verified": @YES, @"link": initial, @"read_only": @YES});
         double deadline = monotonicNow() + observeSeconds;
         while (observeSeconds > 0 && monotonicNow() < deadline) {
-            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
+            // This worker has no run-loop sources. runUntilDate would return
+            // immediately and flood the diagnostics file until the deadline.
+            double remaining = deadline - monotonicNow();
+            if (remaining <= 0) break;
+            [NSThread sleepForTimeInterval:MIN(0.25, remaining)];
             emit(@{@"status": @"LINK_OBSERVATION", @"link": linkSnapshot(selected), @"read_only": @YES});
         }
         NSDictionary *last = linkSnapshot(selected);
