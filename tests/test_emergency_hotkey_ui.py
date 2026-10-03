@@ -65,7 +65,8 @@ def hotkey_app():
 
 
 @pytest.fixture
-def draft_owner(tmp_path, hotkey_app):
+def draft_owner(tmp_path, hotkey_app, monkeypatch):
+    monkeypatch.setattr('gamepadstudio.studio.WINDOWS_FEATURES', True)
     class Owner(QWidget):
         def __init__(self):
             super().__init__()
@@ -86,11 +87,13 @@ def draft_owner(tmp_path, hotkey_app):
     yield owner, hotkey_app
     owner.close()
     owner.deleteLater()
-    hotkey_app.sendPostedEvents(None, QEvent.DeferredDelete)
+    hotkey_app.sendPostedEvents(owner, QEvent.DeferredDelete)
 
 
 @pytest.fixture
 def hotkey_workspace(tmp_path, monkeypatch, hotkey_app, request):
+    monkeypatch.setattr('gamepadstudio.studio.WINDOWS_FEATURES', True)
+    monkeypatch.setattr('gamepadstudio.virtual_kbm_ui.WINDOWS_FEATURES', True)
     fake_device = BatteryDevice()
     FakeHotkey.instances = []
     options = getattr(request, 'param', {})
@@ -117,12 +120,12 @@ def hotkey_workspace(tmp_path, monkeypatch, hotkey_app, request):
             self.connected = False
 
     monkeypatch.setattr('gamepadstudio.studio.Device', lambda: fake_device)
-    monkeypatch.setattr('gamepadstudio.studio.WindowsActions', Actions)
+    monkeypatch.setattr('gamepadstudio.studio.create_actions', Actions)
     monkeypatch.setattr('gamepadstudio.studio.MappingRuntime',
                         lambda actions, dispatch, **kwargs:
                         MappingRuntime(actions, dispatch, start_mouse=False))
     monkeypatch.setattr('gamepadstudio.studio.QSystemTrayIcon', FakeTray)
-    monkeypatch.setattr('gamepadstudio.studio.autostart_enabled', lambda: False)
+    monkeypatch.setattr('gamepadstudio.studio.autostart_enabled', lambda root=None: False)
     monkeypatch.setattr('gamepadstudio.studio.EmergencyHotkey', FakeHotkey)
     monkeypatch.setattr('gamepadstudio.studio.AgentClient', Client)
     monkeypatch.setattr('gamepadstudio.studio.request', lambda *args, **kwargs: {'ok': True})
@@ -148,7 +151,7 @@ def hotkey_workspace(tmp_path, monkeypatch, hotkey_app, request):
     window.cleanup()
     window.hide()
     window.deleteLater()
-    hotkey_app.sendPostedEvents(None, QEvent.DeferredDelete)
+    hotkey_app.sendPostedEvents(window, QEvent.DeferredDelete)
 
 
 def open_draft(owner):
@@ -159,7 +162,7 @@ def open_draft(owner):
 def close_draft(dialog, app):
     dialog.close()
     dialog.deleteLater()
-    app.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.sendPostedEvents(dialog, QEvent.DeferredDelete)
 
 
 def test_old_config_defaults_to_disabled_draft_without_writing(draft_owner):

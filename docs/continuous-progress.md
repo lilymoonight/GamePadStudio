@@ -21,7 +21,7 @@
 | **便携预设导入／导出：第二轮完成** | [reWASD 配置分享](https://help.rewasd.com/interface/rewasd-community.html)、[AntiMicroX 预设库](https://github.com/AntiMicroX/antimicrox#antimicrox-profiles) | 独立文件导入导出已接入两个预设「更多」菜单，完整记录见第二轮。精调暖暖绑定和手感可以备份、迁移、分享。 | 严格校验版本与绑定；导入为当前设备的新预设，预览不支持来源，名称冲突新增不覆盖，默认不激活。不携带设备身份、保存目录、隐身配置或自动启动命令等系统状态。来源证明分享价值，具体本地格式由本项目实现。 |
 | **低电量提醒：第四轮完成** | [reWASD 低／极低电量提示](https://help.rewasd.com/preferences/led-settings.html)、[reWASD 电量状态及设备限制](https://help.rewasd.com/preferences/tray-agent.html) | `Device` 已读取 SDL `power` 粗粒度状态，概览和侧栏显示电量；没有一次性低电量提示流程。长时间游玩中提醒充电有实际价值，可沿用托盘通知与设备设置。 | 仅依据设备实际报告的低／极低状态，不制造百分比；未知、未报告、外接供电不提醒。设备范围、去重、状态升级、重连以及用户关闭要明确。官方例子是 LED／托盘提示，本项目可采用不抢焦点的托盘提醒。 |
 | **视角 Y 轴反转：第三轮完成** | [reWASD 摇杆高级设置](https://help.rewasd.com/basic-functions/advanced-stick-settings.html) | `KbmFeelDialog` 已有用途、速度、垂直比例、居中容错，第三轮新增反向镜头。`stick_to_wasd` 的方向正负换算与 `get_inverted_mapping` 的目标索引均不是该能力。入口融入「视角与指针」的垂直方向选项。 | 按当前设备预设保存；仅反转游戏用途的右摇杆垂直镜头输出，桌面指针保持常规方向。不修改硬件原始读数、移动方向、触摸手势和按钮映射。验证游戏与桌面两种用途及禁用／恢复行为。 |
-| **键鼠保持切换／按住连发：保留候选** | [reWASD Rapid Fire](https://help.rewasd.com/mapping-features/rapid-fire.html)、[Steam Input Activators](https://partner.steamgames.com/doc/features/steam_controller/activators)、[JoyToKey 变更记录](https://joytokey.net/en/news) | KBM 目前有 `hold`、`shortcut`、`mouse_hold`、`mouse_click`，没有按一下保持、再次取消或可调重复触发。可减少长时间瞄准／慢走的手指负担或菜单重复按键；触发方式放在现有绑定编辑器内。现有名为 `gamepad_turbo` 的选项不能据此认定真实手柄连发已支持，见下方能力核实。 | 键鼠输出引用计数、按键共享、组合键优先、重复时钟与所有取消路径都要正确；正常已有绑定语义不变；一次性触摸源不能展示「按住连发」。不以稳定版依据推广 [JoyToKey 7.4.0 beta 时序命令](https://joytokey.net/en/posts/command-input/)。 |
+| **键鼠切换保持：本轮完成；按住连发：保留候选** | [reWASD Rapid Fire](https://help.rewasd.com/mapping-features/rapid-fire.html)、[Steam Input Activators](https://partner.steamgames.com/doc/features/steam_controller/activators)、[JoyToKey 变更记录](https://joytokey.net/en/news) | KBM 的 `hold`、`mouse_hold` 现可按一次保持、再次取消，入口在现有绑定编辑器；可调重复触发尚未实现。现有名为 `gamepad_turbo` 的选项不能据此认定真实手柄连发已支持，见下方能力核实。 | 已覆盖键鼠输出引用计数、按键共享和取消路径；后续连发仍需独立验证重复时钟、组合键优先与释放规则。一次性触摸源不展示「按住连发」。不以稳定版依据推广 [JoyToKey 7.4.0 beta 时序命令](https://joytokey.net/en/posts/command-input/)。 |
 | **RS 静止漂移测量与居中容错建议：第六轮完成** | [AntiMicroX 摇杆校准接口](https://antimicrox.github.io/doxygen/classJoyControlStick.html)、[Valve 发布的逐摇杆死区与自动校准](https://store.steampowered.com/news/posts/?enddate=1526517539&feed=steam_client) | 测试页 `StickHistory` 只有轨迹、圆度与覆盖，没有「松开摇杆→采样→结果→应用」流程；用户仍凭感觉调整。入口在已有摇杆测试卡片，结果应用到当前预设的视角手感。Valve 链接属于历史发布依据，不代表当前界面位置。 | 真实 RS 双轴和足量稳定样本；移动、断线、换设备取消；结果说明软件容错含义。实际右摇杆视角死区是 `profile_options.mouse.deadzone`，左摇杆方向由 `input.stick_press/release` 控制；不能只写静态设备 `deadzone` 冒充生效。不宣称固件修复。 |
 | **陀螺仪镜头／瞄准：待实机能力核实** | [reWASD Gyroscope](https://help.rewasd.com/how-to-remap/gyroscope.html)、[AntiMicroX 控制器输入能力](https://github.com/AntiMicroX/antimicrox) | 对支持传感器的设备可能改善细微镜头调整，但当前 `Device` 没有 SDL sensor 能力检测或传感器读取，不能直接展示可用选项。自然入口可能是现有镜头手感。 | 先核实实际连接设备、USB／蓝牙、SDL 传感器读取、单位、采样及漂移校准；再验证激活方式、与右摇杆／触摸协作和取消路径。未过实机门槛前不进入功能集成目标。 |
 | **真实虚拟手柄输出：暂缓** | [reWASD Native Mapping](https://help.rewasd.com/types-of-mappings/gamepad-mapping.html)、[ViGEmBus 退役声明](https://docs.nefarius.at/projects/ViGEm/End-of-Life/) | 当前游戏手柄动作只有内存状态，没有真实系统虚拟手柄输出；这是既有功能完整性的缺口，不是已经支持后可继续增加的高级能力。 | 需要维护中的输出后端、驱动许可／安装与真实游戏检测验证。ViGEmBus 和客户端已退役，不能把旧依赖接入当成长期可维护路径，也不自动安装驱动。 |
@@ -30,7 +30,7 @@
 
 `WindowsActions.gamepad_button` 仅修改 `held_gamepad_buttons` 集合；`gamepad_chord` 转调该方法；`gamepad_turbo` 仅存储 `held_turbo` 速率。没有生成操作系统虚拟手柄报告的后端，依赖清单也未提供虚拟手柄库。因此这些界面和内部状态 **不能作为真实手柄映射／连发已完成的证据**。此前仅根据编辑器选项认定其完整可用的研究结论已纠正。
 
-键盘、鼠标、滚轮通过 Windows `SendInput` 执行，属于当前真实可用输出路径；新增键鼠触发方式仍需各自验收。
+键盘、鼠标、滚轮在 Windows 通过 `SendInput` 执行；2026-10-02 的 Mac 适配改为 CoreGraphics，CapsLock 与媒体动作使用 IOKit／AppKit。共用映射逻辑不代表目标游戏一定接受合成输出。Mac 实现与实机验证边界见 [平台功能对齐矩阵](MACOS_PARITY.md)；真实虚拟手柄仍是两平台共同缺口。
 
 2026-10-02 后续只读设备核查：本次 `Device.scan/read` 返回可用设备数 0、未连接。运行时具备 SDL 传感器 API，但没有实际设备句柄，不能完成传感器读取、单位、USB／蓝牙路径或漂移校准的实机验收。因此陀螺仪仍未通过实施门槛；这一结果仅描述本次连接状态，不能推断所有 DualSense 没有陀螺仪能力。
 
@@ -202,3 +202,15 @@
 ## 按用户指示停止
 
 2026-10-02，用户要求「本次结束后停止持续优化」。已完成正在进行的第七轮并停止循环，不建立第八轮目标或后台续跑计划。键鼠保持切换／按住连发、诊断报告、预设防误改和离线速查表仍有可评估价值，保存为候选；陀螺仪与真实虚拟手柄输出仍有设备／维护后端门槛。此停止来自用户指示，不表示市面功能已被穷尽；后续需用户新的明确指令再推进。
+
+## 用户重新要求推进：键鼠切换保持与脱敏诊断
+
+2026-10-02，用户重新要求借鉴 reWASD 继续完善能力。参考 [reWASD Rapid Fire](https://help.rewasd.com/mapping-features/rapid-fire.html) 的 Toggle 行为与 [reWASD 日志设置](https://www.help.rewasd.com/preferences/logging.html) 的故障反馈入口，本轮实现两个范围清楚的用户流程。
+
+键鼠编辑器的键盘／鼠标保持动作现可选择「按一次保持，再按一次取消」。短按、长按各自持有；多个来源输出同一个键或鼠标按钮时独立计数。暂停、断线、配置／预设切换、安全试按和退出释放保持输入；输出释放失败时保留待重试状态并让映射维持暂停。旧绑定默认行为与便携预设格式兼容。系统锁定键和一次性触摸手势不支持此模式。按住连发仍为候选，没有把手柄 `gamepad_turbo` 误当成已完成的键鼠功能。
+
+遥测页增加活动记录和本地诊断导出，离线时仍可使用。报告仅读取每份日志尾部最多 256 KiB、256 行，输出固定类别计数以及白名单设备能力与服务布尔状态；不输出原始事件、设备身份、配置、路径或按键轨迹。保存前复验固定结构，并采用同目录原子替换；取消保存不生成文件。这份报告帮助定位故障类别，不估算硬件刷新率或端到端延迟。
+
+全量 Mac 离线回归覆盖 109 个模块，共 2,482 项：2,481 通过、1 项 Windows 专属测试跳过。新用例覆盖输出共享、短长按切换、暂停／断线／预设切换、释放失败重试、便携预设往返、诊断脱敏与离线界面。测试使用模拟输入和本地临时目录。
+
+本轮未操作已连接的 DS5，也未测试麦克风、录制用户屏幕或向 Codex／Antigravity 输入内容。真实游戏对切换保持的接受、Mac 辅助功能权限下的实际释放和 Windows 原生行为仍需设备在场验收。

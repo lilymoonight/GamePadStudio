@@ -1,0 +1,64 @@
+"""Settings editor for the macOS physical-keyboard screenshot shortcut."""
+from __future__ import annotations
+
+from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QFormLayout, QVBoxLayout
+
+from .glass import TOKENS, Toggle
+from .i18n import tr
+from .screenshot_hotkey import DEFAULT_SHORTCUT, normalize_screenshot_hotkey_settings
+
+
+class ScreenshotHotkeyDialog(QDialog):
+    def __init__(self, owner):
+        super().__init__(owner)
+        from .studio import label
+        self.owner = owner
+        self.setWindowTitle(tr('物理键盘截图快捷键'))
+        self.setMinimumWidth(350)
+        self.resize(470, 270)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+        layout.addWidget(label(tr('物理键盘截图快捷键'), 'section'))
+        layout.addWidget(label(tr('在任意窗口按下快捷键，按当前截图范围保存图片。可输入其他 Ctrl、Alt、Shift 或 Cmd 组合。'),
+                               'caption', True))
+        settings = normalize_screenshot_hotkey_settings(owner.config.get('screenshot_hotkey'))
+        form = QFormLayout()
+        form.setVerticalSpacing(12)
+        self.enabled = Toggle(tr('启用'))
+        self.enabled.setChecked(settings['enabled'])
+        self.shortcut = QComboBox()
+        self.shortcut.setEditable(True)
+        self.shortcut.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.shortcut.setMinimumContentsLength(18)
+        for value in (DEFAULT_SHORTCUT, 'Ctrl+Alt+Shift+P', 'Ctrl+Shift+F11', 'Alt+Shift+F11'):
+            self.shortcut.addItem(value, value)
+        if self.shortcut.findData(settings['shortcut']) < 0:
+            self.shortcut.addItem(settings['shortcut'], settings['shortcut'])
+        self.shortcut.setCurrentIndex(self.shortcut.findData(settings['shortcut']))
+        self.shortcut.setEnabled(self.enabled.isChecked())
+        self.enabled.toggled.connect(self.shortcut.setEnabled)
+        form.addRow(tr('物理键盘截图'), self.enabled)
+        form.addRow(tr('键盘快捷键'), self.shortcut)
+        layout.addLayout(form)
+        self.error = label('', wrap=True)
+        self.error.setStyleSheet(f"color: {TOKENS['amber']};")
+        self.error.hide()
+        layout.addWidget(self.error)
+        layout.addStretch(1)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Save).setText(tr('保存'))
+        self.buttons.button(QDialogButtonBox.Cancel).setText(tr('取消'))
+        self.buttons.accepted.connect(self.save)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def save(self):
+        settings = {'enabled': self.enabled.isChecked(), 'shortcut': self.shortcut.currentText().strip()}
+        try:
+            self.owner.setting('screenshot_hotkey', settings)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.error.setText(tr(str(exc)))
+            self.error.show()
+            return
+        self.accept()

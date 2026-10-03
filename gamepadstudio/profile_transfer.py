@@ -140,8 +140,14 @@ def _binding(binding):
     # Older local entries keep an empty value even for "none". It carries no
     # behavior and is discarded; every other extra field is rejected.
     allowed = {'action', 'value'} | ({'rate_hz'} if action == 'gamepad_turbo' else set())
+    if action in ('hold', 'mouse_hold'):
+        allowed.add('mode')
     _fields(binding, allowed, ('value',) if has_value else ())
     result = {'action': action}
+    if 'mode' in binding:
+        if type(binding['mode']) is not str or binding['mode'] not in ('hold', 'toggle'):
+            raise ValueError('键鼠按住模式应为按住或切换保持')
+        result['mode'] = binding['mode']
     if 'value' in binding:
         value = _text(binding['value'], 256, allow_empty=not has_value)
         if has_value:

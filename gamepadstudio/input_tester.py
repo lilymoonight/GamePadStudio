@@ -1,6 +1,7 @@
 """GamepadTester Diagnostic Dashboard — real-time hardware telemetry."""
 from collections import deque
 import math
+import sys
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout,
@@ -8,10 +9,11 @@ from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout,
 
 from .controller_catalog import CATALOG, axis_labels, button_labels, button_order
 from .controller_schematic import ControllerSchematic
-from .glass import GlassPanel, IconButton, glyph, TOKENS, token_color, tag_style
+from .glass import GlassPanel, IconButton, glyph, TOKENS, token_color, tag_style, MONO_FONT_STACK
 from .test_widgets import StickGauge, TriggerGauge
 from .i18n import tr
 
+INSTRUMENT_MONO_STACK = MONO_FONT_STACK if sys.platform == 'darwin' else '"Cascadia Code", Consolas'
 
 class StickHistory:
     """Bounded motion trail and a full-deflection radial envelope in 36 sectors."""
@@ -71,7 +73,8 @@ def card_heading(title, symbol, color):
 class InputTester(QWidget):
     """Real-time diagnostic dashboard inspired by GamepadTester.cn."""
 
-    def __init__(self, show_events, send_rumble=None, measure_stick=None):
+    def __init__(self, show_events, send_rumble=None, measure_stick=None,
+                 export_diagnostic=None):
         super().__init__()
         self.send_rumble = send_rumble
         self.identity = None
@@ -88,6 +91,7 @@ class InputTester(QWidget):
         # ── Top Toolbar ───────────────────────────────────────────────────
         toolbar = QHBoxLayout()
         toolbar.setSpacing(12)
+        self._toolbar_layout = toolbar
 
         self.device_name = label(tr('未连接手柄'), 19, True)
         self.device_name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -102,6 +106,30 @@ class InputTester(QWidget):
         self.raw_tag.setStyleSheet(tag_style(TOKENS['ink_3'], 0.12, 0.25))
         self.raw_tag.setToolTip(tr('SDL 原始标准轴值；不应用软件死区。'))
         toolbar.addWidget(self.raw_tag, 0, Qt.AlignTop)
+
+        self.events_button = QPushButton(tr('活动记录'))
+        self.events_button.setObjectName('testAction')
+        self.events_button.setFixedHeight(24)
+        self.events_button.setStyleSheet('font-size: 11px; min-height: 20px; padding: 0 4px; border: none; background: transparent;')
+        self.events_button.setAccessibleName(tr('活动记录'))
+        self.events_button.clicked.connect(lambda: show_events())
+        toolbar.addWidget(self.events_button, 0, Qt.AlignTop)
+
+        self.export_diagnostic_button = QPushButton(tr('导出诊断'))
+        self.export_diagnostic_button.setObjectName('testAction')
+        self.export_diagnostic_button.setFixedHeight(24)
+        self.export_diagnostic_button.setStyleSheet('font-size: 11px; min-height: 20px; padding: 0 4px; border: none; background: transparent;')
+        self.export_diagnostic_button.setAccessibleName(tr('导出诊断'))
+        self.export_diagnostic_button.setToolTip(tr('只导出脱敏的设备能力与错误摘要；不包含原始日志或配置。'))
+        self.export_diagnostic_button.setEnabled(export_diagnostic is not None)
+        if export_diagnostic is not None:
+            self.export_diagnostic_button.clicked.connect(lambda: export_diagnostic())
+        toolbar.addWidget(self.export_diagnostic_button, 0, Qt.AlignTop)
+
+        self.diagnostic_note = label(tr('仅含脱敏摘要'), 10)
+        self.diagnostic_note.setWordWrap(False)
+        self.diagnostic_note.setToolTip(self.export_diagnostic_button.toolTip())
+        toolbar.addWidget(self.diagnostic_note, 0, Qt.AlignTop)
         layout.addLayout(toolbar)
 
         # Headless tool state controllers (auto-active; hidden from UI to eliminate noise)
@@ -165,7 +193,7 @@ class InputTester(QWidget):
             col.addWidget(name)
             reading = self.axis_readings[i]
             reading.setAlignment(Qt.AlignCenter)
-            reading.setStyleSheet(f'font: 11px "Cascadia Code", Consolas; color: {TOKENS["ink_2"]}; font-weight: 600;')
+            reading.setStyleSheet(f'font: 11px {INSTRUMENT_MONO_STACK}; color: {TOKENS["ink_2"]}; font-weight: 600;')
             col.addWidget(reading)
             stick_row.addLayout(col, 1)
         a_layout.addLayout(stick_row, 1)
@@ -201,13 +229,14 @@ class InputTester(QWidget):
 
         self.drift_reading = label(tr('偏移: —'), 11)
         self.drift_reading.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.drift_reading.setStyleSheet(f'font: 11px "Cascadia Code", Consolas; color: {TOKENS["ink"]}; font-weight: 600;')
+        self.drift_reading.setStyleSheet(f'font: 11px {INSTRUMENT_MONO_STACK}; color: {TOKENS["ink"]}; font-weight: 600;')
         drift_info.addWidget(self.drift_reading)
 
-        drift_spec = label(tr('静止偏移参考；软件容错可在操作手感中调整。'), 10.5)
-        drift_spec.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        drift_spec.setStyleSheet(f'color: {TOKENS["ink_3"]};')
-        drift_info.addWidget(drift_spec)
+        self.drift_spec = label(tr('静止偏移参考；软件容错可在操作手感中调整。'), 10.5)
+        self.drift_spec.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.drift_spec.setStyleSheet(f'color: {TOKENS["ink_3"]};')
+        self.drift_reading.setToolTip(self.drift_spec.text())
+        drift_info.addWidget(self.drift_spec)
         drift_row.addLayout(drift_info, 1)
 
         a_layout.addLayout(drift_row)
@@ -253,7 +282,7 @@ class InputTester(QWidget):
             tile = QLabel(clean_lbl(k))
             tile.setAlignment(Qt.AlignCenter)
             tile.setFixedHeight(30)
-            tile.setStyleSheet(f"background: {TOKENS['void']}; color: {TOKENS['ink_2']}; font: 11px 'Cascadia Code', Consolas; font-weight: 600; border: 1px solid {TOKENS['border']}; border-radius: {TOKENS['r_sm']}px;")
+            tile.setStyleSheet(f"background: {TOKENS['void']}; color: {TOKENS['ink_2']}; font: 11px {INSTRUMENT_MONO_STACK}; font-weight: 600; border: 1px solid {TOKENS['border']}; border-radius: {TOKENS['r_sm']}px;")
             self.btn_grid.addWidget(tile, 0, col_idx)
             self.btn_tiles[k] = tile
 
@@ -261,7 +290,7 @@ class InputTester(QWidget):
             tile = QLabel(clean_lbl(k))
             tile.setAlignment(Qt.AlignCenter)
             tile.setFixedHeight(30)
-            tile.setStyleSheet(f"background: {TOKENS['void']}; color: {TOKENS['ink_2']}; font: 11px 'Cascadia Code', Consolas; font-weight: 600; border: 1px solid {TOKENS['border']}; border-radius: {TOKENS['r_sm']}px;")
+            tile.setStyleSheet(f"background: {TOKENS['void']}; color: {TOKENS['ink_2']}; font: 11px {INSTRUMENT_MONO_STACK}; font-weight: 600; border: 1px solid {TOKENS['border']}; border-radius: {TOKENS['r_sm']}px;")
             self.btn_grid.addWidget(tile, 1, col_idx)
             self.btn_tiles[k] = tile
 
@@ -304,13 +333,15 @@ class InputTester(QWidget):
         trig_col = QVBoxLayout()
         trig_col.setSpacing(8)
         trig_col.addLayout(card_heading(tr('线性扳机'), 'bolt', TOKENS['purple']))
-        trig_desc = label(tr('霍尔 / 压感行程深度'), 11)
-        trig_desc.setStyleSheet(f"color: {TOKENS['ink_3']}; font-weight: 500;")
-        trig_col.addWidget(trig_desc)
+        self.trigger_description = label(tr('霍尔 / 压感行程深度'), 11)
+        self.trigger_description.setStyleSheet(f"color: {TOKENS['ink_3']}; font-weight: 500;")
+        trig_col.addWidget(self.trigger_description)
 
         trig_row = QHBoxLayout()
         trig_row.setSpacing(12)
         self.trigger_gauges = [TriggerGauge('LT'), TriggerGauge('RT')]
+        for gauge in self.trigger_gauges:
+            gauge.setToolTip(self.trigger_description.text())
         self.trigger_names = [label('LT', 11, True), label('RT', 11, True)]
         for gauge, name in zip(self.trigger_gauges, self.trigger_names):
             c = QVBoxLayout()
@@ -329,9 +360,9 @@ class InputTester(QWidget):
         rumble_col = QVBoxLayout()
         rumble_col.setSpacing(8)
         rumble_col.addLayout(card_heading(tr('触觉马达'), 'wave', TOKENS['green']))
-        rumble_desc = label(tr('双声道触觉脉冲发生器'), 11)
-        rumble_desc.setStyleSheet(f"color: {TOKENS['ink_3']}; font-weight: 500;")
-        rumble_col.addWidget(rumble_desc)
+        self.rumble_description = label(tr('双声道触觉脉冲发生器'), 11)
+        self.rumble_description.setStyleSheet(f"color: {TOKENS['ink_3']}; font-weight: 500;")
+        rumble_col.addWidget(self.rumble_description)
 
         rumble_grid = QGridLayout()
         rumble_grid.setSpacing(8)
@@ -357,6 +388,7 @@ class InputTester(QWidget):
         self.motor_status = label(tr('未连接马达'), 11)
         self.motor_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.motor_status.setStyleSheet(f"color: {TOKENS['ink_3']}; font-size: 11px;")
+        self.motor_status.setToolTip(self.rumble_description.text())
         rumble_col.addWidget(self.motor_status)
         rumble_col.addStretch(1)
         actuators.addLayout(rumble_col, 1)
@@ -365,6 +397,39 @@ class InputTester(QWidget):
         dashboard.addWidget(digital_card, 1)
 
         layout.addLayout(dashboard, 1)
+        self._dashboard_layout = dashboard
+        self._card_layouts = (a_layout, d_layout)
+        self._compact_layout = None
+        self._fit_dashboard(self.width())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, '_card_layouts'):
+            self._fit_dashboard(event.size().width())
+
+    def _fit_dashboard(self, width):
+        # Keep all gauges visible at the supported 960px workspace width while
+        # allowing the normal card spacing to return on wider screens.
+        compact = width < 900
+        if compact == self._compact_layout:
+            return
+        self._compact_layout = compact
+        self.layout().setSpacing(6 if compact else 14)
+        self._toolbar_layout.setSpacing(4 if compact else 12)
+        self.diagnostic_note.setVisible(not compact)
+        self.drift_spec.setVisible(not compact)
+        self.trigger_description.setVisible(not compact)
+        self.rumble_description.setVisible(not compact)
+        # The gauges expand inside their cards. In a compact workspace their
+        # 120px preferred heights must not force the whole page to scroll.
+        gauge_policy = QSizePolicy.Ignored if compact else QSizePolicy.Expanding
+        for gauge in (*self.stick_gauges, *self.trigger_gauges):
+            gauge.setSizePolicy(QSizePolicy.Expanding, gauge_policy)
+        self._dashboard_layout.setSpacing(8 if compact else 14)
+        margins = (14, 8, 14, 8) if compact else (18, 16, 18, 16)
+        for card_layout in self._card_layouts:
+            card_layout.setContentsMargins(*margins)
+            card_layout.setSpacing(6 if compact else 12)
 
     def toggle_trace(self, checked):
         self.diagram.trace = checked

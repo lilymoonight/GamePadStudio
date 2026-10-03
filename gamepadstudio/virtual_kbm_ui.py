@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QFrame, QSlider, QInputDialog, QMessageBox, QSizePolicy, QCheckBox, QMenu, QLayout,
     QDialog, QDialogButtonBox, QFormLayout, QDoubleSpinBox, QSpinBox
 )
+from shiboken6 import isValid
 
 from .glass import (
     TOKENS, GlassPanel, IconButton, Toggle,
@@ -33,7 +34,9 @@ from .controller_glyphs import (button_text, display_parts, draw_token,
 from .response_curves import curve_capabilities
 from .touch_ui import supports_touch
 from .mapping_deck import FlowLayout
+from .application_profiles import application_profiles_supported
 
+WINDOWS_FEATURES = sys.platform == 'win32'
 
 def label(text, kind=None, wrap=False):
     w = QLabel(text)
@@ -93,7 +96,7 @@ def trigger_tokens(raw_label: str) -> Tuple[str, ...]:
                'LS:↑': 'LS↑', 'LS:↓': 'LS↓', 'LS:←': 'LS←', 'LS:→': 'LS→',
                'RS:↑': 'RS↑', 'RS:↓': 'RS↓', 'RS:←': 'RS←', 'RS:→': 'RS→'}
     parts = [aliases.get(part.strip(), part.strip()) for part in compact_trigger(raw_label).split('+') if part.strip()]
-    modifiers = {'L1', 'R1', 'L2', 'R2', 'LB', 'RB', 'LT', 'RT', 'Ctrl', 'Shift', 'Alt', 'Win',
+    modifiers = {'L1', 'R1', 'L2', 'R2', 'LB', 'RB', 'LT', 'RT', 'Ctrl', 'Shift', 'Alt', 'Win', 'Cmd', 'Meta',
                  'Create', 'SHARE', 'Share', 'View', 'Back', '−', '-'}
     return tuple([part for part in parts if part in modifiers] + [part for part in parts if part not in modifiers])
 
@@ -234,6 +237,10 @@ class KeyCap(QPushButton):
 
     def update_tooltip(self):
         desc = tr(KEY_DESCRIPTIONS.get(self.key_id, self.display_name))
+        platform_tip = getattr(self, 'platform_tooltip', '')
+        if not self.isEnabled() and platform_tip:
+            self.setToolTip(platform_tip)
+            return
         if self.is_pressed:
             self.setToolTip(f"【{desc}】正在触发物理输出...")
             return
@@ -241,6 +248,8 @@ class KeyCap(QPushButton):
             self.setToolTip(f"【{desc}】正在等待外设输入...\n请在手柄、飞行摇杆或任意接入设备上按下按键或推轴")
             return
         lines = [f"虚拟按键：【{desc}】({self.key_id})"]
+        if platform_tip:
+            lines.append(platform_tip)
         if self.short_bindings or self.long_bindings:
             lines.append(f"已绑定手柄触发（{len(self.short_bindings) + len(self.long_bindings)} 项绑定）：")
             if self.short_bindings:
@@ -654,10 +663,13 @@ class KeyboardCanvas(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self.page, 'area'):
+        if (isValid(self.page) and hasattr(self.page, 'area') and isValid(self.page.area)
+                and not getattr(self.page.owner, 'closed', False)):
             self.fit_width(max(0, self.page.area.viewport().width() - 32))
 
     def fit_width(self, width):
+        if not isValid(self.page) or getattr(self.page.owner, 'closed', False):
+            return
         # 按实际视口计算，避免固定键帽的最小尺寸阻止画布在窄窗口中缩小。
         target_u = max(28, min(100, int((width - 140) / 22.4)))
         if target_u != self._last_u:
@@ -1011,7 +1023,7 @@ class NikkiLayoutDialog(QDialog):
         self.refresh()
 
     def eventFilter(self, watched, event):
-        if watched is self.area.viewport() and event.type() == QEvent.Resize:
+        if event.type() == QEvent.Resize and isValid(self.area) and watched is self.area.viewport():
             self.reflow(event.size().width())
         return super().eventFilter(watched, event)
 
@@ -1078,6 +1090,7 @@ class VirtualKbmPage(QWidget):
         more.setCursor(Qt.PointingHandCursor)
         more_menu = QMenu(more)
         self.application_profiles_action = more_menu.addAction(tr('应用关联'), lambda: getattr(owner, 'open_application_profiles', lambda: None)())
+        self.application_profiles_action.setToolTip('' if application_profiles_supported() else tr('当前平台不支持应用关联'))
         more_menu.addAction(tr('设为手动预设'), lambda: owner.change_profile(self.current_scheme()))
         self.swap_bindings_action = more_menu.addAction(tr('交换绑定'), self.swap_bindings)
         more_menu.addSeparator()
@@ -1086,6 +1099,7 @@ class VirtualKbmPage(QWidget):
         more_menu.addSeparator()
         more_menu.addAction(tr('后台设置'), lambda: owner.navigate(4))
         self.cloaking_action = more_menu.addAction(tr('设备隐身'), self.open_cloaking)
+        self.cloaking_action.setToolTip('' if WINDOWS_FEATURES else tr('通过 macOS 原生独占访问隔离所选手柄原始输入'))
         if hasattr(owner, 'reset_profile'):
             more_menu.addSeparator()
             more_menu.addAction(tr('恢复默认'), owner.reset_profile)
@@ -1274,6 +1288,8 @@ class VirtualKbmPage(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if getattr(self.owner, 'closed', False):
+            return
         self._arrange_toolbar()
 
     def _arrange_toolbar(self):
@@ -1293,7 +1309,8 @@ class VirtualKbmPage(QWidget):
             self.toolbar_grid.addWidget(self.preset_actions, 0, 1)
 
     def eventFilter(self, watched, event):
-        if watched is self.area.viewport() and event.type() == QEvent.Resize:
+        if (event.type() == QEvent.Resize and isValid(self.area) and isValid(self.canvas)
+                and not getattr(self.owner, 'closed', False) and watched is self.area.viewport()):
             self.canvas.fit_width(max(0, event.size().width() - 32))
         return super().eventFilter(watched, event)
 
@@ -1342,13 +1359,24 @@ class VirtualKbmPage(QWidget):
             gap.setFixedSize(gap_w, h_px)
 
     def make_key(self, key, name, u_width, u_height=1.0):
+        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
+            name = {'Win': 'Cmd', 'Alt': 'Option', 'RAlt': 'Option'}.get(key, name)
         cap = KeyCap(key, name, u_width, u_height)
         cap.left_clicked.connect(self.edit_output)
         cap.right_clicked.connect(self.handle_right_click)
         self.keycaps[key] = cap
         if key == 'Fn':
             cap.setEnabled(False)
-            cap.setToolTip('Fn 由键盘硬件处理')
+            cap.platform_tooltip = 'Fn 由键盘硬件处理'
+        elif sys.platform == 'darwin' and not WINDOWS_FEATURES and not key.startswith(('mouse:', 'action:')):
+            from .actions import supports_key
+            if not supports_key(key):
+                from .macos_actions import MacActions
+                cap.setEnabled(False)
+                cap.platform_tooltip = MacActions.key_capability(key)['reason']
+            elif key == 'Win':
+                cap.platform_tooltip = tr('Command 键；兼容预设中的 Win / Meta 名称')
+        cap.update_tooltip()
         return cap
 
     def handle_right_click(self, key, name):
@@ -1476,8 +1504,8 @@ class VirtualKbmPage(QWidget):
         from .mapping_engine import input_sources
         sources = input_sources(self.owner.snapshot)
         self.mouse_toggle.setVisible(bool({'RS:up', 'RS:down', 'RS:left', 'RS:right'} & set(sources)))
-        self.cloaking_action.setEnabled(bool(self.owner.snapshot and self.owner.snapshot.get('vendor') and self.owner.snapshot.get('product')))
-        self.application_profiles_action.setEnabled(bool(self.owner.snapshot))
+        self.cloaking_action.setEnabled(bool((WINDOWS_FEATURES or sys.platform == 'darwin') and self.owner.snapshot and self.owner.snapshot.get('vendor') and self.owner.snapshot.get('product')))
+        self.application_profiles_action.setEnabled(bool(application_profiles_supported() and self.owner.snapshot))
         self.import_profile_action.setEnabled(bool(self.owner.snapshot))
         self.export_profile_action.setEnabled(bool(self.owner.snapshot))
         from .mapping_swap_ui import can_swap_bindings
@@ -1513,7 +1541,7 @@ class VirtualKbmPage(QWidget):
         self.device_state = state
         self.refresh_curve_actions(state)
         self.refresh_touch_action(state)
-        self.cloaking_action.setEnabled(bool(state and state.get('vendor') and state.get('product')))
+        self.cloaking_action.setEnabled(bool((WINDOWS_FEATURES or sys.platform == 'darwin') and state and state.get('vendor') and state.get('product')))
         from .mapping_swap_ui import can_swap_bindings
         self.swap_bindings_action.setEnabled(can_swap_bindings(self.owner, self.current_scheme()))
         self.bindings._sync_controls()
@@ -1588,7 +1616,22 @@ class VirtualKbmPage(QWidget):
         return state.get('vendor'), state.get('product')
 
     def open_cloaking(self):
-        from PySide6.QtWidgets import QDialog
+        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
+            if not (self.owner.snapshot or self.device_state):
+                self.owner.notify(tr('请先连接并选择原生手柄'))
+                return
+            if not hasattr(self,'cloaking_dialog'):
+                self.cloaking_dialog = QDialog(self); self.cloaking_dialog.setWindowTitle(tr('设备隐身'))
+                layout = QVBoxLayout(self.cloaking_dialog)
+                self.cloaking_toggle = QCheckBox(tr('向其他应用隐藏手柄原始输入'))
+                self.cloaking_status_label = QLabel(); self.cloaking_status_label.setWordWrap(True)
+                layout.addWidget(self.cloaking_status_label); layout.addWidget(self.cloaking_toggle)
+                self.cloaking_toggle.toggled.connect(self.toggle_cloaking)
+            self.refresh_cloaking_status(); self.cloaking_dialog.show()
+            return
+        if not WINDOWS_FEATURES:
+            self.owner.notify(tr('HidHide 仅支持 Windows，macOS 无法隐藏手柄原始输入'))
+            return
         if not hasattr(self, 'hidhide'):
             self.hidhide = HidHideClient()
             self.cloaking_dialog = QDialog(self); self.cloaking_dialog.setWindowTitle('设备隐身')
@@ -1603,6 +1646,15 @@ class VirtualKbmPage(QWidget):
         self.cloaking_dialog.show()
 
     def refresh_cloaking_status(self):
+        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
+            from .controller_isolation_service import isolation_status
+            info = isolation_status(self.owner.device)
+            self.cloaking_toggle.blockSignals(True)
+            self.cloaking_toggle.setChecked(bool(info.get('active') or info.get('restore_pending')))
+            self.cloaking_toggle.setEnabled(bool(info.get('supported') or info.get('restore_pending')))
+            self.cloaking_toggle.blockSignals(False)
+            self.cloaking_status_label.setText(info.get('reason') or tr('已隔离当前手柄的原始输入；关闭或退出时恢复共享访问') if info.get('active') else info.get('reason') or tr('当前手柄原始输入可见；开启会阻止游戏原生手柄输入'))
+            return
         vendor, product = self.get_current_device_info()
         installed = self.hidhide.is_driver_installed()
         from .hidhide import selected_device_instances
@@ -1617,6 +1669,14 @@ class VirtualKbmPage(QWidget):
         self.cloaking_status_label.setText(text)
 
     def toggle_cloaking(self, enabled):
+        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
+            result = self.owner.set_controller_isolation(enabled)
+            self.refresh_cloaking_status()
+            self.cloaking_status_label.setText(result['message'])
+            self.owner.refresh_controller_isolation()
+            return
+        if not WINDOWS_FEATURES:
+            return
         vendor, product = self.get_current_device_info()
         if not vendor or not product:
             self.refresh_cloaking_status()

@@ -2,6 +2,7 @@
 import ctypes as C
 import os
 import hashlib
+import sys
 import uuid
 import threading
 from contextlib import nullcontext
@@ -13,6 +14,21 @@ from .response_curves import (curve_capabilities, evaluate_curve,
 
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
 import pygame
+
+
+def load_sdl_library():
+    """Use pygame's SDL instance so its events and controller state stay shared."""
+    pygame_dir = Path(pygame.__file__).resolve().parent
+    if sys.platform == 'win32':
+        return C.CDLL(str(pygame_dir / 'SDL2.dll'))
+    # dlopen/dlsym search an extension's linked dependencies. Loading pygame's
+    # already imported base extension therefore resolves the exact SDL library
+    # it uses, including wheels with private .dylibs and frozen applications.
+    # Finding a separate system SDL can silently create a second event queue.
+    library = C.CDLL(str(Path(pygame.base.__file__).resolve()))
+    if not hasattr(library, 'SDL_Init'):
+        raise RuntimeError('pygame 的 SDL2 库未公开控制器接口，请重新安装 pygame。')
+    return library
 
 
 class GUID(C.Structure):
@@ -57,7 +73,7 @@ def _serialized_device_call(method):
 class Device:
     def __init__(self):
         self._io_lock = threading.RLock()
-        self.lib = C.CDLL(str(Path(pygame.__file__).parent / 'SDL2.dll'))
+        self.lib = load_sdl_library()
         self.handle = None
         self.index = -1
         self.error = ''
@@ -145,11 +161,12 @@ class Device:
         self.lib.SDL_SetHintWithPriority(b'SDL_GAMECONTROLLER_USE_BUTTON_LABELS', b'0', 2)
         # Active HidHide filtering must allow this executable before SDL creates
         # its first device list, including a newly built packaged application.
-        from .hidhide import ensure_current_app_input_access
-        access_ok, access_message = ensure_current_app_input_access()
-        if not access_ok:
-            self.access_warning = access_message
-            self.error = access_message
+        if sys.platform == 'win32':
+            from .hidhide import ensure_current_app_input_access
+            access_ok, access_message = ensure_current_app_input_access()
+            if not access_ok:
+                self.access_warning = access_message
+                self.error = access_message
         if self.lib.SDL_Init(0x2200) != 0:
             raise RuntimeError(self.lib.SDL_GetError().decode())
         self.event = C.create_string_buffer(128)
@@ -434,8 +451,35 @@ class Device:
         if getattr(self, 'is_raw_joystick', False): return False
         return bool(self.handle) and self.lib.SDL_GameControllerSetLED(self.handle, *bytes.fromhex(color.lstrip('#'))) == 0
 
+    def _controller_isolation_backend(self):
+        backend = getattr(self, '_controller_isolation', None)
+        if backend is None:
+            from .macos_controller_isolation import ControllerIsolation
+            backend = self._controller_isolation = ControllerIsolation(self)
+        return backend
+
+    @_serialized_device_call
+    def set_controller_isolation(self, enabled):
+        """Explicit macOS opt-in; Windows isolation continues through HidHide."""
+        if sys.platform != 'darwin':
+            return dict(supported=False, enabled=False, active=False, status='unavailable',
+                        reason='此接口仅适用于 macOS；Windows 请使用 HidHide', restore_pending=False)
+        return self._controller_isolation_backend().set_enabled(enabled)
+
+    @_serialized_device_call
+    def controller_isolation_status(self):
+        if sys.platform != 'darwin':
+            return dict(supported=False, enabled=False, active=False, status='unavailable',
+                        reason='此接口仅适用于 macOS；Windows 请使用 HidHide', restore_pending=False)
+        return self._controller_isolation_backend().status()
+
     @_serialized_device_call
     def close_handle(self):
+        isolation = getattr(self, '_controller_isolation', None)
+        if isolation is not None:
+            result = isolation.set_enabled(False)
+            if result.get('restore_pending'):
+                self.access_warning = result.get('reason', '手柄共享访问恢复失败')
         if self.handle:
             if getattr(self, 'is_raw_joystick', False):
                 self.lib.SDL_JoystickClose(self.handle)
@@ -445,6 +489,8 @@ class Device:
                     self.lib.SDL_GameControllerRumbleTriggers(self.handle, 0, 0, 0)
                 self.lib.SDL_GameControllerClose(self.handle)
             self.handle = None
+        if isolation is not None:
+            isolation.forget_closed_handle()
         self.instance_id=None;self.metadata={};self.is_raw_joystick=False
         self._touch_contacts = {}
         self.set_response_curves({})

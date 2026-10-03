@@ -1,4 +1,4 @@
-"""Independent, headless mapping process for the interactive Windows user session."""
+"""Independent mapping process for the current user's desktop session."""
 from datetime import datetime
 import copy
 import json
@@ -6,32 +6,40 @@ import os
 from pathlib import Path
 import re
 import sys
+import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
 from PySide6.QtCore import QCoreApplication, QLockFile, QObject, QTimer, Signal
 from .studio_core import ConfigStore, GestureEngine, BUTTONS, device_config, profile_scope
 from .controller_catalog import button_labels
 from .device import Device
-from .actions import WindowsActions, launch_command
+from .actions import create_actions, launch_command, input_permission_status
 from .screenshot_service import take_screenshot
 from .replay_service import ReplayBufferEngine
+from .manual_recording import ManualRecording
 from .haptic_engine import HapticEngine
 from .ipc import LocalServer, request, spawn, default_root, read_lock_pid
 from .mapping_engine import MappingRuntime
-from .application_profiles import ApplicationProfileResolver, foreground_application
+from .application_profiles import ApplicationProfileResolver, foreground_application, application_profiles_supported
 from .battery_monitor import BatteryMonitor
-from .emergency_hotkey import EmergencyHotkey
+from .emergency_hotkey import EmergencyHotkey, emergency_hotkey_supported
+from .screenshot_hotkey import ScreenshotHotkey
 
 
 class Agent(QObject):
     captured=Signal(str,str)
     replay_finished=Signal(str,str)
+    recording_finished=Signal(str,str)
     def __init__(self,root,device=None,actions=None):
         super().__init__();self.root=Path(root);self.store=ConfigStore(self.root);self.config=self.store.data
         if not self.store.path.exists():self.store.save()
-        self.device=device or Device();self.actions=actions or WindowsActions()
+        self.device=device or Device();self.actions=actions or create_actions()
+        if sys.platform == 'darwin':
+            from .macos_windows import configure_window_exclusions
+            configure_window_exclusions({os.getpid(),read_lock_pid(self.root/'studio.lock')})
         self.device.preferred_key=self.config.get('preferred_controller','')
         self.engine=MappingRuntime(self.actions, self.dispatch)
+        self._unsupported_notice_signature = ()
         self.state=None;self.enabled=bool(self.config.get('mapping_enabled', True));self.suspended_until=0.;self.blocked=set();self.last_touch=None
         self.preview_until = 0.
         self.application_resolver = ApplicationProfileResolver()
@@ -44,10 +52,14 @@ class Agent(QObject):
         self.replay_device_context = None
         self.executor=ThreadPoolExecutor(max_workers=1);self.captured.connect(self.on_captured)
         self.replay_finished.connect(self.on_replay_finished)
+        self.recording_finished.connect(self.on_recording_finished)
         self.replay_busy = False
         self.server=LocalServer(self.root,self.handle)
         self.emergency_hotkey = EmergencyHotkey(self.emergency_pause, self)
         self.emergency_hotkey.configure(self.config['emergency_hotkey'])
+        self.screenshot_hotkey = ScreenshotHotkey(self.capture, self) if sys.platform == 'darwin' else None
+        if self.screenshot_hotkey:
+            self.screenshot_hotkey.configure(self.config['screenshot_hotkey'])
         self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(4)
         self.scan_timer=QTimer(self);self.scan_timer.timeout.connect(self.scan);self.scan_timer.start(1000)
         self.broadcast_timer=QTimer(self);self.broadcast_timer.timeout.connect(self.broadcast);self.broadcast_timer.start(33)
@@ -60,6 +72,7 @@ class Agent(QObject):
             capture_mode=self.config.get('replay_capture_mode') or self.config.get('capture_mode', 'game'),
             on_event=self.log
         )
+        self.manual_recording = None
         if self.config.get('replay_buffer_enabled', False):
             self.replay_engine.start()
         self.haptic_engine = HapticEngine(self.device, on_notice=self.log)
@@ -70,6 +83,26 @@ class Agent(QObject):
         self.log('后台映射已启动')
 
     def apply_device_cloaking(self):
+        if sys.platform == 'darwin':
+            from .controller_isolation_service import isolation_requested, controller_neutral, isolation_status
+            self._isolation_apply_pending = bool(self.state and isolation_requested(self.config, self.state))
+            if not self._isolation_apply_pending:
+                status = isolation_status(self.device)
+                if status.get('active') or status.get('restore_pending'):
+                    self.release()
+                    result = self.device.set_controller_isolation(False)
+                    if result.get('reason'):
+                        self.log(result['reason'])
+            if self._isolation_apply_pending and controller_neutral(self.state):
+                method = getattr(self.device, 'set_controller_isolation', None)
+                if method:
+                    self.release()
+                    result = method(True)
+                    self._isolation_apply_pending = False
+                    self.log('手柄原始输入隔离已恢复' if result.get('active') else result.get('reason') or '隔离未生效')
+            return
+        if sys.platform != 'win32':
+            return
         settings = device_config(self.config, self.state)
         if not self.state:
             return
@@ -130,12 +163,18 @@ class Agent(QObject):
 
     def status(self):
         return {'pid':os.getpid(),'device':self.state,'enabled':self.enabled,'capturing':self.busy,
+                'input_permission':input_permission_status(),
+                'capabilities':{'application_profiles':application_profiles_supported(),
+                                'emergency_hotkey':emergency_hotkey_supported()},
                 'devices':getattr(self.device,'available',[]),
                 'replay':self.replay_engine.get_status() if hasattr(self,'replay_engine') else {},
+                'recording':self.manual_recording.status() if getattr(self,'manual_recording',None) else {'running':False,'phase':'idle'},
+                'controller_isolation':self.controller_isolation_status(),
                 'mapping':self.engine.feedback(), 'mapping_revision':self.config.get('mapping_revision',0),
                 'profile':self.config['active_profile'],'suspended':time.monotonic()<self.suspended_until,
                 'application_profile':dict(self.application_profile),
                 'emergency_hotkey':self.emergency_hotkey.status(),
+                'screenshot_hotkey':self.screenshot_hotkey.status() if self.screenshot_hotkey else {},
                 'battery_warning':self.battery_monitor.warning(
                     self.state, enabled=device_config(self.config, self.state)['battery_notifications_enabled'])}
 
@@ -155,8 +194,16 @@ class Agent(QObject):
                 pass
         return event
 
+    def controller_isolation_status(self):
+        if sys.platform == 'darwin':
+            from .controller_isolation_service import isolation_status
+            return isolation_status(self.device)
+        return {'supported':False,'active':False,'restore_pending':False}
+
     def update_application_profile(self, now=None, force=False):
         """Switch actual output before the next frame without replacing its fallback."""
+        if not application_profiles_supported():
+            return False
         now = time.monotonic() if now is None else now
         if not force and now - self.last_application_check < .25:
             return False
@@ -164,6 +211,9 @@ class Agent(QObject):
         foreground = foreground_application()
         protected_pids = {os.getpid(), read_lock_pid(self.root / 'studio.lock')}
         protected_pids.discard(0)
+        if sys.platform == 'darwin':
+            from .macos_windows import configure_window_exclusions
+            configure_window_exclusions(protected_pids)
         resolved = self.application_resolver.resolve(
             self.config, self.state, foreground, now,
             editing=now < self.suspended_until, preview=now < self.preview_until,
@@ -182,6 +232,8 @@ class Agent(QObject):
         return changed
 
     def apply_gamebar_shield(self):
+        if sys.platform != 'win32':
+            return
         if self.config.get('gamebar_shield_enabled', False):
             from .gamebar_shield import set_gamebar_shield, is_gamebar_shield_active
             if not is_gamebar_shield_active():
@@ -198,6 +250,30 @@ class Agent(QObject):
         with (self.root/'agent-events.jsonl').open('a',encoding='utf-8') as file:file.write(json.dumps(row,ensure_ascii=False)+'\n')
         if hasattr(self, 'server') and self.server:
             self.server.broadcast({'type':'notice',**row})
+
+    def report_unsupported_bindings(self):
+        """Report profile compatibility once per changed set, without pausing input."""
+        rows = getattr(self.engine, 'unsupported_bindings', [])
+        signature = (profile_scope(self.state), self.config.get('active_profile'),
+                     tuple((row['trigger'], row['gesture'], row['value'], row['reason']) for row in rows))
+        if signature == getattr(self, '_unsupported_notice_signature', ()):
+            return
+        self._unsupported_notice_signature = signature
+        if not rows:
+            return
+        examples = '；'.join(f"{row['trigger']} {row['gesture']} → {row['value']}（{row['reason']}）"
+                            for row in rows[:2])
+        extra = f'；另有 {len(rows)-2} 条' if len(rows) > 2 else ''
+        message = f'当前预设有 {len(rows)} 条此平台不支持的键盘输出，已跳过对应动作，其他映射继续运行：{examples}{extra}'
+        try:
+            self.log(message)
+        except Exception:
+            # A full/unwritable event log must not disable otherwise valid
+            # mappings. The state reply still carries the exact binding list.
+            try:
+                self.server.broadcast({'type':'notice','time':datetime.now().isoformat(),'message':message})
+            except Exception:
+                pass
 
     def release(self):
         try:
@@ -245,20 +321,25 @@ class Agent(QObject):
         self.broadcast()
 
     def scan(self):
+        if self.closed:
+            return
         try:self.device.scan()
         except Exception as exc:self.log('连接失败：'+str(exc))
 
     def poll(self):
+        if self.closed:
+            return
         try:
             # 键盘 PrintScreen (VK_SNAPSHOT 0x2C) 物理快捷键全局监听
-            if not hasattr(self, '_user32'):
-                import ctypes
-                self._user32 = ctypes.WinDLL('user32')
-                self._last_prtsc_down = False
-            prtsc_down = bool(self._user32.GetAsyncKeyState(0x2C) & 0x8000)
-            if prtsc_down and not self._last_prtsc_down:
-                self.capture()
-            self._last_prtsc_down = prtsc_down
+            if sys.platform == 'win32':
+                if not hasattr(self, '_user32'):
+                    import ctypes
+                    self._user32 = ctypes.WinDLL('user32')
+                    self._last_prtsc_down = False
+                prtsc_down = bool(self._user32.GetAsyncKeyState(0x2C) & 0x8000)
+                if prtsc_down and not self._last_prtsc_down:
+                    self.capture()
+                self._last_prtsc_down = prtsc_down
 
             previous=self.state;self.state=self.device.read()
             identity=lambda s: (s.get('instance_id'),profile_scope(s)) if s else None
@@ -279,6 +360,8 @@ class Agent(QObject):
                 inputs['trigger_curves'] = settings.get('trigger_curves', {})
                 self.engine.blocked.update(self.engine.normalizer.update(self.state, inputs))
             self.update_application_profile(force=device_changed)
+            if sys.platform == 'darwin' and getattr(self, '_isolation_apply_pending', False):
+                self.apply_device_cloaking()
             self.update_battery()
             if not self.state:
                 self.engine.update(None, self.config, enabled=False);return
@@ -290,6 +373,7 @@ class Agent(QObject):
                 self.log(f"按键输入: {' / '.join(names)}")
             running = self.enabled and time.monotonic() >= self.suspended_until
             self.engine.update(self.state, self.config, enabled=running, preview=time.monotonic()<self.preview_until)
+            self.report_unsupported_bindings()
         except Exception as exc:
             self.enabled=False
             self.config['mapping_enabled']=False
@@ -368,6 +452,8 @@ class Agent(QObject):
             self.store=ConfigStore(self.root)
             self.config=self.store.data
             self.emergency_hotkey.configure(self.config['emergency_hotkey'])
+            if self.screenshot_hotkey:
+                self.screenshot_hotkey.configure(self.config['screenshot_hotkey'])
             self.apply_gamebar_shield()
             self.apply_device_cloaking()
             if hasattr(self, 'replay_engine'):
@@ -391,6 +477,13 @@ class Agent(QObject):
             self.apply_device_settings()
             self.update_application_profile(force=True)
         elif command=='set_device_cloaking':
+            if sys.platform == 'darwin':
+                from .controller_isolation_service import set_controller_isolation
+                result = set_controller_isolation(self.store, self.device, self.state,
+                                                   message.get('enabled'), self.release)
+                self._isolation_apply_pending = False
+                self.log(result['message']); self.broadcast()
+                return result
             if not self.state or not self.state.get('vendor'):
                 raise ValueError('请先连接支持设备隐身的手柄')
             enabled = bool(message.get('enabled', True))
@@ -501,6 +594,9 @@ class Agent(QObject):
         # 1. 优先使用本地 4K 极清硬件编码回放缓冲区
         if self.config.get('replay_buffer_enabled', False) and hasattr(self, 'replay_engine'):
             if not self.replay_engine.is_running():
+                if sys.platform == 'darwin':
+                    self.log('后台回放未就绪；请确认回放缓存已开启并等待画面积累')
+                    return {'status':'not_ready','reason':'后台回放未就绪'}
                 self.replay_engine.start()
             self.replay_busy = True
             self.replay_device_context = self.feedback_device_context()
@@ -509,6 +605,9 @@ class Agent(QObject):
                 except Exception as exc:self.replay_finished.emit('', str(exc))
             self.executor.submit(worker)
             return {'status':'saving'}
+        if sys.platform != 'win32':
+            self.log('请先开启后台回放；macOS 不支持 Windows 系统回放快捷键')
+            return {'status':'not_ready','reason':'后台回放尚未开启或未就绪'}
         if self.config.get('gamebar_shield_enabled', False):
             self.log('系统录制已屏蔽，请先开启后台回放')
             return {'status':'disabled'}
@@ -532,6 +631,21 @@ class Agent(QObject):
         self.server.broadcast({'type':'replay_record', 'status':'success' if path else 'not_ready', 'path':path, 'error':error})
 
     def record_toggle(self):
+        if sys.platform == 'darwin':
+            if getattr(self,'manual_recording',None) and self.manual_recording.status()['running']:
+                self.manual_recording.request_stop()
+                self.log('正在结束并保存录像')
+            else:
+                self.manual_recording = ManualRecording(
+                    self.config.get('save_dir', self.root / 'Captures'),
+                    capture_mode=self.config.get('replay_capture_mode') or self.config.get('capture_mode','game'),
+                    codec=self.config.get('replay_codec','hevc'), fps=self.config.get('replay_fps',30),
+                    bitrate_mbps=self.config.get('replay_bitrate_mbps',50), on_event=self.log,
+                    on_saved=self.recording_finished.emit)
+                if self.manual_recording.start():
+                    self.log('正在启动录像')
+            self.broadcast()
+            return
         if self.config.get('gamebar_shield_enabled', False):
             self.log('系统录制已屏蔽，可使用后台回放保存录像')
             return
@@ -544,6 +658,10 @@ class Agent(QObject):
             self.server.broadcast({'type':'record_toggle','status':'success'})
         except Exception as exc:
             self.log('录屏触发失败：'+str(exc))
+
+    def on_recording_finished(self, path, error):
+        self.server.broadcast({'type':'recording','path':path,'error':error,
+                               'status':self.manual_recording.status() if self.manual_recording else {}})
 
     def capture(self):
         now=time.monotonic()
@@ -569,22 +687,49 @@ class Agent(QObject):
     def close(self):
         if self.closed:return
         self.closed=True;self.timer.stop();self.scan_timer.stop();self.broadcast_timer.stop()
+        self.cleanup_errors=[]
+        def finish(label, operation):
+            try:
+                operation()
+            except Exception as exc:
+                text=label+'：'+str(exc)
+                self.cleanup_errors.append(text)
+                try:self.log(text)
+                except Exception:pass
         # Release input BEFORE waiting for recording workers or other teardown.
-        try:self.release()
-        except Exception as exc:self.log('释放输入失败：'+str(exc))
-        try:self.emergency_hotkey.close()
-        except Exception:pass
-        try:self.engine.close()
-        except Exception as exc:self.log('关闭映射失败：'+str(exc))
+        finish('释放输入失败',self.release)
+        finish('注销紧急暂停失败',self.emergency_hotkey.close)
+        if self.screenshot_hotkey:
+            finish('注销截图快捷键失败',self.screenshot_hotkey.close)
+        finish('关闭映射失败',self.engine.close)
         if hasattr(self, 'replay_engine'):
-            try: self.replay_engine.stop()
-            except Exception: pass
+            finish('停止回放失败',self.replay_engine.stop)
+        if getattr(self, 'manual_recording', None):
+            finish('结束录像失败',self.manual_recording.stop)
         if hasattr(self, 'haptic_engine'):
-            try: self.haptic_engine.close()
-            except Exception: pass
-        self.device.close();self.executor.shutdown(wait=True);self.server.close()
+            finish('停止触觉反馈失败',self.haptic_engine.close)
+        finish('恢复手柄访问失败',self.device.close)
+        finish('关闭工作队列失败',lambda:self.executor.shutdown(wait=True))
+        finish('关闭后台通信失败',self.server.close)
 
 
+
+
+def _install_shutdown_signals(app):
+    """Defer OS shutdown until the current Qt/native input callback finishes."""
+    previous = {}
+
+    def stop(signum, frame):
+        QTimer.singleShot(0, app.quit)
+
+    for number in (signal.SIGTERM, signal.SIGINT):
+        try:
+            previous[number] = signal.getsignal(number)
+            signal.signal(number, stop)
+        except ValueError:
+            # Python accepts signal handlers only on the main thread.
+            previous.pop(number, None)
+    return previous
 
 
 def run(root):
@@ -603,10 +748,16 @@ def run(root):
     if not lock.tryLock(100):
         return 1
     agent=None
+    shutdown_signals = {}
     try:
         agent=Agent(root)
         app.aboutToQuit.connect(agent.close)
+        shutdown_signals = _install_shutdown_signals(app)
         return app.exec()
     finally:
-        if agent is not None:agent.close()
-        lock.unlock()
+        try:
+            if agent is not None:agent.close()
+        finally:
+            for number, handler in shutdown_signals.items():
+                signal.signal(number, handler)
+            lock.unlock()

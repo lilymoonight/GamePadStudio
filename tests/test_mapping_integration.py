@@ -32,9 +32,9 @@ def test_remote_views_share_authoritative_profile_and_output(tmp_path,monkeypatc
         def send(self,command,**kwargs):agent.handle({'command':command,**kwargs});return True
         def close(self):pass
     monkeypatch.setattr('gamepadstudio.studio.AgentClient',Client)
-    monkeypatch.setattr('gamepadstudio.studio.WindowsActions',lambda:ui_actions)
+    monkeypatch.setattr('gamepadstudio.studio.create_actions',lambda:ui_actions)
     monkeypatch.setattr('gamepadstudio.studio.request',lambda root,command,**kw: {'ok':True,**agent.handle({'command':command,**{k:v for k,v in kw.items() if k not in ('role','timeout')}})})
-    window=Studio(tmp_path);window.timer.stop();window.scan_timer.stop();window.gallery_timer.stop()
+    window=Studio(tmp_path, lang='zh');window.timer.stop();window.scan_timer.stop();window.gallery_timer.stop()
     try:
         window.poll()
         assert window.engine.mouse_thread is None

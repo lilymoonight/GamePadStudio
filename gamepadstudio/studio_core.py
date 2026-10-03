@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from .controller_catalog import CATALOG, controller_defaults, desktop_defaults
@@ -17,7 +18,7 @@ DEVICE_PROFILE_VERSION = 1
 OFFLINE_PROFILE_SCOPE = 'offline:xinput'
 DEVICE_SETTING_KEYS = ('led', 'rumble', 'touch_mouse', 'long_press', 'deadzone',
                        'capture_haptics_enabled', 'haptic_intensity', 'haptic_profile',
-                       'haptic_engine_enabled', 'device_cloaking_enabled',
+                       'haptic_engine_enabled', 'device_cloaking_enabled', 'mac_controller_isolation_requested',
                        'trigger_curves', 'rumble_curves', 'trigger_rumble_curves',
                        'trigger_rumble_enabled', 'touch_gestures_enabled', 'touch_scroll',
                        'touch_gesture_sensitivity', 'battery_notifications_enabled')
@@ -25,7 +26,8 @@ DEVICE_SETTING_DEFAULTS = {'led': '#5686ff', 'rumble': .35, 'touch_mouse': False
                            'long_press': .65, 'deadzone': .10,
                            'capture_haptics_enabled': True, 'haptic_intensity': 1.0,
                            'haptic_profile': 'crisp', 'haptic_engine_enabled': True,
-                           'device_cloaking_enabled': True, 'battery_notifications_enabled': True}
+                           'device_cloaking_enabled': True, 'mac_controller_isolation_requested':False,
+                           'battery_notifications_enabled': True}
 DEVICE_SETTING_DEFAULTS.update({key: normalize_curve_channels(key) for key in CURVE_CHANNELS})
 DEVICE_SETTING_DEFAULTS['trigger_rumble_enabled'] = False
 DEVICE_SETTING_DEFAULTS.update(touch_gestures_enabled=False, touch_scroll=False,
@@ -114,7 +116,7 @@ def device_config(config, state):
     for key in CURVE_CHANNELS:
         resolved[key] = normalize_curve_channels(key, resolved)
     resolved['trigger_rumble_enabled'] = resolved.get('trigger_rumble_enabled') is True
-    for key in ('touch_gestures_enabled', 'touch_scroll'):
+    for key in ('touch_gestures_enabled', 'touch_scroll', 'mac_controller_isolation_requested'):
         resolved[key] = resolved.get(key) is True
     if type(resolved.get('battery_notifications_enabled')) is not bool:
         resolved['battery_notifications_enabled'] = True
@@ -211,6 +213,7 @@ def get_buttons(lang=None):
 
 def default_config(root: Path):
     from .emergency_hotkey import DEFAULT_SHORTCUT
+    from .screenshot_hotkey import DEFAULT_SHORTCUT as SCREENSHOT_SHORTCUT
     from .kbm_mapper import NIKKI_PROFILE_NAME, NIKKI_LAYOUT_VERSION, infinity_nikki_defaults
     base = {'4': {'short': {'action': 'capture'}, 'long': {'action': 'replay_record'}},
             '5': {'short': {'action': 'home'}, 'long': {'action': 'none'}}}
@@ -237,6 +240,7 @@ def default_config(root: Path):
             'device_settings': {},
             'application_profiles': {},
             'emergency_hotkey': {'enabled': False, 'shortcut': DEFAULT_SHORTCUT},
+            'screenshot_hotkey': {'enabled': sys.platform == 'darwin', 'shortcut': SCREENSHOT_SHORTCUT},
             'save_dir': str(root / 'Captures'), 'capture_mode': 'game', 'cooldown': .5,
             'long_press': .65, 'deadzone': .10, 'rumble': .35, 'led': '#5686ff',
             'touch_mouse': False, 'close_to_tray': False, 'mapping_enabled': True, 'controller_profiles':{}, 'controller_favorites':[], 'preferred_controller':'',
@@ -319,7 +323,11 @@ class ConfigStore:
                     self.data[key] = max(lo, min(hi, float(self.data[key])))
                 if self.data.get('capture_mode') == 'monitor':
                     self.data['capture_mode'] = 'game'
-                self.data['replay_capture_mode'] = saved.get('replay_capture_mode') or self.data.get('capture_mode', 'game')
+                legacy_replay_mode = self.data.get('capture_mode', 'game')
+                # A screenshot's window scope is not a replay-buffer scope.
+                if legacy_replay_mode == 'window':
+                    legacy_replay_mode = 'game'
+                self.data['replay_capture_mode'] = saved.get('replay_capture_mode') or legacy_replay_mode
                 needs_recording_mode = not saved.get('replay_capture_mode')
                 if self.data['replay_capture_mode'] == 'monitor':
                     self.data['replay_capture_mode'] = 'game'
@@ -352,6 +360,8 @@ class ConfigStore:
 
         from .emergency_hotkey import normalize_hotkey_settings
         self.data['emergency_hotkey'] = normalize_hotkey_settings(self.data.get('emergency_hotkey'))
+        from .screenshot_hotkey import normalize_screenshot_hotkey_settings
+        self.data['screenshot_hotkey'] = normalize_screenshot_hotkey_settings(self.data.get('screenshot_hotkey'))
         needs_cleanup = self.data.get('keyboard_profile_cleanup_version', 0) < KEYBOARD_PROFILE_CLEANUP_VERSION
         if needs_cleanup and self.path.exists():
             backup = self.path.with_name('studio.before-keyboard-profile-cleanup-v1.json')
@@ -774,11 +784,18 @@ class ConfigStore:
         if key == 'emergency_hotkey':
             from .emergency_hotkey import normalize_hotkey_settings
             value = normalize_hotkey_settings(value, strict=True)
+        elif key == 'screenshot_hotkey':
+            from .screenshot_hotkey import normalize_screenshot_hotkey_settings
+            value = normalize_screenshot_hotkey_settings(value, strict=True)
+        if key in ('emergency_hotkey', 'screenshot_hotkey') and sys.platform == 'darwin' and value['enabled']:
+            other = 'screenshot_hotkey' if key == 'emergency_hotkey' else 'emergency_hotkey'
+            if self.data.get(other, {}).get('enabled') and self.data[other].get('shortcut') == value['shortcut']:
+                raise ValueError('该快捷键已用于' + ('截图' if other == 'screenshot_hotkey' else '紧急暂停') + '，请更换快捷键')
         if key == 'battery_notifications_enabled' and type(value) is not bool:
             raise ValueError('低电量提醒设置应为开启或关闭')
         if key in CURVE_CHANNELS:
             value = normalize_curve_channels(key, {key: value})
-        elif key in ('trigger_rumble_enabled', 'touch_gestures_enabled', 'touch_scroll'):
+        elif key in ('trigger_rumble_enabled', 'touch_gestures_enabled', 'touch_scroll', 'mac_controller_isolation_requested'):
             value = value is True
         elif key == 'touch_gesture_sensitivity':
             value = normalize_touch_sensitivity(value)

@@ -8,7 +8,10 @@ HidHide Windows Kernel Filter Driver Integration (硬件独占屏蔽与设备隐
 
 import sys
 import os
-import winreg
+if sys.platform == 'win32':
+    import winreg
+else:
+    winreg = None
 import ctypes as C
 from ctypes import wintypes as W
 from pathlib import Path
@@ -72,7 +75,7 @@ def find_hid_instances(vendor: Optional[int] = None, product: Optional[int] = No
     例如：'HID\\VID_054C&PID_0CE6&REV_0100\\7&1A2B3C4D&0&0000'
     兼容普通 USB HID、蓝牙 HID、以及 Windows Bluetooth LE 格式 (如 BTHLE 实例与合成本地 XInput 实例)。
     """
-    if vendor is None and product is None:
+    if sys.platform != 'win32' or winreg is None or (vendor is None and product is None):
         return []
 
     v_hex = f"{vendor:04X}".upper() if vendor is not None else ""
@@ -149,6 +152,8 @@ def ensure_current_app_input_access(client=None) -> Tuple[bool, str]:
     Installation and inactive-driver checks are read-only. With active filtering,
     only the application's access entry can be added; hiding settings stay intact.
     """
+    if sys.platform != 'win32':
+        return True, ''
     try:
         client = client if client is not None else HidHideClient()
         if not client.is_driver_installed():
@@ -369,6 +374,8 @@ class HidHideClient:
         3. 添加至黑名单并激活驱动
         若直接内核 IOCTL 因权限不足受阻，自动调用 HidHideCLI 申请 Windows 管理员提权完成配置
         """
+        if sys.platform != 'win32':
+            return False, "HidHide 仅支持 Windows，macOS 无法隐藏手柄原始输入"
         if not self.is_driver_installed():
             return False, "未检测到 HidHide 驱动，请先安装驱动"
 
@@ -419,6 +426,8 @@ class HidHideClient:
 
     def uncloak_controller(self, vendor: Optional[int] = None, product: Optional[int] = None, device_path=None) -> Tuple[bool, str]:
         """解除特定控制器的隐身屏蔽，恢复系统共享访问"""
+        if sys.platform != 'win32':
+            return False, "HidHide 仅支持 Windows，macOS 无法隐藏手柄原始输入"
         if not self.is_driver_installed():
             return False, "未检测到 HidHide 驱动"
 

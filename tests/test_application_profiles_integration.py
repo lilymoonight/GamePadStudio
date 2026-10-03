@@ -17,6 +17,8 @@ from tests.test_unified_mapping import Actions, entry
 
 @pytest.fixture
 def remote_workspace(tmp_path, monkeypatch):
+    monkeypatch.setattr('gamepadstudio.studio.WINDOWS_FEATURES', True)
+    monkeypatch.setattr('gamepadstudio.virtual_kbm_ui.WINDOWS_FEATURES', True)
     app = QApplication.instance() or QApplication([])
     previous = get_language_preference()
     init_language('zh')
@@ -61,7 +63,7 @@ def remote_workspace(tmp_path, monkeypatch):
         return {'ok': True, **(result if isinstance(result, dict) else {})}
 
     monkeypatch.setattr('gamepadstudio.studio.AgentClient', Client)
-    monkeypatch.setattr('gamepadstudio.studio.WindowsActions', lambda: ui_actions)
+    monkeypatch.setattr('gamepadstudio.studio.create_actions', lambda: ui_actions)
     monkeypatch.setattr('gamepadstudio.studio.request', request)
     window = Studio(tmp_path, lang='zh')
     window.timer.stop(); window.scan_timer.stop(); window.gallery_timer.stop()

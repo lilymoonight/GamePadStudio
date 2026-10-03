@@ -12,6 +12,39 @@ permissions:
   contents: write
 
 jobs:
+  build-macos:
+    name: Test and Build macOS Preview
+    runs-on: macos-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+      SDL_VIDEODRIVER: dummy
+      SDL_AUDIODRIVER: dummy
+      PYGAME_HIDE_SUPPORT_PROMPT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt pyinstaller
+      - name: Build native screen capture component
+        run: python scripts/build_macos_capture.py
+      - name: Run test suite
+        run: python scripts/test_modules.py
+      - name: Verify source startup
+        run: python main.py --smoke-test --data-dir "${{ runner.temp }}/gamepadstudio-source-smoke"
+      - name: Build app
+        run: pyinstaller --noconfirm GamePadStudio.spec
+      - name: Verify packaged startup
+        run: dist/GamePadStudio.app/Contents/MacOS/GamePadStudio --smoke-test --data-dir "${{ runner.temp }}/gamepadstudio-package-smoke"
+      - name: Package app with bundle symlinks
+        run: ditto -c -k --sequesterRsrc --keepParent dist/GamePadStudio.app dist/GamePadStudio-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GamePadStudio-macOS-preview
+          path: dist/GamePadStudio-macOS.zip
+          retention-days: 14
   build-windows:
     name: Build Windows x64 Executable
     runs-on: windows-latest
@@ -39,7 +72,7 @@ jobs:
 
       - name: Run test suite
         run: |
-          pytest tests/ -v
+          python scripts/test_modules.py --jobs 2
 
       - name: Build executable with PyInstaller
         run: |

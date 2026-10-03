@@ -261,6 +261,9 @@ class ReplayCapture:
 
 
 def create_replay_capture():
+    if sys.platform == 'darwin':
+        from .macos_capture import MacCapture
+        return MacCapture(transfer='bt709')
     capture = mss.mss()
     if sys.platform == 'win32':
         capture.gdi32 = _ReplayGdi(capture.gdi32)

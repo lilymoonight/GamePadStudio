@@ -1,4 +1,5 @@
 """A draft editor for the application's physical-keyboard pause shortcut."""
+import sys
 from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QFormLayout, QVBoxLayout
 
 from .emergency_hotkey import DEFAULT_SHORTCUT, normalize_hotkey_settings
@@ -9,7 +10,7 @@ from .i18n import tr
 class EmergencyHotkeyDialog(QDialog):
     def __init__(self, owner):
         super().__init__(owner)
-        from .studio import label
+        from .studio import label, WINDOWS_FEATURES
         self.owner = owner
         self.setWindowTitle(tr('紧急暂停快捷键'))
         self.setMinimumWidth(350)
@@ -27,7 +28,10 @@ class EmergencyHotkeyDialog(QDialog):
         self.shortcut = QComboBox()
         self.shortcut.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.shortcut.setMinimumContentsLength(12)
-        for value in (DEFAULT_SHORTCUT, 'Ctrl+Shift+F10', 'Alt+Shift+F10'):
+        shortcuts = [DEFAULT_SHORTCUT, 'Ctrl+Shift+F10', 'Alt+Shift+F10']
+        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
+            shortcuts.extend(('Cmd+Alt+F10', 'Cmd+Shift+F10'))
+        for value in shortcuts:
             self.shortcut.addItem(value, value)
         if self.shortcut.findData(settings['shortcut']) < 0:
             self.shortcut.addItem(settings['shortcut'], settings['shortcut'])

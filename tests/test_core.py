@@ -95,7 +95,8 @@ def test_gallery_import_favorite_preserves_metadata(tmp_path):
 
 
 def test_hold_key_shared_by_two_buttons_uses_reference_counts():
-    action=WindowsActions(); sent=[]; action._send=lambda keys,down:sent.append((keys,down))
+    action=WindowsActions.__new__(WindowsActions); action.held={}
+    sent=[]; action._send=lambda keys,down:sent.append((keys,down))
     action.hold('Ctrl',True); action.hold('Ctrl',True); action.hold('Ctrl',False)
     assert action.held=={17:1}
     action.hold('Ctrl',False)
