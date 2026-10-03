@@ -93,7 +93,7 @@ DS5 蓝牙不会在本机直接列出标准音频输入。Sony 的标准兼容�
 .venv/bin/python scripts/probe_dualsense_mic.py --enable-mic --no-save-audio --seconds 5 --output /tmp/ds5-mic-format.json
 ```
 
-2026-10-03 实机测试：USB 连接时，macOS 将 DS5 列为音频输入；静音样本 RMS 约 23，说话样本 RMS 约 1,096。切换为蓝牙后，只读探测收到合法的 78 字节报告；开启麦克风 12 秒获得 518 个 CRC 合法、Opus 解码成功的音频包，关闭后复查没有音频标志。但 518 包只代表 5.18 秒声音，原先直接拼接导致播放语速明显加快。修正时间轴后，4 秒复测生成 4.00 秒 WAV，其中仅 168 个 10 毫秒音频包，覆盖率 42%；其余保留静音并明确判为 `INCOMPLETE_AUDIO`。蓝牙总报告率约 64–65 包/秒、音频包约 42 包/秒，而连续 10 毫秒音频需要约 100 包/秒；缺失内容无法靠修正 WAV 采样率恢复。此结果只证明蓝牙 HID 音频可解码，不证明蓝牙语音可用于识别或向 Codex／Antigravity 输入。后续须找到能提供完整音频流的采集路径；需要可靠收音时先用 USB 或 Mac 自身麦克风。
+2026-10-03 实机测试：USB 连接时，本机 macOS 将 DS5 列为音频输入；静音样本 RMS 约 23，说话样本 RMS 约 1,096。Sony 官方不承诺 Mac 支持手柄内置麦克风，这次本机 USB 成功不能推广到其他 Mac。[Sony 兼容说明](https://www.playstation.com/en-au/support/hardware/pair-dualsense-controller-bluetooth/) 切换为蓝牙后，只读探测收到合法的 78 字节报告；开启麦克风 12 秒获得 518 个 CRC 合法、Opus 解码成功的音频包，关闭后复查没有音频标志。但 518 包只代表 5.18 秒声音，原先直接拼接导致播放语速明显加快。修正时间轴后，4 秒复测生成 4.00 秒 WAV，其中仅 168 个 10 毫秒音频包，覆盖率 42%；其余保留静音并明确判为 `INCOMPLETE_AUDIO`。蓝牙总报告率约 64–65 包/秒、音频包约 42 包/秒，而连续 10 毫秒音频需要约 100 包/秒；缺失内容无法靠修正 WAV 采样率恢复。此结果只证明蓝牙 HID 音频可解码，不证明蓝牙语音可用于识别或向 Codex／Antigravity 输入。需要可靠收音时，可先使用 Mac 自身或外置 USB 麦克风；这只 Mac 上可再试 DS5 USB。
 
 ### 蓝牙包格式和传输排查
 
@@ -101,13 +101,15 @@ DS5 蓝牙不会在本机直接列出标准音频输入。Sony 的标准兼容�
 
 在 macOS 26.5.2 的这只 DS5 上，独立原生 IOHID 回调及其内核时间戳均约每 15 毫秒一次，与 SDL/Python 读取结果一致。增加 IOHID 队列至 512 项仍无改善；报告高四位序号逐包连续，而音频头的第二个字节频繁跳变。`extended_sequence_deltas` 与 `audio_header_counter_deltas` 只报告实际观察的模计数变化，不擅自将未知字段认定为确定的丢包位置。把麦克风控制间隔从 500 毫秒缩短到 10 毫秒、切换 ASR/聊天输入路由、以及对比公开项目的完整控制块（含全零触觉段），仍只获得约 42–43 个音频包/秒。另一次先发送带标签的音频路由初始化（仅选择内置 processed 输入，不改音量及静音状态），6 秒收到 253 个音频包，覆盖率 42.2%，结束关闭麦克风并恢复输入路由，仍无改善。此时没有证据把瓶颈归因于解码输出采样率或 Python 读取速度。[SDL macOS HID 实现](https://github.com/libsdl-org/SDL/blob/release-2.28.4/src/hidapi/mac/hid.c)、[ControlDeck 控制协议](https://github.com/ihansel/control-deck/blob/main/Sources/ControlDeck/DualSenseBluetoothAudioProtocol.swift)
 
-15 毫秒间隔与 Bluetooth Sniff 省电模式相符，但还未读取真实连接模式来确认。本机宿主进程的蓝牙授权为 `denied`，旧 IOBluetooth 接口因而报告手柄未连接及控制器关闭，这些结果不能用于调整链路。项目提供独立的只读诊断 `.app`，在自己的应用身份下申请一次标准系统权限；默认不申请权限，也不调用 HCI 写命令。授权不可用时跳过全部 IOBluetooth 查询；授权可用后只匹配已连接 DS5，报告模式及间隔，文件权限为 `0600`，不输出地址。原生 helper 的编译、签名与静态分析已通过。首次系统权限请求也返回 `denied`，因此没有执行真实连接模式查询；需要用户在「系统设置 → 隐私与安全性 → 蓝牙」允许 `GamePadStudio Bluetooth Diagnostics` 后继续验证。[Apple 蓝牙授权状态](https://developer.apple.com/documentation/corebluetooth/cbmanager/authorization)、[Apple 蓝牙设备框架](https://developer.apple.com/documentation/iobluetooth)
+系统蓝牙权限获准后，独立诊断应用只读匹配这只 DS5。空闲和麦克风开启期间的连接快照均为 `Active`（模式 0，间隔 0）；先前根据 15 毫秒 HID 间隔猜测 Sniff 省电模式，已被实测排除。25 秒不保存声音的采集得到 1,077 个有效 10 毫秒音频包，覆盖率 **43.1%**，全部报告高四位序号逐包连续；结束已写入麦克风关闭命令。Active 模式仍允许蓝牙 Central 按需轮询及链路重传，不能因此保证每 10 毫秒收到一个 HID 报告。IORegistry 中 `ReportInterval=8000` 微秒首次出现在 DS5 的 `IOHIDUserDevice`，随后传给 `IOHIDInterface` 和 `IOHIDEventDummyService`；前述父节点没有该键。Apple 的 `IOHIDInterface::handleReport` 收到报告后直接转发回调，不依据这个属性节流，因此不能把 8 毫秒元数据当作实际 15 毫秒报告的原因，也没有通过修改注册表属性提速的依据。[Apple IOHIDInterface 源码](https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDFamily/IOHIDInterface.cpp)
+
+要进一步区分 DS5／蓝牙链路与 macOS HID 转发，需同步比较匹配手柄的 HCI ACL 入包和 IOHID 内核回调；本机未安装 Apple PacketLogger，目前没有可靠的 HCI 包证据。Apple 的 macOS 蓝牙日志配置需开发者下载并可能需要重启；[Apple 论坛](https://developer.apple.com/forums/thread/761623)已有同为 macOS 26.5.2 的用户报告配置后仍抓不到包，因此尚不能承诺这条路径有效。没有实际 HCI 包证据时，不把瓶颈具体归责于手柄固件、射频或 macOS 的某一层。项目只读诊断 `.app` 不调用 HCI 写命令；授权不可用时跳过全部 IOBluetooth 查询，报告文件权限为 `0600`，不输出地址。该开发工具以 ad hoc 签名，重建会改变其签名标识，macOS 曾要求再次授权；最终正式分发应使用固定开发者签名。[Bluetooth SIG Baseband 规范](https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/Core-61/out/en/br-edr-controller/baseband-specification.html)、[Apple PacketLogger](https://developer.apple.com/bluetooth/)
 
 ```sh
 .venv/bin/python scripts/macos/build_bluetooth_diagnostics.py
 # 通过 LaunchServices 启动，读取独立应用的权限状态。
 open -n 'build/macos/GamePadStudio Bluetooth Diagnostics.app' --args --output /tmp/ds5-bt-link.jsonl
-# 需要用户在 macOS 系统对话框选择允许，之后只读取连接状态。
+# 初次运行时由用户在 macOS 系统对话框选择允许，之后只读取连接状态。
 open -n 'build/macos/GamePadStudio Bluetooth Diagnostics.app' --args --request-permission --output /tmp/ds5-bt-link-authorized.jsonl --observe-seconds 2
 ```
 
