@@ -56,11 +56,11 @@ def cmd_login(args):
     print('⏳ 等待手机 B 站 App 扫码确认中（有效时间 180 秒）...')
 
     def on_status_change(code, msg):
-        if code == 86038:
+        if code in (86101, 86038):
             print('   [等待] 请在手机 B 站 App 中扫码...')
         elif code == 86090:
-            print('   [已扫码] 手机端已扫描，请在手机上点击“确认登录”...')
-        elif code == 86039:
+            print('   [已扫码] 手机端已扫描，请在手机上点击“确认登录”！')
+        elif code in (86039,):
             print('   [过期] 二维码已超时失效。')
         elif code != 0:
             print(f'   [状态] {msg} ({code})')

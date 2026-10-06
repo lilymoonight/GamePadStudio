@@ -214,15 +214,15 @@ def poll_qrcode(
                     'message': '登录成功',
                     'credentials': creds,
                 }
-            elif code == 86038:
-                # 二维码未扫码
+            elif code in (86101, 86038):
+                # 二维码未扫码，持续等待
                 pass
             elif code == 86090:
-                # 已扫码未确认
+                # 已扫码未确认，持续等待手机端确认
                 pass
-            elif code == 86039:
+            elif code in (86039,):
                 # 二维码已失效
-                return {'ok': False, 'code': 86039, 'message': '二维码已过期，请重新生成'}
+                return {'ok': False, 'code': code, 'message': '二维码已过期，请重新生成'}
             else:
                 return {'ok': False, 'code': code, 'message': msg or f'未知状态 ({code})'}
 
