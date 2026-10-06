@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .glass import AppleGroup, AppleRow, TOKENS
+from .glass import AppleGroup, AppleRow, TOKENS, Toggle
 from .i18n import tr
 
 
@@ -177,8 +177,8 @@ class AntigravityPage(QWidget):
         hdr_trigger.setStyleSheet(f"color: {TOKENS['cyan']}; font-size: 10.5px; font-weight: 700; padding: 8px 16px 2px 16px;")
         card_trigger.vbox.addWidget(hdr_trigger)
 
-        # 直达开关
-        self.trigger_enable_cb = QCheckBox(tr('开启手柄全局直达'))
+        # 直达开关（可移动滑块开关：左侧打开，右侧关闭）
+        self.trigger_enable_cb = Toggle()
         self.trigger_enable_cb.stateChanged.connect(self._save_trigger_settings)
         card_trigger.add_row(AppleRow(
             'controller', (TOKENS['cyan'], TOKENS['accent_lo']),

@@ -798,7 +798,7 @@ class KbmFeelDialog(QDialog):
         body.addWidget(response)
 
         walking, walking_layout = card()
-        self.walk_toggle = QCheckBox(tr('轻推慢走'))
+        self.walk_toggle = Toggle(tr('轻推慢走'))
         self.walk_toggle.setChecked(self.can_walk and 'walk_press' in thresholds)
         self.walk_toggle.setEnabled(self.can_walk)
         walking_layout.addWidget(self.walk_toggle)
@@ -1125,7 +1125,7 @@ class VirtualKbmPage(QWidget):
         option_label = label(tr('输入选项'), 'caption')
         option_label.setFixedHeight(36)
         options.addWidget(option_label)
-        self.mouse_toggle = QCheckBox(tr('右摇杆控制鼠标'))
+        self.mouse_toggle = Toggle(tr('右摇杆控制鼠标'))
         self.mouse_toggle.setFixedHeight(36)
         self.mouse_toggle.toggled.connect(lambda enabled: owner.mapping_change({'op': 'options', 'profile': self.current_scheme(), 'options': {'right_stick_mouse': enabled}}))
         options.addWidget(self.mouse_toggle)
@@ -1152,10 +1152,10 @@ class VirtualKbmPage(QWidget):
         options.addWidget(self.curves_btn)
         self.refresh_curve_actions(owner.snapshot)
 
-        self.preview_toggle = QCheckBox(tr('安全试按'))
+        self.preview_toggle = Toggle(tr('安全试按'))
         self.preview_toggle.setFixedHeight(36)
         self.preview_toggle.setChecked(False)  # 默认关闭安全试按，确保启动即可畅快操作
-        self.preview_toggle.setToolTip(tr('勾选后，当前映射窗口有焦点时仅回显，不向系统发送键鼠；取消勾选或切至游戏即可正常输出。'))
+        self.preview_toggle.setToolTip(tr('开启后，当前映射窗口有焦点时仅回显，不向系统发送键鼠；关闭或切至游戏即可正常输出。'))
         options.addWidget(self.preview_toggle)
         toolbar_layout.addLayout(options)
         layout.addWidget(toolbar)
@@ -1623,7 +1623,7 @@ class VirtualKbmPage(QWidget):
             if not hasattr(self,'cloaking_dialog'):
                 self.cloaking_dialog = QDialog(self); self.cloaking_dialog.setWindowTitle(tr('设备隐身'))
                 layout = QVBoxLayout(self.cloaking_dialog)
-                self.cloaking_toggle = QCheckBox(tr('向其他应用隐藏手柄原始输入'))
+                self.cloaking_toggle = Toggle(tr('向其他应用隐藏手柄原始输入'))
                 self.cloaking_status_label = QLabel(); self.cloaking_status_label.setWordWrap(True)
                 layout.addWidget(self.cloaking_status_label); layout.addWidget(self.cloaking_toggle)
                 self.cloaking_toggle.toggled.connect(self.toggle_cloaking)
@@ -1636,7 +1636,7 @@ class VirtualKbmPage(QWidget):
             self.hidhide = HidHideClient()
             self.cloaking_dialog = QDialog(self); self.cloaking_dialog.setWindowTitle('设备隐身')
             layout = QVBoxLayout(self.cloaking_dialog)
-            self.cloaking_toggle = QCheckBox('向其他应用隐藏手柄原始输入')
+            self.cloaking_toggle = Toggle('向其他应用隐藏手柄原始输入')
             self.cloaking_status_label = QLabel(); self.cloaking_status_label.setWordWrap(True)
             self.btn_install_driver = QPushButton('打开 HidHide 驱动页面')
             self.btn_install_driver.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(HIDHIDE_RELEASE_URL)))
