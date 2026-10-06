@@ -29,7 +29,8 @@ HOLD_ACTIONS = ('hold', 'mouse_hold', 'gamepad_button', 'gamepad_chord', 'gamepa
 ACTIONS = {'none', 'suppress', 'hold', 'shortcut', 'mouse_hold', 'mouse_click', 'wheel', 'capture',
            'replay_record', 'record_toggle', 'home', 'gallery', 'launch',
            'volume_mute', 'volume_up', 'volume_down', 'media',
-           'gamepad_button', 'gamepad_chord', 'gamepad_turbo', 'gamepad_macro'}
+           'gamepad_button', 'gamepad_chord', 'gamepad_turbo', 'gamepad_macro',
+           'antigravity'}
 
 
 def canonical_trigger(value):
@@ -49,9 +50,10 @@ def validate_binding(binding):
     if not isinstance(binding, dict) or binding.get('action', 'none') not in ACTIONS:
         raise ValueError('未知映射动作')
     action = binding.get('action', 'none')
-    if 'mode' in binding and (action not in ('hold', 'mouse_hold')
-                              or type(binding['mode']) is not str
-                              or binding['mode'] not in ('hold', 'toggle')):
+    if action in ('hold', 'mouse_hold'):
+        if 'mode' in binding and (type(binding['mode']) is not str or binding['mode'] not in ('hold', 'toggle')):
+            raise ValueError('键鼠按住模式应为按住或切换保持')
+    elif action != 'antigravity' and 'mode' in binding:
         raise ValueError('键鼠按住模式应为按住或切换保持')
     if action == 'gamepad_button' and not str(binding.get('value', '')).strip():
         raise ValueError('请选择目标手柄按键')
@@ -187,6 +189,19 @@ def effective_mappings(config, state=None, profile_name=None):
             mappings.setdefault('5', {'short': {'action': 'home'}, 'long': {'action': 'none'}})
         if 15 in available:
             mappings.setdefault('15', {'short': {'action': 'capture'}, 'long': {'action': 'replay_record'}})
+    ag_link = config.get('antigravity_link')
+    if ag_link and ag_link.get('enabled'):
+        trig = str(ag_link.get('trigger_key', '4'))
+        gesture = ag_link.get('trigger_gesture', 'short')
+        other_gesture = 'long' if gesture == 'short' else 'short'
+        target_bundle = ag_link.get('target_bundle_id', 'com.google.antigravity')
+        action_type = ag_link.get('action_type', 'focus')
+        existing = mappings.get(trig, {})
+        entry = copy.deepcopy(existing)
+        entry[gesture] = {'action': 'antigravity', 'target': target_bundle, 'mode': action_type}
+        if other_gesture not in entry:
+            entry[other_gesture] = {'action': 'none'}
+        mappings[trig] = entry
     return mappings
 
 

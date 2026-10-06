@@ -152,7 +152,7 @@ ACTION_NAMES = {'none': '保留原始输入', 'capture': '保存截图', 'galler
                 'gamepad_chord': '手柄多键组合宏',
                 'gamepad_turbo': '手柄高频连发 (Turbo)',
                 'gamepad_macro': '手柄连招序列宏'}
-ACTION_NAMES.update({'mouse_hold': '按住鼠标按键', 'mouse_click': '点击鼠标按键', 'wheel': '鼠标滚轮'})
+ACTION_NAMES.update({'mouse_hold': '按住鼠标按键', 'mouse_click': '点击鼠标按键', 'wheel': '鼠标滚轮', 'antigravity': '唤起 Antigravity 对话框'})
 ACTION_NAMES['suppress'] = '不触发（组合键前缀）'
 
 
@@ -171,6 +171,7 @@ def get_action_names(lang=None):
                 'gamepad_turbo': 'Gamepad Turbo (Rapid Fire)',
                 'gamepad_macro': 'Gamepad Sequence Macro',
                 'mouse_hold': 'Hold Mouse Button', 'mouse_click': 'Click Mouse Button', 'wheel': 'Mouse Wheel',
+                'antigravity': 'Activate Antigravity Composer',
                 'suppress': 'Suppress (Chord Prefix)'}
     return ACTION_NAMES
 
@@ -250,6 +251,8 @@ def default_config(root: Path):
             'capture_sound_enabled': True, 'capture_haptics_enabled': True,
             'haptic_engine_enabled': True, 'haptic_intensity': 1.0, 'haptic_profile': 'crisp',
             'device_cloaking_enabled': True,
+            'antigravity_link': {'enabled': False, 'target_bundle_id': 'com.google.antigravity',
+                                 'trigger_key': '4', 'trigger_gesture': 'short', 'action_type': 'focus'},
             **{key: copy.deepcopy(DEVICE_SETTING_DEFAULTS[key])
                for key in (*CURVE_CHANNELS, 'trigger_rumble_enabled')},
             'gamebar_shield_enabled': False, 'gamebar_shield_backup': {}}
