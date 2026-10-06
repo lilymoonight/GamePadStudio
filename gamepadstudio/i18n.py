@@ -45,6 +45,8 @@ def detect_system_language() -> str:
 def init_language(pref: Optional[str] = None):
     """Initialize language from preference ('auto', 'zh', 'en')."""
     global _CURRENT_PREFERENCE, _CURRENT_LANG
+    if pref and pref.lower().startswith('zh'):
+        pref = 'zh'
     if pref in ('zh', 'en', 'auto'):
         _CURRENT_PREFERENCE = pref
     else:
@@ -102,6 +104,7 @@ TRANSLATIONS: Dict[str, str] = {
     '最大化 / 还原': 'Maximize / Restore',
     '关闭窗口': 'Close Window',
     '关闭': 'Close',
+    '打开': 'ON',
     '帮助': 'Help',
 
     # Status Badges

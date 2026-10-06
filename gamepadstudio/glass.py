@@ -8,8 +8,10 @@ from functools import lru_cache
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QByteArray, QEvent, QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import (QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap)
+from PySide6.QtCore import (Property, QByteArray, QEasingCurve, QEvent, QPointF,
+                            QPropertyAnimation, QRectF, QSize, Qt)
+from PySide6.QtGui import (QColor, QFont, QIcon, QLinearGradient, QPainter,
+                           QPainterPath, QPen, QPixmap)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFrame, QLabel,
                                QMainWindow, QPushButton, QWidget,
@@ -809,10 +811,175 @@ class Indicator(QLabel):
 
 
 class Toggle(QCheckBox):
-    """Modern iOS / GamepadTester switch toggle."""
+    """Tactile sliding pill switch button with movable thumb (Left: 打开, Right: 关闭)."""
+
+    def __init__(self, text='', parent=None, on_text=None, off_text=None, show_label=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self._custom_on = on_text
+        self._custom_off = off_text
+        self._show_label_override = show_label
+        # Position: 0.0 = Left (打开 / ON), 1.0 = Right (关闭 / OFF)
+        self._pos = 0.0 if self.isChecked() else 1.0
+        self._anim = None
+        self._is_dragging = False
+        self._press_pos = None
+        self._hover = False
+
+        self._track_w = 94.0
+        self._track_h = 28.0
+
+        self.toggled.connect(self._on_toggled)
+
+    def _should_show_label(self) -> bool:
+        if self._show_label_override is not None:
+            return self._show_label_override
+        txt = self.text().strip()
+        if not txt or txt in ('启用', 'Enable', '开启', 'Enabled', '打开', 'ON'):
+            return False
+        return True
+
+    def _get_labels(self):
+        on = self._custom_on
+        off = self._custom_off
+        if not on:
+            try:
+                from gamepadstudio.i18n import get_language, tr
+                on = 'ON' if get_language() == 'en' else tr('打开')
+            except Exception:
+                on = '打开'
+        if not off:
+            try:
+                from gamepadstudio.i18n import get_language, tr
+                off = 'OFF' if get_language() == 'en' else tr('关闭')
+            except Exception:
+                off = '关闭'
+        return on, off
+
+    def get_thumb_pos(self) -> float:
+        return self._pos
+
+    def set_thumb_pos(self, val: float):
+        self._pos = max(0.0, min(1.0, float(val)))
+        self.update()
+
+    thumb_pos = Property(float, get_thumb_pos, set_thumb_pos)
+
+    def _on_toggled(self, checked: bool):
+        target = 0.0 if checked else 1.0
+        if self.isVisible():
+            if self._anim is None:
+                self._anim = QPropertyAnimation(self, b"thumb_pos", self)
+                self._anim.setDuration(160)
+                self._anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._anim.stop()
+            self._anim.setStartValue(self._pos)
+            self._anim.setEndValue(target)
+            self._anim.start()
+        else:
+            self.set_thumb_pos(target)
+
+    def setChecked(self, checked: bool):
+        super().setChecked(checked)
+        if not self.isVisible():
+            self._pos = 0.0 if checked else 1.0
+            self.update()
+
+    def _track_rect(self) -> QRectF:
+        y = (self.height() - self._track_h) / 2.0
+        if self._should_show_label():
+            x = float(self.width()) - self._track_w - 2.0
+        else:
+            x = (float(self.width()) - self._track_w) / 2.0
+            if x < 2.0:
+                x = 2.0
+        return QRectF(x, y, self._track_w, self._track_h)
 
     def sizeHint(self):
-        return QSize(self.fontMetrics().horizontalAdvance(self.text()) + 56, 34)
+        if self._should_show_label():
+            text_w = self.fontMetrics().horizontalAdvance(self.text())
+            return QSize(int(text_w + 14 + self._track_w + 4), 34)
+        return QSize(int(self._track_w + 4), 32)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def enterEvent(self, event):
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.EnabledChange:
+            self.setCursor(Qt.PointingHandCursor if self.isEnabled() else Qt.ArrowCursor)
+        super().changeEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._is_dragging = False
+            self._press_pos = event.position()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press_pos and (event.buttons() & Qt.LeftButton):
+            track = self._track_rect()
+            if track.contains(self._press_pos):
+                diff = (event.position() - self._press_pos).manhattanLength()
+                if diff > 4:
+                    self._is_dragging = True
+                    ratio = (event.position().x() - track.left()) / track.width()
+                    self.set_thumb_pos(max(0.0, min(1.0, ratio)))
+                    return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            track = self._track_rect()
+            if self._is_dragging:
+                self._is_dragging = False
+                self._press_pos = None
+                new_state = (self._pos < 0.5)
+                if self.isChecked() == new_state:
+                    self._on_toggled(new_state)
+                else:
+                    self.setChecked(new_state)
+                event.accept()
+                return
+
+            self._press_pos = None
+            pos = event.position()
+            if track.contains(pos):
+                # Click inside track: left half is 打开, right half is 关闭
+                if pos.x() < track.center().x():
+                    self.setChecked(True)
+                else:
+                    self.setChecked(False)
+                event.accept()
+                return
+            elif self._should_show_label():
+                self.toggle()
+                event.accept()
+                return
+
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Select):
+            self.toggle()
+            event.accept()
+        elif event.key() in (Qt.Key_Left, Qt.Key_Up):
+            self.setChecked(True)
+            event.accept()
+        elif event.key() in (Qt.Key_Right, Qt.Key_Down):
+            self.setChecked(False)
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
     def hitButton(self, pos):
         return self.rect().contains(pos)
@@ -821,34 +988,90 @@ class Toggle(QCheckBox):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         if not self.isEnabled():
-            painter.setOpacity(0.40)
-        y = self.height() / 2
-        track = QRectF(1, y - 11, 40, 22)
-        painter.setPen(Qt.NoPen)
-        track_color = QColor(TOKENS['green']) if self.isChecked() else QColor(TOKENS['elevated'])
-        painter.setBrush(track_color)
-        painter.drawRoundedRect(track, 11, 11)
+            painter.setOpacity(0.42)
 
-        # Track border
-        painter.setPen(QPen(QColor(TOKENS['border_hi']), 1))
+        track = self._track_rect()
+        r_track = track.height() / 2.0
+
+        # Optional external label
+        if self._should_show_label():
+            text_rect = QRectF(2, 0, track.left() - 8, self.height())
+            painter.setFont(self.font())
+            painter.setPen(QColor(TOKENS['ink'] if self.isEnabled() else TOKENS['ink_dim']))
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, self.text())
+
+        # 1. Outer Track Base (Milled recessed groove)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor('#151311'))
+        painter.drawRoundedRect(track, r_track, r_track)
+
+        # 2. Track Border
+        border_col = QColor(TOKENS['border_hi']).lighter(125) if self._hover else QColor(TOKENS['border_hi'])
+        painter.setPen(QPen(border_col, 1.0))
         painter.setBrush(Qt.NoBrush)
-        painter.drawRoundedRect(track, 11, 11)
+        painter.drawRoundedRect(track, r_track, r_track)
 
-        # Thumb
-        thumb_x = 29 if self.isChecked() else 11
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 40))
-        painter.drawEllipse(QPointF(thumb_x, y + 1), 9, 9)
-        painter.setBrush(QColor('#ffffff'))
-        painter.drawEllipse(QPointF(thumb_x, y), 8.5, 8.5)
-
-        # Text
-        painter.setPen(QColor(TOKENS['ink'] if self.isEnabled() else TOKENS['ink_dim']))
-        painter.drawText(QRectF(50, 0, self.width() - 50, self.height()), Qt.AlignVCenter, self.text())
+        # 3. Focus Ring
         if self.hasFocus():
-            painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(QColor(TOKENS['accent']), 1.5))
-            painter.drawRoundedRect(track.adjusted(-2, -2, 2, 2), 13, 13)
+            painter.drawRoundedRect(track.adjusted(-2, -2, 2, 2), r_track + 2, r_track + 2)
+
+        # 4. Underlying labels for unselected side
+        on_text, off_text = self._get_labels()
+        half_w = track.width() / 2.0
+        left_box = QRectF(track.left(), track.top(), half_w, track.height())
+        right_box = QRectF(track.left() + half_w, track.top(), half_w, track.height())
+
+        font = QFont(self.font())
+        font.setPixelSize(11)
+        font.setBold(True)
+        painter.setFont(font)
+
+        painter.setPen(QColor(TOKENS['ink_dim']))
+        # Right label ("关闭") shown dimmed if thumb is to the left
+        if self._pos <= 0.6:
+            painter.drawText(right_box, Qt.AlignCenter, off_text)
+        # Left label ("打开") shown dimmed if thumb is to the right
+        if self._pos >= 0.4:
+            painter.drawText(left_box, Qt.AlignCenter, on_text)
+
+        # 5. Movable Button (Thumb Pill)
+        pad = 2.5
+        thumb_h = track.height() - 2 * pad
+        thumb_w = half_w - pad
+        thumb_r = thumb_h / 2.0
+        max_travel = track.width() - 2 * pad - thumb_w
+        thumb_x = track.left() + pad + self._pos * max_travel
+        thumb_rect = QRectF(thumb_x, track.top() + pad, thumb_w, thumb_h)
+
+        # Physical drop shadow
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 70))
+        painter.drawRoundedRect(thumb_rect.translated(0, 1.2), thumb_r, thumb_r)
+
+        # Movable button styling
+        if self._pos <= 0.5:
+            # Left = 打开 (ON): Emerald green tactile button
+            grad = QLinearGradient(thumb_rect.topLeft(), thumb_rect.bottomLeft())
+            grad.setColorAt(0.0, QColor('#10b981'))
+            grad.setColorAt(1.0, QColor('#059669'))
+            painter.setBrush(grad)
+            painter.setPen(QPen(QColor('#34d399'), 0.8))
+            painter.drawRoundedRect(thumb_rect, thumb_r, thumb_r)
+
+            painter.setPen(QColor('#ffffff'))
+            painter.drawText(thumb_rect, Qt.AlignCenter, on_text)
+        else:
+            # Right = 关闭 (OFF): Elevated milled dark graphite button
+            grad = QLinearGradient(thumb_rect.topLeft(), thumb_rect.bottomLeft())
+            grad.setColorAt(0.0, QColor('#38332e'))
+            grad.setColorAt(1.0, QColor('#27231f'))
+            painter.setBrush(grad)
+            painter.setPen(QPen(QColor('#4e473e'), 1.0))
+            painter.drawRoundedRect(thumb_rect, thumb_r, thumb_r)
+
+            painter.setPen(QColor('#f7f4ed'))
+            painter.drawText(thumb_rect, Qt.AlignCenter, off_text)
 
 
 class GlassPanel(QFrame):
