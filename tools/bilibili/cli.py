@@ -110,6 +110,10 @@ def cmd_check(args):
 
         print(f"\n【序号 {idx}】 来自 @{user} ({t_str})")
         print(f"   📺 所属内容: 《{title}》")
+        if item.get('comment_url'):
+            print(f"   🌐 评论直达: {item['comment_url']}")
+        elif item.get('uri'):
+            print(f"   🌐 视频链接: {item['uri']}")
         if target:
             print(f"   💬 引用原句: “{target}”")
         print(f"   📝 网友评论: {content}")

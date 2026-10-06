@@ -119,6 +119,9 @@ class BilibiliClient:
                 effective_root = root_id if root_id else source_id
                 effective_parent = source_id
 
+                base_uri = item.get('uri', '')
+                direct_url = f"{base_uri}#reply{source_id}" if base_uri and source_id else base_uri
+
                 parsed_entry = {
                     'index': idx,
                     'id': raw.get('id', idx),
@@ -129,7 +132,8 @@ class BilibiliClient:
                     'title': item.get('title') or '视频/动态',
                     'content': item.get('source_content', '').strip(),
                     'target_content': item.get('target_reply_content', '').strip(),
-                    'uri': item.get('uri', ''),
+                    'uri': base_uri,
+                    'comment_url': direct_url,
                     # Routing IDs for reply
                     'oid': oid,
                     'type': business_id,
