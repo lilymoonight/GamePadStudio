@@ -191,10 +191,11 @@ class Studio(GlassWindow):
         brand_copy.addWidget(label('STUDIO', 'brandCaption'))
         brand_row.addWidget(self.brand_copy, 1)
         side.addLayout(brand_row)
-        side.addSpacing(24)
+        side.addSpacing(14)
         self.nav_sections = []
         self.nav_titles = {}
         for group, items in [('工作空间', [(0, '设备概览'), (1, '按键配置'), (6, '虚拟键鼠')]),
+                             ('AI 联动', [(7, 'Antigravity')]),
                              ('设备与内容', [(5, '控制器库'), (2, '截图图库'), (3, '硬件遥测')])]:
             heading = label(tr(group), 'navSection')
             self.nav_sections.append(heading)
@@ -202,7 +203,7 @@ class Studio(GlassWindow):
             for i, title in items:
                 b = QPushButton(tr(title))
                 b.setObjectName('sidebarNav')
-                b.setIcon(glyph({5: 'grid', 0: 'controller', 1: 'mapping', 6: 'keyboard', 2: 'photos', 3: 'wave'}[i]))
+                b.setIcon(glyph({5: 'grid', 0: 'controller', 1: 'mapping', 6: 'keyboard', 2: 'photos', 3: 'wave', 7: 'sparkle'}[i]))
                 b.setIconSize(QSize(20, 20))
                 b.setCursor(Qt.PointingHandCursor)
                 b.setFixedHeight(44)
@@ -213,7 +214,7 @@ class Studio(GlassWindow):
                 side.addWidget(b)
                 self.nav[i] = b
                 self.nav_titles[i] = title
-            side.addSpacing(18)
+            side.addSpacing(10)
 
         side.addStretch()
 
@@ -221,7 +222,7 @@ class Studio(GlassWindow):
         rail_sep.setFixedHeight(1)
         rail_sep.setStyleSheet(f"background: {TOKENS['border']};")
         side.addWidget(rail_sep)
-        side.addSpacing(10)
+        side.addSpacing(8)
 
         for i, symbol, title, callback in [(4, 'settings', '系统设置', lambda: self.navigate(4)),
                                             (-1, 'help', '使用指南', self.show_help)]:
@@ -321,6 +322,7 @@ class Studio(GlassWindow):
         self.stack.addWidget(self.controllers)
         self.virtual_kbm_page = VirtualKbmPage(self, store=self.store)
         self.stack.addWidget(self.virtual_kbm_page)
+        self.build_antigravity()
         foot=QHBoxLayout();self.notice=label(tr('映射运行中') if self.enabled else tr('映射已暂停'),'footerStatus');foot.addWidget(self.notice,1)
         self.fullscreen_hint=label(tr('F11 切换全屏 · Esc 返回窗口'), 'footerStatus')
         foot.addWidget(self.fullscreen_hint)
@@ -1326,6 +1328,11 @@ class Studio(GlassWindow):
         self._update_replay_hud()
         self.stack.addWidget(scroll(page))
 
+    def build_antigravity(self):
+        from .antigravity_ui import AntigravityPage
+        self.antigravity_page = AntigravityPage(self)
+        self.stack.addWidget(scroll(self.antigravity_page))
+
     def _update_replay_hud(self):
         try:
             from .replay_service import calculate_estimated_ram_gb
@@ -1817,20 +1824,22 @@ class Studio(GlassWindow):
         text.setText(display(slider.value())); slider.valueChanged.connect(change); layout.addWidget(text); layout.addWidget(slider)
 
     def navigate(self,index):
-        headings = ['设备概览','按键配置','截图图库','硬件遥测','系统设置','控制器库','虚拟键鼠']
+        headings = ['设备概览','按键配置','截图图库','硬件遥测','系统设置','控制器库','虚拟键鼠','Antigravity 联动']
         descriptions = ['查看设备状态，调整配置并快速进入常用操作。',
                         '选择手柄按键，配置短按、长按与组合动作。',
                         '回看游戏截图与精彩回放，收藏值得保留的瞬间。',
                         '检查按键、摇杆和扳机的实时响应。',
                         '管理捕获、触觉反馈与后台服务，修改后自动保存。',
                         '连接设备，选择你的手柄并进入工作空间。',
-                        '点击目标按键，选择或录入手柄按键、触摸手势。']
+                        '点击目标按键，选择或录入手柄按键、触摸手势。',
+                        '通过手柄按键探测并唤起 Antigravity，激活对话框焦点并进行语音输入。']
         self.stack.setCurrentIndex(index)
         self.page_heading.setText(tr(headings[index]))
         self.page_description.setText(tr(descriptions[index]))
         for i,b in self.nav.items(): b.setChecked(i==index)
         if index==2: self.refresh_gallery()
         if index==4: self.refresh_recording_displays()
+        if index==7 and hasattr(self, 'antigravity_page'): self.antigravity_page.refresh_status()
         if hasattr(self, 'virtual_kbm_page'):
             if index == 6:
                 self.virtual_kbm_page.refresh_display()
@@ -2229,7 +2238,21 @@ class Studio(GlassWindow):
             self.navigate(2 if action=='gallery' else 0); self.show_home()
         elif action=='shortcut': self.actions.shortcut(binding['value'])
         elif action=='launch': launch_command(binding['executable'],binding.get('arguments',''))
+        elif action=='antigravity': self.trigger_antigravity(binding)
         else: self.actions.media(action)
+
+    def trigger_antigravity(self, binding=None):
+        if hasattr(self, 'antigravity_page'):
+            self.antigravity_page.trigger_from_gamepad(binding)
+        elif sys.platform == 'darwin':
+            try:
+                from .voice_entry import VoiceEntryService
+                service = VoiceEntryService()
+                target = (binding or {}).get('target') or self.config.get('antigravity_link', {}).get('target_bundle_id', 'com.google.antigravity')
+                service.activate(target)
+                self.notify(tr('已唤起 Antigravity 并激活输入框'))
+            except Exception as exc:
+                self.notify(f"Antigravity: {exc}")
 
     def record_toggle(self):
         if self.remote:
@@ -3116,6 +3139,10 @@ class Studio(GlassWindow):
             self.notify(self.voice_entry_group.status_label.text())
             event.ignore()
             return
+        if hasattr(self, 'antigravity_page') and not self.antigravity_page.close_service():
+            self.navigate(7)
+            event.ignore()
+            return
         if self.cleanup():
             event.accept()
         else:
@@ -3124,6 +3151,8 @@ class Studio(GlassWindow):
     def cleanup(self):
         if self.closed:return True
         if hasattr(self,'voice_entry_group') and not self.voice_entry_group.close_service():
+            return False
+        if hasattr(self,'antigravity_page') and not self.antigravity_page.close_service():
             return False
         self.closed=True
         self.enabled=False
