@@ -1,0 +1,5 @@
+.credentials.json
+.cache_replies.json
+qr_*.png
+__pycache__/
+*.pyc
