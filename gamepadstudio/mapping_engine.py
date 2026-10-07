@@ -276,7 +276,8 @@ def output_tokens(binding):
 
 INPUT_THRESHOLD_DEFAULTS = {'trigger_press': .55, 'trigger_release': .35,
                             'stick_press': .50, 'stick_release': .35,
-                            'outer_press': .85, 'outer_release': .75, 'chord_window': .08}
+                            'outer_press': .85, 'outer_release': .75, 'chord_window': .08,
+                            'suppress_ls_up': 'off'}
 
 
 def input_thresholds(settings=None):
@@ -306,6 +307,12 @@ def input_thresholds(settings=None):
                     result.update({'walk_press': press, 'walk_release': release})
         except (TypeError, ValueError, OverflowError):
             pass
+    suppress_up = settings.get('suppress_ls_up', 'off') if isinstance(settings, dict) else 'off'
+    if suppress_up is True:
+        suppress_up = 'filter'
+    elif suppress_up not in ('filter', 'disable'):
+        suppress_up = 'off'
+    result['suppress_ls_up'] = suppress_up
     window = settings.get('chord_window', result['chord_window'])
     if isinstance(window, (int, float)) and not isinstance(window, bool):
         try:
@@ -335,9 +342,20 @@ class InputNormalizer:
         current = {str(b) for b in (state or {}).get('buttons', [])}
         axes = (state or {}).get('axes', [0.] * 6)
         axes = list(axes) + [0.] * (6 - len(axes))
+        suppress_up = thresholds.get('suppress_ls_up', 'off')
+        ls_up_val = -axes[1]
+        if suppress_up == 'disable':
+            ls_up_val = -1.0
+        elif suppress_up == 'filter' and abs(axes[0]) > 0.25:
+            # During horizontal roll, require a much deeper upward push (>= 0.82)
+            # to avoid false jumps during 236/214 motions
+            threshold_normal = thresholds['stick_release' if 'LS:up' in self.active else 'stick_press']
+            if ls_up_val < max(threshold_normal * 1.5, 0.82):
+                ls_up_val = -1.0
+
         values = {'LT': evaluate_curve(axes[4], self.trigger_curves['left']),
                   'RT': evaluate_curve(axes[5], self.trigger_curves['right']),
-                  'LS:up': -axes[1], 'LS:down': axes[1],
+                  'LS:up': ls_up_val, 'LS:down': axes[1],
                   'LS:left': -axes[0], 'LS:right': axes[0], 'RS:up': -axes[3],
                   'RS:down': axes[3], 'RS:left': -axes[2], 'RS:right': axes[2]}
         for key, value in values.items():

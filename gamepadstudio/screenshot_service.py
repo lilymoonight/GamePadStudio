@@ -335,6 +335,52 @@ def _take_macos_screenshot(save_dir, mode):
     return str(path)
 
 
+def _try_take_windows_hdr_screenshot(bbox, path, title, now, mode):
+    """Attempt lossless HDR capture and tone-mapping to SDR sRGB if the monitor has HDR enabled."""
+    if sys.platform != 'win32':
+        return None
+    try:
+        from .display_info import enumerate_displays, capture_display_info
+        from .hdr_capture import resolve_display_color, build_hdr_capture_plan
+        from .replay_service import get_ffmpeg_path
+        import subprocess
+
+        ffmpeg = get_ffmpeg_path()
+        if not ffmpeg:
+            return None
+        displays = enumerate_displays()
+        touched = capture_display_info(bbox, displays)['displays']
+        if len(touched) != 1:
+            return None
+        display = resolve_display_color(touched[0], bbox) if touched[0].get('hdr_enabled') is None else touched[0]
+        if not display.get('hdr_enabled'):
+            return None
+        plan = build_hdr_capture_plan(bbox, display, fps=30, transfer='srgb')
+        cmd = [ffmpeg, *plan.capture_args]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            raw_fp16 = proc.stdout.read(plan.frame_bytes)
+            proc.terminate()
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        if len(raw_fp16) != plan.frame_bytes:
+            return None
+        sdr_rgb = plan.convert_frame(raw_fp16)
+        mss.tools.to_png(sdr_rgb, (plan.width, plan.height), output=str(path))
+        metadata = dict(title=title, created=now.isoformat(), width=plan.width, height=plan.height,
+                        mode=mode, favorite=False, hdr_capture=True, tone_mapped=True,
+                        capture_method='DXGI FP16')
+        embed_png_metadata(path, metadata)
+        return str(path)
+    except Exception:
+        return None
+
+
 def take_screenshot(save_dir, toast_duration_ms=0, mode='game'):
     if sys.platform == 'darwin':
         from .macos_permissions import screen_capture_permission_status
@@ -366,6 +412,11 @@ def take_screenshot(save_dir, toast_duration_ms=0, mode='game'):
                 bbox = get_target_monitor_bbox(capture, mode)
         else:
             bbox = get_target_monitor_bbox(capture, mode)
+
+        if sys.platform == 'win32':
+            hdr_path = _try_take_windows_hdr_screenshot(bbox, path, title, now, mode)
+            if hdr_path:
+                return hdr_path
 
         shot = capture.grab(bbox)
         mss.tools.to_png(shot.rgb, shot.size, output=str(path))

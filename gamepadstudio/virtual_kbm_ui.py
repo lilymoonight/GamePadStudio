@@ -788,6 +788,18 @@ class KbmFeelDialog(QDialog):
                 row.addLayout(column, 1)
                 self.input_fields[key] = field
             response_form.addRow(tr(title), pair)
+        if self.has_stick:
+            self.suppress_ls_up = QComboBox()
+            self.suppress_ls_up.addItem(tr('正常响应 (默认)'), 'off')
+            self.suppress_ls_up.addItem(tr('搓招防误跳 (横推/斜推时不轻易跳起)'), 'filter')
+            self.suppress_ls_up.addItem(tr('禁用摇杆向上 (Hitbox/独立跳跃键流派)'), 'disable')
+            cur_suppress = thresholds.get('suppress_ls_up', 'off')
+            if cur_suppress is True:
+                cur_suppress = 'filter'
+            idx = max(0, self.suppress_ls_up.findData(cur_suppress))
+            self.suppress_ls_up.setCurrentIndex(idx)
+            self.suppress_ls_up.setToolTip(tr('格斗游戏搓招（前下后 236/214）时防止因摇杆划过上半区而误触发向上跳跃。'))
+            response_form.addRow(tr('格斗防串跳'), self.suppress_ls_up)
         self.chord_window = QSpinBox()
         self.chord_window.setRange(20, 200)
         self.chord_window.setSuffix(' ms')
@@ -878,6 +890,12 @@ class KbmFeelDialog(QDialog):
                        for key in ('stick_press', 'stick_release', 'trigger_press', 'trigger_release')
                        if key in self.input_fields})
         inputs['chord_window'] = self.chord_window.value() / 1000
+        if hasattr(self, 'suppress_ls_up'):
+            suppress_val = self.suppress_ls_up.currentData()
+            if suppress_val and suppress_val != 'off':
+                inputs['suppress_ls_up'] = suppress_val
+            else:
+                inputs.pop('suppress_ls_up', None)
         for key in ('walk_press', 'walk_release'):
             if not self.has_walk:
                 continue

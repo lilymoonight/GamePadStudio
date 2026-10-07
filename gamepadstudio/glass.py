@@ -714,13 +714,19 @@ class LedSwatch(QPushButton):
         painter.setPen(Qt.NoPen)
         painter.drawEllipse(QPointF(cx, cy), radius, radius)
 
+        if self.color.lower() in ('#000000', '#000', 'black'):
+            pen_slash = QPen(QColor(TOKENS.get('red', '#ef4444')), 1.8)
+            painter.setPen(pen_slash)
+            painter.drawLine(QPointF(cx - 5.5, cy + 5.5), QPointF(cx + 5.5, cy - 5.5))
+
         if self.selected:
             pen = QPen(QColor('#ffffff'), 2.0)
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
             painter.drawEllipse(QPointF(cx, cy), radius + 1.5, radius + 1.5)
         else:
-            pen = QPen(QColor(255, 255, 255, 50), 1.0)
+            border_alpha = 90 if self.color.lower() in ('#000000', '#000', 'black') else 50
+            pen = QPen(QColor(255, 255, 255, border_alpha), 1.0)
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
             painter.drawEllipse(QPointF(cx, cy), radius, radius)
