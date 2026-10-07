@@ -949,12 +949,30 @@ class Studio(GlassWindow):
         colors = QHBoxLayout()
         colors.setSpacing(8)
         self.led_buttons = []
-        cur_led = self.config.get('led', TOKENS['accent'])
-        for color in [TOKENS['accent'], TOKENS['purple'], TOKENS['green'], TOKENS['red'], TOKENS['amber']]:
+        cur_led = self.config.get('led', '#5686ff')
+        swatches = [
+            ('#5686ff', tr('经典蓝 (默认)')),
+            ('#ffffff', tr('纯白')),
+            ('#000000', tr('关闭灯光')),
+            (TOKENS['accent'], tr('活力橙')),
+            (TOKENS['purple'], tr('霓虹紫')),
+            (TOKENS['green'], tr('荧光绿')),
+            (TOKENS['red'], tr('战意红')),
+            (TOKENS['amber'], tr('暖阳金')),
+        ]
+        for color, name in swatches:
             b = LedSwatch(color, lambda checked=False, c=color: self.set_led(c))
-            b.set_selected(color == cur_led)
+            b.setToolTip(name)
+            b.set_selected(str(color).lower() == str(cur_led).lower())
             colors.addWidget(b)
             self.led_buttons.append(b)
+
+        self.led_reset_btn = QPushButton(tr('恢复默认'))
+        self.led_reset_btn.setObjectName('pill')
+        self.led_reset_btn.setCursor(Qt.PointingHandCursor)
+        self.led_reset_btn.setToolTip(tr('恢复 PS5 DualSense 默认经典蓝色 (#5686ff)'))
+        self.led_reset_btn.clicked.connect(lambda: self.set_led('#5686ff'))
+        colors.addWidget(self.led_reset_btn)
         l_layout.addLayout(colors)
         self.led_settings_row = led_row
         hardware.add_row(led_row)
@@ -1017,6 +1035,21 @@ class Studio(GlassWindow):
             row = AppleRow('wave', ['#8b5cf6', '#6d28d9'], tr(title), tr(subtitle), edit)
             self.curve_rows[kind] = row
             hardware.add_row(row)
+
+        hint_row = QWidget()
+        hint_layout = QHBoxLayout(hint_row)
+        hint_layout.setContentsMargins(14, 8, 14, 8)
+        hint_layout.setSpacing(12)
+        hint_layout.addWidget(SquircleBadge('gamepad', (TOKENS['amber'], TOKENS['accent_lo'])))
+        hint_v = QVBoxLayout()
+        hint_v.setContentsMargins(0, 0, 0, 0)
+        hint_v.setSpacing(3)
+        hint_v.addWidget(label(tr('未检测到线性扳机（数字按键模式）'), 'section'))
+        hint_v.addWidget(label(tr('当前手柄扳机识别为数字按键，不支持行程曲线。若支持 XInput，请长按 LOGO 键 3~5 秒或切换背部拨档至 PC/X 档。'), 'caption', True))
+        hint_layout.addLayout(hint_v, 1)
+        self.trigger_mode_hint = hint_row
+        self.trigger_mode_hint.hide()
+        hardware.add_row(self.trigger_mode_hint)
 
         self.touch_mouse_box = Toggle(tr('启用'))
         self.touch_mouse_box.setChecked(self.config['touch_mouse'])
@@ -2029,6 +2062,10 @@ class Studio(GlassWindow):
             supported = bool(capabilities['trigger_axes']) if kind == 'trigger' else capabilities[kind]
             self._show_device_row(row, supported)
             row.control.setEnabled(supported)
+        is_connected = bool(state and state.get('connected') is not False and state.get('name'))
+        show_trigger_hint = is_connected and not bool(capabilities['trigger_axes'])
+        if hasattr(self, 'trigger_mode_hint'):
+            self._show_device_row(self.trigger_mode_hint, show_trigger_hint)
         self.curve_rows['trigger_rumble'].subtitle_label.setText(
             tr('左右扳机马达 · 应用反馈已启用') if settings.get('trigger_rumble_enabled') else
             tr('左右扳机马达 · 默认关闭'))
@@ -2052,7 +2089,9 @@ class Studio(GlassWindow):
         self.shutter_haptics_box.setEnabled(has_rumble)
         for swatch in self.led_buttons:
             swatch.setEnabled(has_led)
-            swatch.set_selected(swatch.color == settings['led'])
+            swatch.set_selected(str(swatch.color).lower() == str(settings.get('led', '#5686ff')).lower())
+        if hasattr(self, 'led_reset_btn'):
+            self.led_reset_btn.setEnabled(has_led)
         self.art.set_led(settings['led']); self.mapping_art.set_led(settings['led'])
         if has_led and not self.remote:
             self.device.led(settings['led'])
@@ -3116,16 +3155,18 @@ class Studio(GlassWindow):
         if self.remote:self.client.send('rumble',strength=strength, device_scope=profile_scope(self.snapshot))
         else:self.device.rumble(strength)
 
-    def set_led(self,color):
+    def set_led(self, color):
         self.art.set_led(color); self.mapping_art.set_led(color)
         for b in getattr(self, 'led_buttons', []):
             if hasattr(b, 'set_selected'):
-                b.set_selected(getattr(b, 'color', None) == color)
+                b.set_selected(str(getattr(b, 'color', '')).lower() == str(color).lower())
+        self.setting('led', color)
         if self.remote:
-            self.setting('led',color);self.client.send('led',color=color, device_scope=profile_scope(self.snapshot));return
+            self.client.send('led', color=color, device_scope=profile_scope(self.snapshot)); return
         if self.device.led(color):
-            self.setting('led',color); self.notify(tr('灯条颜色已更新'))
-        else: self.notify(tr('当前设备暂不支持灯条控制或尚未连接'))
+            self.notify(tr('灯条颜色已更新'))
+        else:
+            self.notify(tr('灯条颜色已保存（设备连接后生效）'))
 
     def closeEvent(self,event):
         close_to_tray = bool(self.config.get('close_to_tray', False)) and not getattr(self, 'quitting', False)
