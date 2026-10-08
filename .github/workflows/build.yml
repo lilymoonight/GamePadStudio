@@ -2,51 +2,87 @@ name: Build and Release
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "codex/**" ]
     tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Publish release assets to GitHub Releases'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
   build-macos:
-    name: Test and Build macOS Preview
+    name: Build macOS (.dmg & .zip)
     runs-on: macos-latest
     env:
       QT_QPA_PLATFORM: offscreen
       SDL_VIDEODRIVER: dummy
       SDL_AUDIODRIVER: dummy
       PYGAME_HIDE_SUPPORT_PROMPT: "1"
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
+
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt pyinstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
       - name: Build native screen capture component
         run: python scripts/build_macos_capture.py
+
       - name: Run test suite
-        run: python scripts/test_modules.py
+        run: python scripts/test_modules.py --jobs 4
+
       - name: Verify source startup
-        run: python main.py --smoke-test --data-dir "${{ runner.temp }}/gamepadstudio-source-smoke"
-      - name: Build app
+        run: python main.py --smoke-test --data-dir "${{ runner.temp }}/gps-source-smoke"
+
+      - name: Build app with PyInstaller
         run: pyinstaller --noconfirm GamePadStudio.spec
+
       - name: Verify packaged startup
-        run: dist/GamePadStudio.app/Contents/MacOS/GamePadStudio --smoke-test --data-dir "${{ runner.temp }}/gamepadstudio-package-smoke"
-      - name: Package app with bundle symlinks
-        run: ditto -c -k --sequesterRsrc --keepParent dist/GamePadStudio.app dist/GamePadStudio-macOS.zip
-      - uses: actions/upload-artifact@v4
+        run: dist/GamePadStudio.app/Contents/MacOS/GamePadStudio --smoke-test --data-dir "${{ runner.temp }}/gps-package-smoke"
+
+      - name: Package macOS distribution (.zip & .dmg)
+        run: |
+          # Package .app bundle preserving permissions and symlinks
+          ditto -c -k --sequesterRsrc --keepParent dist/GamePadStudio.app dist/GamePadStudio-macOS.zip
+
+          # Create standalone DMG image
+          hdiutil create -volname "GamePad Studio" -srcfolder dist/GamePadStudio.app -ov -format UDZO dist/GamePadStudio-macOS.dmg
+
+          # Generate SHA256 checksums
+          cd dist
+          shasum -a 256 GamePadStudio-macOS.zip > GamePadStudio-macOS.zip.sha256
+          shasum -a 256 GamePadStudio-macOS.dmg > GamePadStudio-macOS.dmg.sha256
+
+      - name: Upload macOS build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: GamePadStudio-macOS-preview
-          path: dist/GamePadStudio-macOS.zip
+          name: GamePadStudio-macOS
+          path: |
+            dist/GamePadStudio-macOS.dmg
+            dist/GamePadStudio-macOS.dmg.sha256
+            dist/GamePadStudio-macOS.zip
+            dist/GamePadStudio-macOS.zip.sha256
           retention-days: 14
+
   build-windows:
-    name: Build Windows x64 Executable
+    name: Build Windows x64 (.exe & .zip)
     runs-on: windows-latest
     env:
       QT_QPA_PLATFORM: offscreen
@@ -58,52 +94,95 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
           cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          pip install -r requirements.txt pyinstaller
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress
 
       - name: Run test suite
-        run: |
-          python scripts/test_modules.py --jobs 2
+        run: python scripts/test_modules.py --jobs 2
+
+      - name: Verify source startup
+        shell: powershell
+        run: python main.py --smoke-test --data-dir "$env:TEMP\gps-source-smoke"
 
       - name: Build executable with PyInstaller
-        run: |
-          pyinstaller --noconfirm GamePadStudio.spec
+        run: pyinstaller --noconfirm GamePadStudio.spec
 
-      - name: Package Windows distribution (.zip)
+      - name: Verify packaged startup
+        shell: powershell
+        run: dist\GamePadStudio\GamePadStudio.exe --smoke-test --data-dir "$env:TEMP\gps-package-smoke"
+
+      - name: Build Inno Setup installer
+        shell: powershell
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\GamePadStudio.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC compilation failed with code $LASTEXITCODE" }
+
+      - name: Package Windows distribution (.zip & installer)
         shell: powershell
         run: |
           $DistDir = "dist\GamePadStudio"
           $ZipPath = "dist\GamePadStudio-Windows-x64.zip"
           Compress-Archive -Path "$DistDir\*" -DestinationPath $ZipPath -Force
-          $Hash = (Get-FileHash -Algorithm SHA256 $ZipPath).Hash
-          Set-Content -Path "dist\GamePadStudio-Windows-x64.zip.sha256" -Value "$Hash  GamePadStudio-Windows-x64.zip"
-          Write-Host "Created $ZipPath with SHA256: $Hash"
+          $ZipHash = (Get-FileHash -Algorithm SHA256 $ZipPath).Hash
+          Set-Content -Path "dist\GamePadStudio-Windows-x64.zip.sha256" -Value "$ZipHash  GamePadStudio-Windows-x64.zip"
+          Write-Host "Created $ZipPath with SHA256: $ZipHash"
 
-      - name: Upload build artifact
+          # Move installer from artifacts to dist and generate sha256
+          $Installer = Get-ChildItem -Path "artifacts\GamePadStudio-Setup-*.exe" | Select-Object -First 1
+          if ($Installer) {
+              $InstHash = (Get-FileHash -Algorithm SHA256 $Installer.FullName).Hash
+              $InstTarget = "dist\$($Installer.Name)"
+              Move-Item -Path $Installer.FullName -Destination $InstTarget -Force
+              Set-Content -Path "$InstTarget.sha256" -Value "$InstHash  $($Installer.Name)"
+              Write-Host "Prepared $InstTarget with SHA256: $InstHash"
+          }
+
+      - name: Upload Windows build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: GamePadStudio-Windows-x64
           path: |
             dist/GamePadStudio-Windows-x64.zip
             dist/GamePadStudio-Windows-x64.zip.sha256
+            dist/GamePadStudio-Setup-*.exe
+            dist/GamePadStudio-Setup-*.exe.sha256
           retention-days: 14
 
+  release:
+    name: Publish Release to GitHub
+    needs: [build-macos, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-dist
+          find release-artifacts -type f -exec cp {} release-dist/ \;
+          ls -lh release-dist/
+
       - name: Publish to GitHub Releases
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/GamePadStudio-Windows-x64.zip
-            dist/GamePadStudio-Windows-x64.zip.sha256
+          files: release-dist/*
           draft: false
           prerelease: false
           generate_release_notes: true

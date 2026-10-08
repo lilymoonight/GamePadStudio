@@ -8,10 +8,13 @@ added_files = [
 ]
 
 ffmpeg_binary = 'bin/ffmpeg.exe' if sys.platform == 'win32' else 'bin/ffmpeg'
-if sys.platform == 'darwin' and not os.path.isfile(ffmpeg_binary):
-    # The architecture-matched wheel avoids a global Homebrew dependency.
-    import imageio_ffmpeg
-    ffmpeg_binary = imageio_ffmpeg.get_ffmpeg_exe()
+if not os.path.isfile(ffmpeg_binary):
+    try:
+        import imageio_ffmpeg
+        ffmpeg_binary = imageio_ffmpeg.get_ffmpeg_exe()
+    except (ImportError, Exception):
+        pass
+target_ffmpeg_name = 'bin/ffmpeg.exe' if sys.platform == 'win32' else 'bin/ffmpeg'
 added_binaries = [(ffmpeg_binary, 'bin')] if os.path.exists(ffmpeg_binary) else []
 if sys.platform == 'darwin':
     capture_helper = 'bin/gps-mac-capture'
@@ -85,8 +88,8 @@ a = Analysis(
     noarchive=False,
 )
 
-if sys.platform == 'darwin':
-    a.binaries = [(('bin/ffmpeg' if source == ffmpeg_binary else destination), source, kind)
+if sys.platform in ('darwin', 'win32'):
+    a.binaries = [((target_ffmpeg_name if source == ffmpeg_binary else destination), source, kind)
                   for destination, source, kind in a.binaries]
 
 pyz = PYZ(a.pure)
