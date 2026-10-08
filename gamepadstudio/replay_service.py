@@ -56,16 +56,15 @@ def get_ffmpeg_path() -> Optional[str]:
     for c in candidates:
         if c.is_file():
             return str(c)
-    if sys.platform == 'darwin':
-        try:
-            # The project-local wheel supplies a standalone FFmpeg when the
-            # user has no Homebrew installation; packaged builds prefer bin/.
-            import imageio_ffmpeg
-            bundled = Path(imageio_ffmpeg.get_ffmpeg_exe())
-            if bundled.is_file() and os.access(bundled, os.X_OK):
-                return str(bundled)
-        except Exception:
-            return None
+    try:
+        # The project-local wheel supplies a standalone FFmpeg when the
+        # user has no system installation; packaged builds prefer bin/.
+        import imageio_ffmpeg
+        bundled = Path(imageio_ffmpeg.get_ffmpeg_exe())
+        if bundled.is_file() and (sys.platform == 'win32' or os.access(bundled, os.X_OK)):
+            return str(bundled)
+    except Exception:
+        pass
     return None
 
 
