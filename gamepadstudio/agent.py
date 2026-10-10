@@ -41,6 +41,7 @@ class Agent(QObject):
         self.engine=MappingRuntime(self.actions, self.dispatch)
         self._unsupported_notice_signature = ()
         self.state=None;self.enabled=bool(self.config.get('mapping_enabled', True));self.suspended_until=0.;self.blocked=set();self.last_touch=None
+        self._cloaked_devices = set()
         self.preview_until = 0.
         self.application_resolver = ApplicationProfileResolver()
         self.application_profile = {'automatic': False, 'executable': '',
@@ -116,8 +117,15 @@ class Agent(QObject):
             if client.is_driver_installed():
                 enabled = settings.get('device_cloaking_enabled', True)
                 options = {'device_path': self.state['device_path']} if self.state.get('device_path') else {}
+                key = (vendor, product, options.get('device_path'))
                 ok, msg = client.cloak_controller(vendor, product, **options) if enabled else client.uncloak_controller(vendor, product, **options)
+                if not hasattr(self, '_cloaked_devices'):
+                    self._cloaked_devices = set()
                 if ok:
+                    if enabled:
+                        self._cloaked_devices.add(key)
+                    else:
+                        self._cloaked_devices.discard(key)
                     self.log(f'硬件独占隐身已就绪：{msg}' if enabled else f'手柄原始输入已恢复：{msg}')
                 else:
                     self.log(f'硬件独占隐身未生效：{msg}')
@@ -498,7 +506,15 @@ class Agent(QObject):
                     vendor = self.state.get('vendor')
                     product = self.state.get('product')
                     options = {'device_path': self.state['device_path']} if self.state.get('device_path') else {}
+                    key = (vendor, product, options.get('device_path'))
                     applied, msg = client.cloak_controller(vendor, product, **options) if enabled else client.uncloak_controller(vendor, product, **options)
+                    if not hasattr(self, '_cloaked_devices'):
+                        self._cloaked_devices = set()
+                    if applied:
+                        if enabled:
+                            self._cloaked_devices.add(key)
+                        else:
+                            self._cloaked_devices.discard(key)
                     self.log(msg)
             return {'applied': applied, 'message': msg, 'enabled': enabled}
         elif command=='set_gamebar_shield':
@@ -708,9 +724,29 @@ class Agent(QObject):
             finish('结束录像失败',self.manual_recording.stop)
         if hasattr(self, 'haptic_engine'):
             finish('停止触觉反馈失败',self.haptic_engine.close)
-        finish('恢复手柄访问失败',self.device.close)
+        finish('恢复手柄访问失败', getattr(self, '_restore_device_access', getattr(self.device, 'close', lambda: None)))
         finish('关闭工作队列失败',lambda:self.executor.shutdown(wait=True))
         finish('关闭后台通信失败',self.server.close)
+
+    def _restore_device_access(self):
+        if sys.platform == 'win32':
+            try:
+                from .hidhide import HidHideClient
+                client = HidHideClient()
+                if client.is_driver_installed():
+                    for vendor, product, dev_path in list(getattr(self, '_cloaked_devices', set())):
+                        opts = {'device_path': dev_path} if dev_path else {}
+                        client.uncloak_controller(vendor, product, **opts)
+                    if hasattr(self, '_cloaked_devices'):
+                        self._cloaked_devices.clear()
+                    if self.state and self.state.get('vendor') and self.state.get('product'):
+                        opts = {'device_path': self.state['device_path']} if self.state.get('device_path') else {}
+                        client.uncloak_controller(self.state['vendor'], self.state['product'], **opts)
+                    if not client.get_blacklist():
+                        client.set_active(False)
+            except Exception as exc:
+                self.log(f'恢复手柄访问失败：{exc}')
+        self.device.close()
 
 
 

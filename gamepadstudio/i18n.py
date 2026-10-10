@@ -615,6 +615,12 @@ TRANSLATIONS: Dict[str, str] = {
     '物理控制器已对系统与游戏完全隐藏，仅本程序能接收硬件信号并输出虚拟键鼠': 'Physical controller is hidden from Windows and games; only this app receives hardware signals and outputs virtual KBM',
     '物理控制器正常向系统广播输入，可能在同时支持手柄的游戏中产生双重输入': 'Physical controller broadcasts input normally to Windows, which may cause double inputs in games with native controller support',
     '当前处于普通权限。若 3D 游戏反作弊拦截了视角转镜或键位，点击此按钮可一键以管理员权限重启工作台': 'Running with standard privileges. If game anti-cheat blocks camera tracking or keys, click to restart as administrator',
+    '一键恢复所有手柄共享访问': 'Restore Shared Access for All Gamepads',
+    '清空驱动隐身黑名单并关闭过滤，立即恢复手柄在系统与其他游戏中的可见性': 'Clear driver cloaking blacklist and disable filtering to restore gamepad visibility to Windows and games',
+    '未连接设备（检测到驱动屏蔽已激活，可点击下方一键恢复）': 'No controller connected (driver cloaking active; click below to restore shared access)',
+    '已恢复所有手柄共享访问，驱动过滤已关闭': 'Restored shared access for all gamepads; driver filtering disabled',
+    '已恢复所有手柄共享访问': 'Restored shared access for all gamepads',
+    '当前手柄未处于屏蔽状态（已恢复共享访问）': 'Gamepad is not cloaked (shared access already restored)',
 
     # Presets
     '主机体验': 'Console Standard',

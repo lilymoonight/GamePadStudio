@@ -1652,13 +1652,17 @@ class VirtualKbmPage(QWidget):
             return
         if not hasattr(self, 'hidhide'):
             self.hidhide = HidHideClient()
-            self.cloaking_dialog = QDialog(self); self.cloaking_dialog.setWindowTitle('设备隐身')
+            self.cloaking_dialog = QDialog(self); self.cloaking_dialog.setWindowTitle(tr('设备隐身'))
             layout = QVBoxLayout(self.cloaking_dialog)
-            self.cloaking_toggle = Toggle('向其他应用隐藏手柄原始输入')
+            self.cloaking_toggle = Toggle(tr('向其他应用隐藏手柄原始输入'))
             self.cloaking_status_label = QLabel(); self.cloaking_status_label.setWordWrap(True)
-            self.btn_install_driver = QPushButton('打开 HidHide 驱动页面')
+            self.btn_uncloak_all = QPushButton(tr('一键恢复所有手柄共享访问'))
+            self.btn_uncloak_all.setToolTip(tr('清空驱动隐身黑名单并关闭过滤，立即恢复手柄在系统与其他游戏中的可见性'))
+            self.btn_uncloak_all.clicked.connect(self.uncloak_all_controllers_action)
+            self.btn_install_driver = QPushButton(tr('打开 HidHide 驱动页面'))
             self.btn_install_driver.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(HIDHIDE_RELEASE_URL)))
-            layout.addWidget(self.cloaking_status_label); layout.addWidget(self.cloaking_toggle); layout.addWidget(self.btn_install_driver)
+            layout.addWidget(self.cloaking_status_label); layout.addWidget(self.cloaking_toggle)
+            layout.addWidget(self.btn_uncloak_all); layout.addWidget(self.btn_install_driver)
             self.cloaking_toggle.toggled.connect(self.toggle_cloaking)
         self.refresh_cloaking_status()
         self.cloaking_dialog.show()
@@ -1678,12 +1682,36 @@ class VirtualKbmPage(QWidget):
         from .hidhide import selected_device_instances
         state = self.owner.snapshot or self.device_state or {}
         instances = selected_device_instances(vendor, product, state.get('device_path')) if vendor and product and installed else []
-        hidden = {item.upper() for item in self.hidhide.get_blacklist()} if instances else set()
+        blacklist = self.hidhide.get_blacklist() if installed else []
+        hidden = {item.upper() for item in blacklist} if instances else set()
         active = bool(installed and instances and self.hidhide.is_active() and all(item.upper() in hidden for item in instances))
+        has_hidden_nodes = bool(installed and (self.hidhide.is_active() or len(blacklist) > 0))
+
         self.cloaking_toggle.blockSignals(True); self.cloaking_toggle.setChecked(active)
         self.cloaking_toggle.setEnabled(bool(installed and vendor)); self.cloaking_toggle.blockSignals(False)
         self.btn_install_driver.setVisible(not installed)
-        text = '未连接设备' if not vendor else 'HidHide 未安装' if not installed else ('已隐身（当前设备的原始输入已隐藏）' if active else '当前设备原始输入可见')
+        if hasattr(self, 'btn_uncloak_all'):
+            self.btn_uncloak_all.setEnabled(bool(installed and has_hidden_nodes))
+            self.btn_uncloak_all.setVisible(bool(installed))
+
+        if not vendor:
+            text = tr('未连接设备（检测到驱动屏蔽已激活，可点击下方一键恢复）') if has_hidden_nodes else tr('未连接设备')
+        elif not installed:
+            text = tr('HidHide 未安装')
+        elif active:
+            text = tr('已隐身（当前设备的原始输入已隐藏）')
+        else:
+            text = tr('当前设备原始输入可见')
+        self.cloaking_status_label.setText(text)
+
+    def uncloak_all_controllers_action(self):
+        if not WINDOWS_FEATURES:
+            return
+        ok, text = self.hidhide.uncloak_all_controllers()
+        if hasattr(self.owner, '_cloaked_devices'):
+            self.owner._cloaked_devices.clear()
+        self.owner.setting('device_cloaking_enabled', False)
+        self.refresh_cloaking_status()
         self.cloaking_status_label.setText(text)
 
     def toggle_cloaking(self, enabled):
@@ -1702,6 +1730,14 @@ class VirtualKbmPage(QWidget):
         state = self.owner.snapshot or self.device_state or {}
         kwargs = {'device_path': state['device_path']} if state.get('device_path') else {}
         ok, text = self.hidhide.cloak_controller(vendor, product, **kwargs) if enabled else self.hidhide.uncloak_controller(vendor, product, **kwargs)
-        if ok: self.owner.setting('device_cloaking_enabled', enabled)
+        if ok:
+            self.owner.setting('device_cloaking_enabled', enabled)
+            key = (vendor, product, kwargs.get('device_path'))
+            if not hasattr(self.owner, '_cloaked_devices'):
+                self.owner._cloaked_devices = set()
+            if enabled:
+                self.owner._cloaked_devices.add(key)
+            else:
+                self.owner._cloaked_devices.discard(key)
         self.refresh_cloaking_status()
         self.cloaking_status_label.setText(text)
