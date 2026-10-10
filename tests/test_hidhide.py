@@ -482,3 +482,161 @@ def test_cloaking_ui_without_device_disables_control_and_ignores_toggle(tmp_path
         assert owner.store.settings_for(None)['device_cloaking_enabled']
     finally:
         owner.close()
+
+
+def test_uncloak_all_controllers_clears_blacklist_and_disables_filtering(monkeypatch):
+    client, hardware = isolated_driver(monkeypatch, [FIRST_PAD, SECOND_PAD])
+    assert hardware['active'] is True
+    ok, message = client.uncloak_all_controllers()
+    assert ok is True
+    assert hardware['blacklist'] == []
+    assert hardware['active'] is False
+    assert '已恢复所有手柄共享访问' in message
+
+
+def test_uncloak_disconnected_controller_matching_blacklist_path(monkeypatch):
+    client, hardware = isolated_driver(monkeypatch, [FIRST_PAD])
+    # When controller is disconnected, find_hid_instances returns empty
+    monkeypatch.setattr('gamepadstudio.hidhide.find_hid_instances', lambda *args: [])
+    ok, message = client.uncloak_controller(0x054C, 0x0CE6, device_path=FIRST_PATH)
+    assert ok is True
+    assert hardware['blacklist'] == []
+    assert hardware['active'] is False
+
+
+def test_uncloak_disconnected_controller_matching_unique_vid_pid_in_blacklist(monkeypatch):
+    client, hardware = isolated_driver(monkeypatch, [FIRST_PAD])
+    # When controller is disconnected, find_hid_instances returns empty
+    monkeypatch.setattr('gamepadstudio.hidhide.find_hid_instances', lambda *args: [])
+    ok, message = client.uncloak_controller(0x054C, 0x0CE6, device_path=None)
+    assert ok is True
+    assert hardware['blacklist'] == []
+    assert hardware['active'] is False
+
+
+def test_uncloak_already_visible_controller_returns_success(monkeypatch):
+    client, hardware = isolated_driver(monkeypatch, [])
+    monkeypatch.setattr('gamepadstudio.hidhide.find_hid_instances', lambda *args: [])
+    ok, message = client.uncloak_controller(0x054C, 0x0CE6)
+    assert ok is True
+    assert '未处于屏蔽状态' in message
+
+
+def test_cloaking_ui_emergency_uncloak_button_restores_all(tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    from gamepadstudio.virtual_kbm_ui import VirtualKbmPage
+    from tests.mapping_fixtures import MappingOwner
+    app = QApplication.instance() or QApplication([])
+    owner = MappingOwner(tmp_path)
+    owner.snapshot = None
+    monkeypatch.setattr(owner, 'setting', lambda k, v: owner.store.set_setting(k, v, owner.snapshot))
+
+    monkeypatch.setattr(HidHideClient, 'is_driver_installed', lambda self: True)
+    monkeypatch.setattr(HidHideClient, 'is_active', lambda self: True)
+    monkeypatch.setattr(HidHideClient, 'get_blacklist', lambda self: [FIRST_PAD])
+    uncloak_all_called = []
+    monkeypatch.setattr(HidHideClient, 'uncloak_all_controllers',
+                        lambda self: (uncloak_all_called.append(True) or (True, '已恢复所有手柄共享访问，驱动过滤已关闭')))
+
+    try:
+        page = VirtualKbmPage(owner, store=owner.store)
+        page.open_cloaking()
+        assert hasattr(page, 'btn_uncloak_all')
+        assert page.btn_uncloak_all.isEnabled() is True
+        assert '驱动屏蔽已激活' in page.cloaking_status_label.text()
+
+        page.btn_uncloak_all.click()
+        assert len(uncloak_all_called) == 1
+        assert owner.store.settings_for(None)['device_cloaking_enabled'] is False
+        assert '已恢复所有手柄共享访问' in page.cloaking_status_label.text()
+    finally:
+        owner.close()
+
+
+def test_agent_restore_device_access_uncloaks_on_windows(monkeypatch):
+    from gamepadstudio import agent as agent_module
+    from types import SimpleNamespace
+    win_sys = SimpleNamespace(**vars(sys))
+    win_sys.platform = 'win32'
+    monkeypatch.setattr(agent_module, 'sys', win_sys)
+
+    uncloaked = []
+    fake_client = MagicMock()
+    fake_client.is_driver_installed.return_value = True
+    fake_client.get_blacklist.return_value = []
+    fake_client.uncloak_controller.side_effect = lambda v, p, **kw: (uncloaked.append((v, p, kw)) or (True, 'ok'))
+
+    class DummyDevice:
+        def __init__(self):
+            self.closed = False
+        def close(self):
+            self.closed = True
+
+    dummy_dev = DummyDevice()
+    dummy_agent = SimpleNamespace(
+        state={'vendor': 0x054C, 'product': 0x0CE6, 'device_path': FIRST_PATH},
+        _cloaked_devices={(0x054C, 0x0CE6, FIRST_PATH)},
+        device=dummy_dev,
+        log=MagicMock(),
+    )
+
+    with patch('gamepadstudio.hidhide.HidHideClient', return_value=fake_client):
+        agent_module.Agent._restore_device_access(dummy_agent)
+
+    assert dummy_dev.closed is True
+    assert (0x054C, 0x0CE6, {'device_path': FIRST_PATH}) in uncloaked
+    assert len(dummy_agent._cloaked_devices) == 0
+    fake_client.set_active.assert_called_with(False)
+
+
+def test_studio_restore_device_access_uncloaks_in_standalone(monkeypatch):
+    from gamepadstudio import studio as studio_module
+    from types import SimpleNamespace
+    win_sys = SimpleNamespace(**vars(sys))
+    win_sys.platform = 'win32'
+    monkeypatch.setattr(studio_module, 'sys', win_sys)
+
+    uncloaked = []
+    fake_client = MagicMock()
+    fake_client.is_driver_installed.return_value = True
+    fake_client.get_blacklist.return_value = []
+    fake_client.uncloak_controller.side_effect = lambda v, p, **kw: (uncloaked.append((v, p, kw)) or (True, 'ok'))
+
+    class DummyDevice:
+        def __init__(self):
+            self.closed = False
+        def close(self):
+            self.closed = True
+
+    dummy_dev = DummyDevice()
+    dummy_studio = SimpleNamespace(
+        remote=False,
+        snapshot={'vendor': 0x054C, 'product': 0x0CE6, 'device_path': FIRST_PATH},
+        _cloaked_devices={(0x054C, 0x0CE6, FIRST_PATH)},
+        device=dummy_dev,
+    )
+
+    with patch('gamepadstudio.hidhide.HidHideClient', return_value=fake_client):
+        studio_module.Studio._restore_device_access(dummy_studio)
+
+    assert dummy_dev.closed is True
+    assert (0x054C, 0x0CE6, {'device_path': FIRST_PATH}) in uncloaked
+    assert len(dummy_studio._cloaked_devices) == 0
+    fake_client.set_active.assert_called_with(False)
+
+
+def test_entry_uncloak_all_cli(monkeypatch, capsys):
+    from gamepadstudio import entry
+    import json
+    uncloak_called = []
+    fake_client = MagicMock()
+    fake_client.uncloak_all_controllers.return_value = (True, '已恢复所有手柄共享访问，驱动过滤已关闭')
+
+    with patch('gamepadstudio.hidhide.HidHideClient', return_value=fake_client), \
+         patch.object(sys, 'argv', ['GamePadStudio', '--uncloak-all']):
+        ret = entry.run()
+        assert ret == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data['ok'] is True
+        assert '已恢复所有手柄共享访问' in data['message']

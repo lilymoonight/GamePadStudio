@@ -3227,7 +3227,7 @@ class Studio(GlassWindow):
             finish(tr('结束录像'), self.manual_recording.stop)
         if hasattr(self, 'haptic_engine'):
             finish(tr('停止触觉反馈'), self.haptic_engine.close)
-        finish(tr('恢复手柄共享访问'), self.device.close)
+        finish(tr('恢复手柄共享访问'), getattr(self, '_restore_device_access', getattr(self.device, 'close', lambda: None)))
         if self.worker and self.worker.isRunning():
             finish(tr('结束截图'), self.worker.wait)
         self.cleanup_errors=errors
@@ -3237,6 +3237,27 @@ class Studio(GlassWindow):
             return False
         self.events.close(); self.tray.hide()
         return True
+
+    def _restore_device_access(self):
+        if sys.platform == 'win32':
+            try:
+                from .hidhide import HidHideClient
+                client = HidHideClient()
+                if client.is_driver_installed():
+                    if not self.remote or not (self.client and self.client.connected):
+                        for vendor, product, dev_path in list(getattr(self, '_cloaked_devices', set())):
+                            opts = {'device_path': dev_path} if dev_path else {}
+                            client.uncloak_controller(vendor, product, **opts)
+                        if hasattr(self, '_cloaked_devices'):
+                            self._cloaked_devices.clear()
+                        if hasattr(self, 'snapshot') and self.snapshot and self.snapshot.get('vendor') and self.snapshot.get('product'):
+                            opts = {'device_path': self.snapshot.get('device_path')} if self.snapshot.get('device_path') else {}
+                            client.uncloak_controller(self.snapshot['vendor'], self.snapshot['product'], **opts)
+                        if not client.get_blacklist():
+                            client.set_active(False)
+            except Exception:
+                pass
+        self.device.close()
 
     def quit_app(self):
         self.quitting=True
@@ -3296,6 +3317,7 @@ def run():
         return {'pid':os.getpid(),'pages':window.stack.count(),'page':window.stack.currentIndex(),'native_glass':window.native_glass}
     ui_server=LocalServer(root,handle_ui,role='ui')
     window.navigate(pages[args.page])
+    app.aboutToQuit.connect(window.cleanup)
     if args.smoke_test:
         window.enabled=False; window.tray.hide()
         def smoke_finish():

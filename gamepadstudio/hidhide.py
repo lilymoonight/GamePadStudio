@@ -366,6 +366,10 @@ class HidHideClient:
         """彻底对外部系统隐身并屏蔽所有接入的手柄设备（无论是 PS5、Xbox 还是 Switch Pro 等）"""
         return self.cloak_controller(None, None)
 
+    def uncloak_all_controllers(self) -> Tuple[bool, str]:
+        """解除所有手柄的隐身屏蔽，清空黑名单并关闭全局过滤驱动，恢复系统共享访问"""
+        return self.uncloak_controller(None, None)
+
     def cloak_controller(self, vendor: Optional[int] = None, product: Optional[int] = None, device_path=None) -> Tuple[bool, str]:
         """
         对控制器执行一键独占隐身接管：
@@ -434,6 +438,36 @@ class HidHideClient:
         cli_path = r"C:\Program Files\Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe"
         targets = selected_device_instances(vendor, product, device_path) if vendor is not None or product is not None else None
         if targets == []:
+            # 当设备已拔出/断开导致 find_hid_instances 为空时，从黑名单中基于路径或 VID/PID 找回匹配项
+            candidates = find_hid_instances(vendor, product)
+            if not candidates:
+                blacklist = self.get_blacklist()
+                if device_path:
+                    normalized = str(device_path).upper().replace('#', '\\')
+                    normalized = normalized.removeprefix('\\\\?\\').split('\\{', 1)[0]
+                    matched_in_bl = [item for item in blacklist if item.upper() == normalized]
+                    if matched_in_bl:
+                        targets = matched_in_bl
+                elif vendor is not None:
+                    v_hex = f"{vendor:04X}".upper()
+                    p_hex = f"{product:04X}".upper() if product is not None else ""
+                    matched_in_bl = [
+                        item for item in blacklist
+                        if f"VID_{v_hex}" in item.upper() or f"VID&{v_hex}" in item.upper()
+                    ]
+                    if p_hex:
+                        matched_in_bl = [
+                            item for item in matched_in_bl
+                            if f"PID_{p_hex}" in item.upper() or f"PID&{p_hex}" in item.upper()
+                        ]
+                    if len(matched_in_bl) == 1:
+                        targets = matched_in_bl
+                    elif len(matched_in_bl) == 0:
+                        if not blacklist and self.is_active():
+                            self.set_active(False)
+                        return True, "当前手柄未处于屏蔽状态（已恢复共享访问）"
+
+        if targets == []:
             return False, "无法唯一匹配当前设备的 HID 节点，请重新连接后重试"
         remaining = [item for item in self.get_blacklist() if targets is not None and item.upper() not in {target.upper() for target in targets}]
 
@@ -450,6 +484,8 @@ class HidHideClient:
             direct_ok = False
 
         if direct_ok:
+            if not vendor and not product:
+                return True, "已恢复所有手柄共享访问，驱动过滤已关闭"
             return True, "已解除控制器隐身，系统已恢复共享访问"
 
         # 提权回退
@@ -466,6 +502,8 @@ class HidHideClient:
                 flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
                 result = subprocess.call(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd], creationflags=flags)
                 if result == 0:
+                    if not vendor and not product:
+                        return True, "已恢复所有手柄共享访问"
                     return True, "已解除当前控制器隐身"
             except Exception:
                 pass
