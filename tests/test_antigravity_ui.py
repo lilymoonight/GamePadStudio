@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import QApplication, QScrollArea
 from PySide6.QtTest import QTest
 
@@ -153,6 +153,8 @@ def workspace(tmp_path, monkeypatch):
     finally:
         window.cleanup()
         window.hide()
+        window.deleteLater()
+        app.sendPostedEvents(window, QEvent.DeferredDelete)
 
 
 def test_studio_workspace_navigation_to_antigravity_page(workspace):

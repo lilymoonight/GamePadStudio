@@ -6,6 +6,7 @@ from types import ModuleType
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 
+from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import QApplication, QFileDialog, QSizePolicy
 
 from gamepadstudio.input_tester import InputTester
@@ -118,6 +119,8 @@ def test_export_dialog_cancel_success_and_failure_are_explicit(tmp_path, monkeyp
     finally:
         window.cleanup()
         window.hide()
+        window.deleteLater()
+        app.sendPostedEvents(window, QEvent.DeferredDelete)
 
 
 def test_offline_ui_exports_real_sanitized_report(tmp_path, monkeypatch):
@@ -143,3 +146,5 @@ def test_offline_ui_exports_real_sanitized_report(tmp_path, monkeypatch):
     finally:
         window.cleanup()
         window.hide()
+        window.deleteLater()
+        app.sendPostedEvents(window, QEvent.DeferredDelete)
