@@ -3240,12 +3240,7 @@ class Studio(GlassWindow):
             self.closed=False
             self.notify(tr('退出尚未完成，请重试：')+'；'.join(errors))
             return False
-        self.events.close()
-        try:
-            self.tray.setContextMenu(None)
-        except Exception:
-            pass
-        self.tray.hide()
+        self.events.close(); self.tray.hide()
         return True
 
     def _restore_device_access(self):

@@ -6,11 +6,13 @@ from types import ModuleType
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 
+from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import QApplication, QFileDialog, QSizePolicy
 
 from gamepadstudio.input_tester import InputTester
 from gamepadstudio.i18n import init_language
 from gamepadstudio.studio import Studio
+from tests.test_battery_ui import FakeTray
 
 
 class OfflineDevice:
@@ -64,12 +66,19 @@ def test_offline_test_page_keeps_activity_and_diagnostic_actions_available():
         assert tester.stick_gauges[0].sizePolicy().verticalPolicy() == QSizePolicy.Expanding
     finally:
         tester.close()
+        tester.deleteLater()
+        app.sendPostedEvents(tester, QEvent.DeferredDelete)
 
 
 def test_export_dialog_cancel_success_and_failure_are_explicit(tmp_path, monkeypatch):
     monkeypatch.setattr('gamepadstudio.studio.Device', OfflineDevice)
+    monkeypatch.setattr('gamepadstudio.studio.QSystemTrayIcon', FakeTray)
     app = QApplication.instance() or QApplication([])
     window = Studio(tmp_path, standalone=True, lang='zh')
+    window.timer.stop()
+    window.scan_timer.stop()
+    window.gallery_timer.stop()
+    window.enabled = False
     report_module = ModuleType('gamepadstudio.diagnostic_report')
     called = []
     report = {'format': 'test-diagnostic'}
@@ -118,12 +127,19 @@ def test_export_dialog_cancel_success_and_failure_are_explicit(tmp_path, monkeyp
     finally:
         window.cleanup()
         window.hide()
+        window.deleteLater()
+        app.sendPostedEvents(window, QEvent.DeferredDelete)
 
 
 def test_offline_ui_exports_real_sanitized_report(tmp_path, monkeypatch):
     monkeypatch.setattr('gamepadstudio.studio.Device', OfflineDevice)
+    monkeypatch.setattr('gamepadstudio.studio.QSystemTrayIcon', FakeTray)
     app = QApplication.instance() or QApplication([])
     window = Studio(tmp_path, standalone=True, lang='zh')
+    window.timer.stop()
+    window.scan_timer.stop()
+    window.gallery_timer.stop()
+    window.enabled = False
     destination = tmp_path / 'shareable-diagnostic.json'
     monkeypatch.setattr(QFileDialog, 'getSaveFileName',
                         lambda *args, **kwargs: (str(destination), ''))
@@ -143,3 +159,5 @@ def test_offline_ui_exports_real_sanitized_report(tmp_path, monkeypatch):
     finally:
         window.cleanup()
         window.hide()
+        window.deleteLater()
+        app.sendPostedEvents(window, QEvent.DeferredDelete)

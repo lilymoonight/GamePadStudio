@@ -49,8 +49,11 @@ studio.json
 studio-data/
 Captures/
 *.log
+*.mp4
 bin/
 .tools/
+tools/bilibili/
+docs/avatars/
 archive_scripts/
 Start_Dedicated_Chrome.cmd
 
