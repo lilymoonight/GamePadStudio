@@ -129,6 +129,7 @@ def workspace(tmp_path, monkeypatch):
     from gamepadstudio.glass import STYLE
     from PySide6.QtGui import QFontDatabase
     from PySide6.QtWidgets import QMessageBox
+    from tests.test_battery_ui import FakeTray
 
     class Disconnected:
         available = []
@@ -137,6 +138,7 @@ def workspace(tmp_path, monkeypatch):
         def close(self): pass
 
     monkeypatch.setattr('gamepadstudio.studio.Device', Disconnected)
+    monkeypatch.setattr('gamepadstudio.studio.QSystemTrayIcon', FakeTray)
     monkeypatch.setattr(QMessageBox, 'information', lambda *args, **kwargs: None)
     app = QApplication.instance() or QApplication([])
     QFontDatabase.addApplicationFont('C:/Windows/Fonts/msyh.ttc')
@@ -153,6 +155,8 @@ def workspace(tmp_path, monkeypatch):
     finally:
         window.cleanup()
         window.hide()
+        window.deleteLater()
+        app.sendPostedEvents(window, QEvent.DeferredDelete)
 
 
 def test_studio_workspace_navigation_to_antigravity_page(workspace):

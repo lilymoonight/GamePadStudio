@@ -3,7 +3,7 @@ import os
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
 
@@ -12,6 +12,7 @@ from gamepadstudio.controller_schematic import ControllerSchematic
 from gamepadstudio.studio import Studio, STYLE
 from gamepadstudio.agent import Agent
 from gamepadstudio.studio_core import ConfigStore
+from tests.test_battery_ui import FakeTray
 
 
 def sample(family='switch', instance=1):
@@ -53,72 +54,86 @@ def test_sweep_needs_full_coverage_and_measures_radial_error():
 def test_raw_values_labels_and_capabilities(family, names, triggers):
     app = QApplication.instance() or QApplication([])
     tester = InputTester(lambda: None)
-    state = sample(family)
-    tester.update_state(state)
-    assert [tester.diagram.names[i].split()[0] for i in range(4)] == names
-    assert tester.axis_names[4:] == triggers
-    assert tester.snapshot()['raw_positions'] == [(-.025,.032),(-.108,-.013)]
-    assert tester.snapshot()['triggers'] == [.25,1.0]
-    assert tester.snapshot()['pressed'] == [0,9]
-    assert tester.key_count.text() == '2 / 16'
-    assert 20 not in tester.diagram.available
-    state = {**state, 'available_buttons':list(range(15)), 'buttons':[15]}
-    tester.update_state(state)
-    assert 15 not in tester.diagram.available and tester.snapshot()['pressed'] == []
-    tester.deleteLater()
+    try:
+        state = sample(family)
+        tester.update_state(state)
+        assert [tester.diagram.names[i].split()[0] for i in range(4)] == names
+        assert tester.axis_names[4:] == triggers
+        assert tester.snapshot()['raw_positions'] == [(-.025,.032),(-.108,-.013)]
+        assert tester.snapshot()['triggers'] == [.25,1.0]
+        assert tester.snapshot()['pressed'] == [0,9]
+        assert tester.key_count.text() == '2 / 16'
+        assert 20 not in tester.diagram.available
+        state = {**state, 'available_buttons':list(range(15)), 'buttons':[15]}
+        tester.update_state(state)
+        assert 15 not in tester.diagram.available and tester.snapshot()['pressed'] == []
+    finally:
+        tester.deleteLater()
+        app.sendPostedEvents(tester, QEvent.DeferredDelete)
 
 
 def test_disconnect_and_device_switch_clear_state_and_trail():
     app = QApplication.instance() or QApplication([])
     tester = InputTester(lambda: None); tester.resize(824,506); tester.show()
-    tester.sweep.setChecked(True); tester.update_state(sample())
-    tester.update_state({**sample(), 'axes':[.8,.2,0.,-.9,0.,1.]})
-    assert tester.histories[0].coverage > 0
-    tester.update_state(None)
-    assert tester.snapshot()['raw_positions'] == [None,None]
-    assert tester.snapshot()['triggers'] == [None,None]
-    assert tester.snapshot()['pressed'] == []
-    assert all(not history.points and history.coverage == 0 for history in tester.histories)
-    tester.update_state(sample('xbox',2))
-    assert tester.snapshot()['family'] == 'xbox'
-    assert len(tester.histories[0].points) == 1
-    tester.reset()
-    assert all(not history.points for history in tester.histories)
-    tester.close()
+    try:
+        tester.sweep.setChecked(True); tester.update_state(sample())
+        tester.update_state({**sample(), 'axes':[.8,.2,0.,-.9,0.,1.]})
+        assert tester.histories[0].coverage > 0
+        tester.update_state(None)
+        assert tester.snapshot()['raw_positions'] == [None,None]
+        assert tester.snapshot()['triggers'] == [None,None]
+        assert tester.snapshot()['pressed'] == []
+        assert all(not history.points and history.coverage == 0 for history in tester.histories)
+        tester.update_state(sample('xbox',2))
+        assert tester.snapshot()['family'] == 'xbox'
+        assert len(tester.histories[0].points) == 1
+        tester.reset()
+        assert all(not history.points for history in tester.histories)
+    finally:
+        tester.close()
+        tester.deleteLater()
+        app.sendPostedEvents(tester, QEvent.DeferredDelete)
 
 
 def test_schematic_lights_only_pressed_available_controls():
     app = QApplication.instance() or QApplication([])
     diagram = ControllerSchematic(); diagram.resize(680,540); diagram.show()
-    idle = {**sample('xbox'), 'buttons': [], 'axes': [0.,0.,0.,0.,0.,0.]}
-    diagram.set_state(idle,[]); app.processEvents()
-    # The face key at the south position lights up on the diagram itself.
-    def green_pixels(image):
-        return sum(image.pixelColor(x,y).green()-image.pixelColor(x,y).red()>30
-                   for x in range(470,510) for y in range(235,280))
-    before = green_pixels(diagram.grab().toImage())
-    diagram.set_state({**idle, 'buttons': [0,15], 'available_buttons': list(range(15))},[])
-    assert diagram.pressed == {0}
-    diagram.set_state({**idle, 'buttons': [0]},[])
-    app.processEvents()
-    after = green_pixels(diagram.grab().toImage())
-    assert after > before + 20
-    diagram.close()
+    try:
+        idle = {**sample('xbox'), 'buttons': [], 'axes': [0.,0.,0.,0.,0.,0.]}
+        diagram.set_state(idle,[]); app.processEvents()
+        # The face key at the south position lights up on the diagram itself.
+        def green_pixels(image):
+            return sum(image.pixelColor(x,y).green()-image.pixelColor(x,y).red()>30
+                       for x in range(470,510) for y in range(235,280))
+        before = green_pixels(diagram.grab().toImage())
+        diagram.set_state({**idle, 'buttons': [0,15], 'available_buttons': list(range(15))},[])
+        assert diagram.pressed == {0}
+        diagram.set_state({**idle, 'buttons': [0]},[])
+        app.processEvents()
+        after = green_pixels(diagram.grab().toImage())
+        assert after > before + 20
+    finally:
+        diagram.close()
+        diagram.deleteLater()
+        app.sendPostedEvents(diagram, QEvent.DeferredDelete)
 
 
 def test_vibration_controls_use_current_device_capability():
     app = QApplication.instance() or QApplication([])
     sent=[]
     tester=InputTester(lambda:None,sent.append)
-    tester.update_state({**sample('xbox'),'rumble':True})
-    assert all(button.isEnabled() for button in tester.rumble_buttons)
-    tester.rumble_buttons[0].click();app.processEvents()
-    assert sent == [.85]
-    tester.update_state(None)
-    assert not any(button.isEnabled() for button in tester.rumble_buttons)
-    tester.rumble_pattern(.4,1);app.processEvents()
-    assert sent == [.85]
-    tester.deleteLater()
+    try:
+        tester.update_state({**sample('xbox'),'rumble':True})
+        assert all(button.isEnabled() for button in tester.rumble_buttons)
+        tester.rumble_buttons[0].click();app.processEvents()
+        assert sent == [.85]
+        tester.update_state(None)
+        assert not any(button.isEnabled() for button in tester.rumble_buttons)
+        tester.rumble_pattern(.4,1);app.processEvents()
+        assert sent == [.85]
+    finally:
+        tester.deleteLater()
+        app.sendPostedEvents(tester, QEvent.DeferredDelete)
 
 
 def test_small_window_instruments_paint_and_fit_with_sweep(tmp_path,monkeypatch):
@@ -128,6 +143,7 @@ def test_small_window_instruments_paint_and_fit_with_sweep(tmp_path,monkeypatch)
         def read(self): return {**sample('dualsense'), 'available_buttons':list(range(21)), 'touch':[.25,.75]}
         def close(self): pass
     monkeypatch.setattr('gamepadstudio.studio.Device',DeviceFixture)
+    monkeypatch.setattr('gamepadstudio.studio.QSystemTrayIcon', FakeTray)
     app = QApplication.instance() or QApplication([]); app.setStyleSheet(STYLE)
     window = Studio(tmp_path,standalone=True)
     try:
@@ -145,6 +161,8 @@ def test_small_window_instruments_paint_and_fit_with_sweep(tmp_path,monkeypatch)
         assert blues > 20
     finally:
         window.cleanup();window.hide()
+        window.deleteLater()
+        app.sendPostedEvents(window, QEvent.DeferredDelete)
 
 
 def test_test_protection_leases_agent_and_preserves_manual_pause(tmp_path,monkeypatch):
@@ -159,6 +177,7 @@ def test_test_protection_leases_agent_and_preserves_manual_pause(tmp_path,monkey
     device=DeviceFixture();agent=Agent(tmp_path/'agent',device,Actions())
     captures=[];agent.capture=lambda:captures.append(True)
     monkeypatch.setattr('gamepadstudio.studio.request',lambda *args,**kwargs:{'ok':True})
+    monkeypatch.setattr('gamepadstudio.studio.QSystemTrayIcon', FakeTray)
     window=Studio(tmp_path/'ui')
     try:
         window.client.timer.stop();window.client.socket.abort()
@@ -184,6 +203,8 @@ def test_test_protection_leases_agent_and_preserves_manual_pause(tmp_path,monkey
         assert 'resume' not in sent and 'pause' not in sent
     finally:
         window.cleanup();window.hide();agent.close()
+        window.deleteLater()
+        app.sendPostedEvents(window, QEvent.DeferredDelete)
 
 
 def test_disconnected_pages_use_generic_xinput_and_hide_saved_other_devices(tmp_path,monkeypatch):
@@ -193,6 +214,7 @@ def test_disconnected_pages_use_generic_xinput_and_hide_saved_other_devices(tmp_
         def read(self): return None
         def close(self): pass
     monkeypatch.setattr('gamepadstudio.studio.Device',OfflineDevice)
+    monkeypatch.setattr('gamepadstudio.studio.QSystemTrayIcon', FakeTray)
     store=ConfigStore(tmp_path)
     store.data['profiles']['Switch Pro · 默认']={'15':{'short':{'action':'capture'},'long':{'action':'gallery'}}}
     store.data['profile_families']['Switch Pro · 默认']='switch'
@@ -220,3 +242,5 @@ def test_disconnected_pages_use_generic_xinput_and_hide_saved_other_devices(tmp_
         assert 'Xbox · 默认' in window.config['profiles']
     finally:
         window.cleanup();window.hide()
+        window.deleteLater()
+        app.sendPostedEvents(window, QEvent.DeferredDelete)
