@@ -59,8 +59,8 @@ ACCESSIBILITY_URL = 'x-apple.systempreferences:com.apple.preference.security?Pri
 
 
 def create_voice_service():
-    from .voice_entry import VoiceEntryService
-    return VoiceEntryService()
+    from . import voice_entry_ui
+    return voice_entry_ui.create_voice_service()
 
 
 def _caption(text):
@@ -519,10 +519,12 @@ class AntigravityPage(QWidget):
         if self._closed:
             return True
         self.end_voice()
+        self.voice_timer.stop()
         if self.service is not None:
             try:
                 self.service.close()
             except Exception:
                 pass
         self._closed = True
+        self.studio = None
         return True

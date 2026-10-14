@@ -134,17 +134,20 @@ class InputTester(QWidget):
 
         # Headless tool state controllers (auto-active; hidden from UI to eliminate noise)
         self.protect = IconButton('shield', tr('测试保护'), size=32)
+        self.protect.setParent(self)
         self.protect.setCheckable(True)
         self.protect.setChecked(True)
         self.protect.hide()
 
         self.trace = IconButton('wave', tr('显示摇杆运动轨迹'), size=32)
+        self.trace.setParent(self)
         self.trace.setCheckable(True)
         self.trace.setChecked(True)
         self.trace.toggled.connect(self.toggle_trace)
         self.trace.hide()
 
         self.sweep = IconButton('circle', tr('圆周测试'), size=32)
+        self.sweep.setParent(self)
         self.sweep.setCheckable(True)
         self.sweep.toggled.connect(self.toggle_sweep)
         self.sweep.hide()
@@ -155,6 +158,7 @@ class InputTester(QWidget):
         self.diagram.setFixedSize(400, 300)
         self.diagram.hide()
         self.touch = label('', 11)
+        self.touch.setParent(self)
         self.touch.hide()
 
         dashboard = QHBoxLayout()
