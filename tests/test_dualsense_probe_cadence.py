@@ -96,4 +96,6 @@ def test_no_save_audio_keeps_only_private_json_even_when_pcm_exists(tmp_path, mo
     result = json.loads(output.read_text())
     assert result['audio_saved'] is False and 'wav_path' not in result
     assert not output.with_suffix('.wav').exists()
-    assert output.stat().st_mode & 0o777 == 0o600
+    import os
+    expected_mode = 0o666 if os.name == 'nt' else 0o600
+    assert output.stat().st_mode & 0o777 == expected_mode

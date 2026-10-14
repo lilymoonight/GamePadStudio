@@ -151,8 +151,8 @@ def workspace(tmp_path, monkeypatch):
     try:
         yield window
     finally:
-        window.close()
-        window.deleteLater()
+        window.cleanup()
+        window.hide()
 
 
 def test_studio_workspace_navigation_to_antigravity_page(workspace):
