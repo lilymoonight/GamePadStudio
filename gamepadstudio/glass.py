@@ -827,15 +827,12 @@ class Toggle(QCheckBox):
         self._show_label_override = show_label
         # Position: 0.0 = Left (打开 / ON), 1.0 = Right (关闭 / OFF)
         self._pos = 0.0 if self.isChecked() else 1.0
-        self._anim = None
         self._is_dragging = False
         self._press_pos = None
         self._hover = False
 
         self._track_w = 94.0
         self._track_h = 28.0
-
-        self.toggled.connect(self._on_toggled)
 
     def _should_show_label(self) -> bool:
         if self._show_label_override is not None:
@@ -869,27 +866,23 @@ class Toggle(QCheckBox):
         self._pos = max(0.0, min(1.0, float(val)))
         self.update()
 
-    thumb_pos = Property(float, get_thumb_pos, set_thumb_pos)
-
     def _on_toggled(self, checked: bool):
-        target = 0.0 if checked else 1.0
-        if self.isVisible():
-            if self._anim is None:
-                self._anim = QPropertyAnimation(self, b"thumb_pos", self)
-                self._anim.setDuration(160)
-                self._anim.setEasingCurve(QEasingCurve.OutCubic)
-            self._anim.stop()
-            self._anim.setStartValue(self._pos)
-            self._anim.setEndValue(target)
-            self._anim.start()
-        else:
-            self.set_thumb_pos(target)
+        self.set_thumb_pos(0.0 if checked else 1.0)
+
+    def checkStateSet(self):
+        super().checkStateSet()
+        self._pos = 0.0 if self.isChecked() else 1.0
+        self.update()
+
+    def nextCheckState(self):
+        super().nextCheckState()
+        self._pos = 0.0 if self.isChecked() else 1.0
+        self.update()
 
     def setChecked(self, checked: bool):
         super().setChecked(checked)
-        if not self.isVisible():
-            self._pos = 0.0 if checked else 1.0
-            self.update()
+        self._pos = 0.0 if checked else 1.0
+        self.update()
 
     def _track_rect(self) -> QRectF:
         y = (self.height() - self._track_h) / 2.0

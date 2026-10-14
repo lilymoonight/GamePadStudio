@@ -101,11 +101,7 @@ def test_toggle_paint_event_clean_render(app):
     t.resize(160, 34)
 
     pixmap = QPixmap(160, 34)
-    painter = QPainter(pixmap)
-    try:
-        t.paintEvent(None)
-    finally:
-        painter.end()
+    t.render(pixmap)
 
 
 def test_toggle_i18n_labels(app):

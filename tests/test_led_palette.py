@@ -22,11 +22,10 @@ def test_led_swatch_off_slash_render(qapp):
     swatch.set_selected(True)
     assert swatch.selected is True
 
-    # Paint onto a test image to ensure paintEvent executes without exception
+    # Render onto a test image to ensure paintEvent executes cleanly without dangling QPainter
     img = QImage(26, 26, QImage.Format_ARGB32_Premultiplied)
     img.fill(Qt.transparent)
-    painter = QPainter(img)
-    swatch.paintEvent(None)
+    swatch.render(img)
 
 
 def test_led_default_setting_ps5_blue():
