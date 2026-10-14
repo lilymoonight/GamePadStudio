@@ -240,7 +240,7 @@ class Studio(GlassWindow):
             self.nav[i] = b
             self.nav_titles[i] = title
 
-        self.side_status = QLabel()
+        self.side_status = QLabel(self)
         self.side_status.hide()
         outer.addWidget(rail)
 
@@ -373,6 +373,7 @@ class Studio(GlassWindow):
 
         # Clean pro workstation header (no redundant marketing text)
         self.controller_features = label('', 'caption')
+        self.controller_features.setParent(hero)
         self.controller_features.hide()
         top_deck.addLayout(title_box)
         top_deck.addStretch()
@@ -402,6 +403,7 @@ class Studio(GlassWindow):
         h.addWidget(self.home_input_feedback)
 
         self.photo_caption = label(tr('通用 XInput 键位示意'), 'muted')
+        self.photo_caption.setParent(hero)
         self.photo_caption.hide()
         row.addWidget(hero, 7)
 
@@ -465,7 +467,8 @@ class Studio(GlassWindow):
         self.capture_action_btn.setMinimumHeight(36)
         self.row_capture = AppleRow('camera', BADGE_COLOR, tr('截图'), '', self.capture_action_btn)
         self.capture_heading = self.row_capture.title_label
-        self.create_hint = QLabel()
+        self.create_hint = QLabel(right_panel)
+        self.create_hint.hide()
         right_panel.add_row(self.row_capture)
 
         self.guide_action_btn = button(tr('系统菜单 ›'), lambda: self.navigate(1), pill=True)
@@ -473,7 +476,8 @@ class Studio(GlassWindow):
         self.guide_action_btn.setMinimumHeight(36)
         self.row_guide = AppleRow('controller', BADGE_COLOR, tr('Xbox 导航'), '', self.guide_action_btn)
         self.guide_heading = self.row_guide.title_label
-        self.guide_hint = QLabel()
+        self.guide_hint = QLabel(right_panel)
+        self.guide_hint.hide()
         right_panel.add_row(self.row_guide)
 
         self.touch_action_btn = button(tr('手势映射 ›'), lambda checked=False: self.open_touch_editor(), pill=True)
@@ -522,6 +526,7 @@ class Studio(GlassWindow):
         tools = QHBoxLayout()
         tools.setSpacing(10)
         self.mapping_profile = label(tr_profile(self.config['active_profile']), 'section')
+        self.mapping_profile.setParent(page)
         self.mapping_profile.hide()
         tools.addWidget(label(tr('手柄按键预设：'), 'muted'))
         self.mapping_combo = QComboBox()
@@ -3235,11 +3240,16 @@ class Studio(GlassWindow):
             self.closed=False
             self.notify(tr('退出尚未完成，请重试：')+'；'.join(errors))
             return False
-        self.events.close(); self.tray.hide()
+        self.events.close()
+        try:
+            self.tray.setContextMenu(None)
+        except Exception:
+            pass
+        self.tray.hide()
         return True
 
     def _restore_device_access(self):
-        if sys.platform == 'win32':
+        if sys.platform == 'win32' and getattr(self, '_cloaked_devices', None):
             try:
                 from .hidhide import HidHideClient
                 client = HidHideClient()
@@ -3248,8 +3258,7 @@ class Studio(GlassWindow):
                         for vendor, product, dev_path in list(getattr(self, '_cloaked_devices', set())):
                             opts = {'device_path': dev_path} if dev_path else {}
                             client.uncloak_controller(vendor, product, **opts)
-                        if hasattr(self, '_cloaked_devices'):
-                            self._cloaked_devices.clear()
+                        self._cloaked_devices.clear()
                         if hasattr(self, 'snapshot') and self.snapshot and self.snapshot.get('vendor') and self.snapshot.get('product'):
                             opts = {'device_path': self.snapshot.get('device_path')} if self.snapshot.get('device_path') else {}
                             client.uncloak_controller(self.snapshot['vendor'], self.snapshot['product'], **opts)

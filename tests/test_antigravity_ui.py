@@ -153,8 +153,6 @@ def workspace(tmp_path, monkeypatch):
     finally:
         window.cleanup()
         window.hide()
-        window.deleteLater()
-        app.sendPostedEvents(window, QEvent.DeferredDelete)
 
 
 def test_studio_workspace_navigation_to_antigravity_page(workspace):

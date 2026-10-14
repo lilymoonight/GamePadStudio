@@ -31,8 +31,14 @@ def main():
 
     def run(path):
         report = reports / (path.stem + '.xml')
+        runner = (
+            'import os, sys, pytest; '
+            'code = int(pytest.main(sys.argv[1:])); '
+            'sys.stdout.flush(); sys.stderr.flush(); '
+            'os._exit(code)'
+        )
         result = subprocess.run(
-            [sys.executable, '-m', 'pytest', str(path), '-q', '--tb=short',
+            [sys.executable, '-c', runner, str(path), '-q', '--tb=short',
              '--basetemp=' + str(reports / path.stem), '--junitxml=' + str(report)],
             cwd=project, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding='utf-8', errors='replace')
