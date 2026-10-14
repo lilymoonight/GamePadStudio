@@ -71,7 +71,7 @@ hidden_imports = [
     'PySide6.QtCore',
     'PySide6.QtGui',
     'PySide6.QtWidgets',
-]
+] + collect_submodules('gamepadstudio')
 
 a = Analysis(
     ['main.py'],
@@ -130,8 +130,8 @@ if sys.platform == 'darwin':
         icon='gamepadstudio/assets/studio.icns',
         bundle_identifier='io.github.lilymoonight.GamePadStudio',
         info_plist={
-            'CFBundleShortVersionString': '2.0.1',
-            'CFBundleVersion': '2.0.1',
+            'CFBundleShortVersionString': '2.1.0',
+            'CFBundleVersion': '2.1.0',
             'NSHighResolutionCapable': True,
             'NSBluetoothAlwaysUsageDescription': '读取已连接的游戏手柄输入，并提供设备支持的反馈。',
         },

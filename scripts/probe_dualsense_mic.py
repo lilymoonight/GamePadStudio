@@ -92,7 +92,8 @@ def private_output(path: Path):
     """Keep locally captured voice and its diagnostic metadata owner-only."""
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.fchmod(descriptor, 0o600)
+        if hasattr(os, 'fchmod'):
+            os.fchmod(descriptor, 0o600)
         return os.fdopen(descriptor, 'wb')
     except Exception:
         os.close(descriptor)

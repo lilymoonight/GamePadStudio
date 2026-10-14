@@ -189,7 +189,8 @@ def test_voice_diagnostics_restrict_existing_output_permissions(tmp_path):
     with probe.private_output(path) as output:
         output.write(b'new')
     assert path.read_bytes() == b'new'
-    assert os.stat(path).st_mode & 0o777 == 0o600
+    expected_mode = 0o666 if os.name == 'nt' else 0o600
+    assert os.stat(path).st_mode & 0o777 == expected_mode
 
 
 class Function:
