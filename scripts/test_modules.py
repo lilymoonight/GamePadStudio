@@ -56,6 +56,8 @@ def main():
             if result.returncode:
                 failed.append(path.name)
                 print(result.stdout[-6000:], flush=True)
+                escaped = result.stdout[-2500:].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                print(f'::error title=FAIL {path.name}::{escaped}', flush=True)
     totals['passed'] = totals['tests'] - totals['failures'] - totals['errors'] - totals['skipped']
     summary = dict(totals, modules=len(files), failed_modules=failed, reports=str(reports))
     (reports / 'summary.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
