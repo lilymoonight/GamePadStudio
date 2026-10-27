@@ -153,10 +153,10 @@ flowchart LR
 
 <br/><br/>
 
-### 微软 WHQL 官方认证 HidHide 设备屏蔽与状态监控
-*绿色高亮呈现硬件隐身生效状态，杜绝游戏键位冲突*
+### 统一几何轮廓手柄映射与扳机/震动曲线工作台
+*单轮廓矢量手柄交互图 + 短按/长按/组合动作卡，支持点击肩键/扳机与自定义响应曲线*
 <br/>
-<img src="docs/images/preview_cloaking.png" width="85%" alt="HidHide 设备隐身状态" />
+<img src="docs/images/preview_cloaking.png" width="85%" alt="手柄按键配置与交互示意图" />
 
 </div>
 

@@ -134,16 +134,53 @@ def selected_device_instances(vendor, product, device_path=None):
 
 def find_all_gamepad_instances() -> List[str]:
     """
-    枚举系统内接入的所有手柄/游戏控制器 HID 实例路径（涵盖 PS5/PS4、Xbox 全系、Switch Pro、第三方通用 HID 手柄）
+    枚举系统内接入的所有手柄/游戏控制器 HID 实例路径（直接复用 device_quirks 统一厂商库）
     """
+    from .device_quirks import KNOWN_GAMING_VENDOR_IDS
     found = []
-    gaming_vids = (0x054C, 0x045E, 0x057E, 0x20D6, 0x0E6F, 0x1532, 0x0738, 0x2563, 0x2DC8)
-    for vid in gaming_vids:
+    for vid in KNOWN_GAMING_VENDOR_IDS:
         instances = find_hid_instances(vendor=vid, product=None)
         for inst in instances:
             if inst not in found:
                 found.append(inst)
     return found
+
+
+def is_apple_bootcamp_environment() -> bool:
+    """Return True on Windows when running on Apple Mac Bootcamp hardware."""
+    if sys.platform != 'win32' or winreg is None:
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\BIOS") as bios:
+            for field in ("SystemManufacturer", "BaseBoardManufacturer"):
+                try:
+                    value, _ = winreg.QueryValueEx(bios, field)
+                    if "apple" in str(value or "").lower():
+                        return True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services\KeyMagic"):
+            return True
+    except Exception:
+        return False
+
+
+def hidhide_usage_guidance(bootcamp: Optional[bool] = None) -> str:
+    """Return user-facing guidance on HidHide optionality, re-plug requirement, and Bootcamp safety."""
+    if bootcamp is None:
+        bootcamp = is_apple_bootcamp_environment()
+    lines = [
+        "💡 提示：设备隐身为可选功能（非必装），不安装也可正常使用虚拟键鼠、陀螺仪、连发与截图等全部核心功能。",
+        "🔄 生效说明：开启隐身后，已运行的游戏仍持有旧设备连接；请重新拔插一次手柄（或重启游戏），并关闭 Steam 后台的手柄接管。",
+    ]
+    if bootcamp:
+        lines.append("⚠️ Bootcamp 警告：检测到 Apple Mac 双系统环境，请勿安装或启用 HidHide，以免与 Apple 内置键盘/触控板复合驱动冲突！")
+    else:
+        lines.append("⚠️ Mac 双系统提示：若使用 Mac Bootcamp 双系统，请勿安装 HidHide，以免导致内置键盘/触控板失灵。")
+    return "\n".join(lines)
 
 
 def ensure_current_app_input_access(client=None) -> Tuple[bool, str]:
@@ -408,7 +445,7 @@ class HidHideClient:
             direct_ok = False
 
         if direct_ok:
-            return True, f"已成功将 {len(instances)} 个硬件手柄节点屏蔽，对外部游戏完全隐身"
+            return True, f"已成功将 {len(instances)} 个硬件手柄节点屏蔽，对外部游戏完全隐身（请重新拔插一次手柄或重启游戏使其生效）"
 
         # 若直接通信未成功（非管理员或受系统权限限制），通过 HidHideCLI 进行 UAC 提权代理
         cli_path = r"C:\Program Files\Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe"
@@ -422,7 +459,7 @@ class HidHideClient:
                 flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
                 ret = subprocess.call(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd], creationflags=flags)
                 if ret == 0:
-                    return True, f"已通过管理员权限成功将 {len(instances)} 个硬件手柄节点屏蔽，对外部游戏完全隐身"
+                    return True, f"已通过管理员权限成功将 {len(instances)} 个硬件手柄节点屏蔽，对外部游戏完全隐身（请重新拔插一次手柄或重启游戏使其生效）"
             except Exception as e:
                 return False, f"管理员提权执行失败: {e}"
 

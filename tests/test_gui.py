@@ -88,15 +88,11 @@ def test_gallery_filters_favorites_and_device_specific_capabilities(tmp_path,mon
         assert all(not button.isEnabled() for button in window.led_buttons)
         assert not window.touch_mouse_box.isEnabled() and window.feedback_rumble.isEnabled()
         assert window.mapping_boxes[20][0].isHidden()
+        assert window.controller_heading.text()=='Xbox test fixture'
+        assert window.mapping_model.text()=='Xbox test fixture'
         gallery=window.controllers;assert gallery.grid.count()==1
         assert gallery.current_family()=='xbox'
         assert gallery.grid.itemAt(0).widget().accessibleName()=='Xbox test fixture'
-        gallery.search.setText('Xbox');assert gallery.grid.count()==1
-        gallery.search.clear();gallery.filter.setCurrentIndex(1);assert gallery.grid.count()==1
-        gallery.toggle_favorite('xbox');gallery.filter.setCurrentIndex(2);assert gallery.grid.count()==1
-        assert not gallery.empty_state
-        from gamepadstudio.studio_core import ConfigStore
-        assert ConfigStore(tmp_path).data['controller_favorites']==['xbox']
         window.navigate(5);window.resize(960,640);QTest.qWait(80);assert gallery.columns==2
         assert gallery.grid.itemAt(0).widget().isVisible()
     finally:window.cleanup();window.hide()
@@ -107,18 +103,19 @@ def test_xbox_photo_clicks_match_official_face_and_stick_positions():
     from PySide6.QtCore import QPoint
     app=QApplication.instance() or QApplication([]);photo=ControllerInput();photo.set_family('xbox');photo.available=set(range(16));clicked=[]
     photo.button_clicked.connect(clicked.append)
-    # Independently marked centers in the original 1200px Microsoft asset.
-    centers={0:(840,520),1:(902,454),2:(776,452),3:(842,394),4:(532,454),6:(668,454),7:(362,450),8:(721,593),15:(600,506)}
+    keys=(0,1,2,3,4,6,7,8,15)
     try:
         for width,height in [(640,420),(340,510)]:
             photo.resize(width,height);photo.show();app.processEvents();rect=photo.product_rect()
-            for key,(x,y) in centers.items():
-                point=QPoint(round(rect.left()+(x-45)/1060*rect.width()),round(rect.top()+(y-272)/680*rect.height()))
+            anchors=photo.anchors()
+            for key in keys:
+                x,y=anchors[key]
+                point=QPoint(round(rect.left()+x*rect.width()),round(rect.top()+y*rect.height()))
                 QTest.mouseClick(photo,Qt.LeftButton,pos=point)
                 assert clicked[-1]==key
         # A driver with no Share does not offer a clickable phantom button.
         photo.available=set(range(15));before=len(clicked)
-        x,y=centers[15];point=QPoint(round(rect.left()+(x-45)/1060*rect.width()),round(rect.top()+(y-272)/680*rect.height()))
+        x,y=photo.anchors()[15];point=QPoint(round(rect.left()+x*rect.width()),round(rect.top()+y*rect.height()))
         QTest.mouseClick(photo,Qt.LeftButton,pos=point);assert len(clicked)==before
     finally:photo.close()
 
@@ -154,7 +151,7 @@ def test_icon_navigation_pause_and_child_window_close(tmp_path):
 
 def test_controller_card_favorite_does_not_open_and_keyboard_opens():
     from gamepadstudio.controller_gallery import ControllerGallery
-    from gamepadstudio.glass import IconButton
+    from gamepadstudio.controller_photo import ControllerPhoto
     app=QApplication.instance() or QApplication([]);opened=[];saved=[]
     gallery=ControllerGallery(lambda i:None,saved.append,lambda:None,lambda:opened.append('manage'))
     gallery.set_devices([dict(instance_id=7,name='Fixture DualSense',family='dualsense',supported=True)],7)
@@ -163,10 +160,8 @@ def test_controller_card_favorite_does_not_open_and_keyboard_opens():
         assert gallery.grid.count()==1
         box=gallery.grid.itemAt(0).widget()
         assert box.accessibleName()=='Fixture DualSense'
-        heart=next(b for b in box.findChildren(IconButton) if b.symbol=='heart')
-        QTest.mouseClick(heart,Qt.LeftButton);app.processEvents()
-        assert saved==[['dualsense']] and opened==[]
-        box=gallery.grid.itemAt(0).widget();box.setFocus();QTest.keyClick(box,Qt.Key_Return)
+        assert not box.findChildren(ControllerPhoto)
+        box.setFocus();QTest.keyClick(box,Qt.Key_Return)
         assert opened==['manage']
     finally:gallery.close()
 

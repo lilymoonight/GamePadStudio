@@ -80,6 +80,10 @@ def compact_trigger(raw_label: str) -> str:
         ('方向键 ', ''), ('D-Pad ', ''),
         ('左摇杆按下', 'L3'), ('右摇杆按下', 'R3'),
         ('Left Stick Click', 'L3'), ('Right Stick Click', 'R3'),
+        ('左摇杆上推满', 'LS↑推满'), ('左摇杆下推满', 'LS↓推满'),
+        ('左摇杆左推满', 'LS←推满'), ('左摇杆右推满', 'LS→推满'),
+        ('LS:up:outer', 'LS↑推满'), ('LS:down:outer', 'LS↓推满'),
+        ('LS:left:outer', 'LS←推满'), ('LS:right:outer', 'LS→推满'),
         ('左摇杆', 'LS:'), ('右摇杆', 'RS:'),
         ('按住', ''), ('（按住）', ''),
     ]
@@ -94,7 +98,11 @@ def trigger_tokens(raw_label: str) -> Tuple[str, ...]:
     aliases = {'触摸板': 'Touchpad', 'Touchpad': 'Touchpad',
                '麦克风': 'MIC', 'Mic': 'MIC', 'LS:推满': 'LS MAX',
                'LS:↑': 'LS↑', 'LS:↓': 'LS↓', 'LS:←': 'LS←', 'LS:→': 'LS→',
-               'RS:↑': 'RS↑', 'RS:↓': 'RS↓', 'RS:←': 'RS←', 'RS:→': 'RS→'}
+               'RS:↑': 'RS↑', 'RS:↓': 'RS↓', 'RS:←': 'RS←', 'RS:→': 'RS→',
+               'LS:up:outer': 'LS↑推满', 'LS:down:outer': 'LS↓推满',
+               'LS:left:outer': 'LS←推满', 'LS:right:outer': 'LS→推满',
+               'LS:上推满': 'LS↑推满', 'LS:下推满': 'LS↓推满',
+               'LS:左推满': 'LS←推满', 'LS:右推满': 'LS→推满'}
     parts = [aliases.get(part.strip(), part.strip()) for part in compact_trigger(raw_label).split('+') if part.strip()]
     modifiers = {'L1', 'R1', 'L2', 'R2', 'LB', 'RB', 'LT', 'RT', 'Ctrl', 'Shift', 'Alt', 'Win', 'Cmd', 'Meta',
                  'Create', 'SHARE', 'Share', 'View', 'Back', '−', '-'}
@@ -683,18 +691,23 @@ class KbmFeelDialog(QDialog):
 
     def __init__(self, owner, profile, parent=None):
         super().__init__(parent or owner)
+        from .device_quirks import gyro_protocol_hint
         from .mapping_engine import effective_mappings, input_thresholds, output_tokens, input_sources
         from .studio_core import profile_scope
         self.owner = owner
         self.device_identity = (profile_scope(owner.snapshot), (owner.snapshot or {}).get('instance_id'))
         sources = set(input_sources(owner.snapshot))
-        self.has_pointer = bool(sources & {'RS:left', 'RS:right', 'RS:up', 'RS:down'})
         self.has_stick = any(key.startswith(('LS:', 'RS:')) for key in sources)
         self.has_walk = 'LS:inner' in sources
         self.has_trigger = bool(sources & {'LT', 'RT'})
         self.profile = profile
         self.original = copy.deepcopy(owner.config.get('profile_options', {}).get(profile, {}))
         self.mouse = copy.deepcopy(self.original.get('mouse') or {})
+        has_rs = bool(sources & {'RS:left', 'RS:right', 'RS:up', 'RS:down'})
+        has_ls = bool(sources & {'LS:left', 'LS:right', 'LS:up', 'LS:down'})
+        self.has_pointer = has_rs or (self.mouse.get('stick_source') == 'left' and has_ls)
+        self.has_gyro = bool((owner.snapshot or {}).get('gyro')) or ('gyro_enabled' in self.mouse)
+        self.gyro_protocol_hint = gyro_protocol_hint(owner.snapshot)
         self.input_settings = copy.deepcopy(self.original.get('input') or {})
         thresholds = input_thresholds(self.input_settings)
         entry = effective_mappings(owner.config, owner.snapshot, profile).get('LS:inner', {})
@@ -728,6 +741,12 @@ class KbmFeelDialog(QDialog):
         self.mode.addItem(tr('桌面指针'), 'desktop')
         self.mode.setCurrentIndex(max(0, self.mode.findData(self.mouse.get('mode', 'game'))))
         pointer_form.addRow(tr('用途'), self.mode)
+        self.stick_source = QComboBox()
+        self.stick_source.addItem(tr('右摇杆 (默认)'), 'right')
+        self.stick_source.addItem(tr('左摇杆'), 'left')
+        self.stick_source.setCurrentIndex(1 if self.mouse.get('stick_source') == 'left' else 0)
+        self.stick_source.setAccessibleName(tr('控制摇杆'))
+        pointer_form.addRow(tr('控制摇杆'), self.stick_source)
         self.invert_y = QComboBox()
         self.invert_y.addItem(tr('常规'), False)
         self.invert_y.addItem(tr('反转'), True)
@@ -760,6 +779,52 @@ class KbmFeelDialog(QDialog):
         body.addWidget(pointer)
         pointer.setVisible(self.has_pointer)
 
+        gyro_card, gyro_layout = card()
+        gyro_layout.addWidget(label(tr('陀螺仪体感瞄准'), 'section'))
+        gyro_layout.addWidget(label(tr('通过手柄陀螺仪微调准星，适合射击与精细瞄准。'), 'caption', True))
+        self.gyro_enabled_toggle = Toggle(tr('启用体感瞄准'))
+        self.gyro_enabled_toggle.setChecked(bool(self.mouse.get('gyro_enabled', False)))
+        gyro_layout.addWidget(self.gyro_enabled_toggle)
+
+        self.gyro_controls = QWidget()
+        gyro_form = QFormLayout(self.gyro_controls)
+        gyro_form.setContentsMargins(0, 4, 0, 0)
+        gyro_form.setHorizontalSpacing(18)
+        gyro_form.setVerticalSpacing(10)
+
+        self.gyro_trigger = QComboBox()
+        self.gyro_trigger.addItem(tr('按住 L2/LT 激活'), 'LT')
+        self.gyro_trigger.addItem(tr('按住 R2/RT 激活'), 'RT')
+        self.gyro_trigger.addItem(tr('按住 L1/LB 激活'), '9')
+        self.gyro_trigger.addItem(tr('按住 R1/RB 激活'), '10')
+        self.gyro_trigger.addItem(tr('常驻开启'), 'always')
+        current_trigger = self.mouse.get('gyro_trigger', 'LT')
+        idx_t = self.gyro_trigger.findData(current_trigger)
+        self.gyro_trigger.setCurrentIndex(max(0, idx_t))
+        gyro_form.addRow(tr('激活方式'), self.gyro_trigger)
+
+        self.gyro_sensitivity = QDoubleSpinBox()
+        self.gyro_sensitivity.setRange(1.0, 100.0)
+        self.gyro_sensitivity.setSingleStep(1.0)
+        self.gyro_sensitivity.setDecimals(1)
+        self.gyro_sensitivity.setValue(float(self.mouse.get('gyro_sensitivity', 18.0)))
+        gyro_form.addRow(tr('体感灵敏度'), self.gyro_sensitivity)
+
+        self.gyro_invert_y = QComboBox()
+        self.gyro_invert_y.addItem(tr('常规'), False)
+        self.gyro_invert_y.addItem(tr('反转'), True)
+        self.gyro_invert_y.setCurrentIndex(1 if self.mouse.get('gyro_invert_y') is True else 0)
+        gyro_form.addRow(tr('Y 轴反转'), self.gyro_invert_y)
+
+        gyro_layout.addWidget(self.gyro_controls)
+        self.gyro_enabled_toggle.toggled.connect(self.gyro_controls.setEnabled)
+        self.gyro_controls.setEnabled(self.gyro_enabled_toggle.isChecked())
+        body.addWidget(gyro_card)
+        gyro_card.setVisible(self.has_gyro)
+        self.gyro_hint_label = label(self.gyro_protocol_hint, 'caption', True)
+        body.addWidget(self.gyro_hint_label)
+        self.gyro_hint_label.setVisible(bool(self.has_stick and not self.has_gyro and self.gyro_protocol_hint))
+
         response, response_layout = card()
         response_layout.addWidget(label(tr('按键响应'), 'section'))
         response_layout.addWidget(label(tr('开始响应要高于松开位置，避免边缘反复触发。'), 'caption', True))
@@ -767,8 +832,8 @@ class KbmFeelDialog(QDialog):
         response_form.setHorizontalSpacing(18)
         response_form.setVerticalSpacing(10)
         self.input_fields = {}
-        for group, title in (('stick', '摇杆方向'), ('trigger', '扳机按键')):
-            if not (self.has_stick if group == 'stick' else self.has_trigger):
+        for group, title in (('stick', '摇杆方向'), ('trigger', '扳机按键'), ('outer', '外圈推满')):
+            if not (self.has_stick if group in ('stick', 'outer') else self.has_trigger):
                 continue
             pair = QWidget()
             row = QHBoxLayout(pair)
@@ -788,6 +853,38 @@ class KbmFeelDialog(QDialog):
                 row.addLayout(column, 1)
                 self.input_fields[key] = field
             response_form.addRow(tr(title), pair)
+        if self.has_stick:
+            self.directional_outer_toggle = Toggle(tr('分方向独立推满阈值'))
+            has_directional_outer = any(f'outer_{d}_press' in self.input_settings or f'outer_{d}_release' in self.input_settings for d in ('up', 'down', 'left', 'right'))
+            self.directional_outer_toggle.setChecked(has_directional_outer)
+            self.directional_outer_container = QWidget()
+            directional_form = QFormLayout(self.directional_outer_container)
+            directional_form.setContentsMargins(0, 4, 0, 0)
+            directional_form.setHorizontalSpacing(18)
+            directional_form.setVerticalSpacing(8)
+            for d, d_title in (('up', '上推满'), ('down', '下推满'), ('left', '左推满'), ('right', '右推满')):
+                d_pair = QWidget()
+                d_row = QHBoxLayout(d_pair)
+                d_row.setContentsMargins(0, 0, 0, 0)
+                d_row.setSpacing(8)
+                for suffix, caption in (('press', '开始响应'), ('release', '松开位置')):
+                    key = f'outer_{d}_{suffix}'
+                    field = QSpinBox()
+                    field.setRange(1, 100)
+                    field.setSuffix(' %')
+                    field.setValue(round(thresholds[key] * 100))
+                    field.setAccessibleName(tr(d_title) + ' · ' + tr(caption))
+                    column = QVBoxLayout()
+                    column.setSpacing(4)
+                    column.addWidget(label(tr(caption), 'caption', True))
+                    column.addWidget(field)
+                    d_row.addLayout(column, 1)
+                    self.input_fields[key] = field
+                directional_form.addRow(tr(d_title), d_pair)
+            self.directional_outer_toggle.toggled.connect(self.directional_outer_container.setVisible)
+            self.directional_outer_container.setVisible(self.directional_outer_toggle.isChecked())
+            response_form.addRow(self.directional_outer_toggle)
+            response_form.addRow(self.directional_outer_container)
         if self.has_stick:
             self.suppress_ls_up = QComboBox()
             self.suppress_ls_up.addItem(tr('正常响应 (默认)'), 'off')
@@ -863,13 +960,21 @@ class KbmFeelDialog(QDialog):
         if not self.check_device():
             return
         values = {key: field.value() for key, field in self.input_fields.items()}
-        for group, title in (('stick', '摇杆方向'), ('trigger', '扳机按键')):
+        for group, title in (('stick', '摇杆方向'), ('trigger', '扳机按键'), ('outer', '外圈推满')):
             if group + '_press' not in values:
                 continue
             if values[group + '_release'] >= values[group + '_press']:
                 self.error.setText(tr(title) + '：' + tr('松开位置必须低于开始响应。'))
                 self.error.show()
                 return
+        if hasattr(self, 'directional_outer_toggle') and self.directional_outer_toggle.isChecked():
+            for d, d_title in (('up', '上推满'), ('down', '下推满'), ('left', '左推满'), ('right', '右推满')):
+                p_key, r_key = f'outer_{d}_press', f'outer_{d}_release'
+                if p_key in values and r_key in values:
+                    if values[r_key] >= values[p_key]:
+                        self.error.setText(tr(d_title) + '：' + tr('松开位置必须低于开始响应。'))
+                        self.error.show()
+                        return
         if self.has_walk and self.walk_toggle.isChecked():
             if not values['stick_press'] < values['walk_press'] < values['walk_release']:
                 self.error.setText(tr('慢走区间需满足：摇杆开始响应 < 回到慢走 < 转为正常跑。'))
@@ -885,10 +990,30 @@ class KbmFeelDialog(QDialog):
                           for key, field in self.mouse_fields.items()})
             mouse['mode'] = self.mode.currentData()
             mouse['invert_y'] = self.invert_y.currentData() is True
+            if self.stick_source.currentData() == 'left':
+                mouse['stick_source'] = 'left'
+            else:
+                mouse.pop('stick_source', None)
+        if self.has_gyro:
+            mouse['gyro_enabled'] = self.gyro_enabled_toggle.isChecked()
+            mouse['gyro_trigger'] = self.gyro_trigger.currentData()
+            mouse['gyro_sensitivity'] = round(float(self.gyro_sensitivity.value()), 2)
+            mouse['gyro_invert_y'] = self.gyro_invert_y.currentData() is True
         inputs = copy.deepcopy(self.input_settings)
         inputs.update({key: self.input_fields[key].value() / 100
-                       for key in ('stick_press', 'stick_release', 'trigger_press', 'trigger_release')
+                       for key in ('stick_press', 'stick_release', 'trigger_press', 'trigger_release',
+                                   'outer_press', 'outer_release')
                        if key in self.input_fields})
+        if hasattr(self, 'directional_outer_toggle') and self.directional_outer_toggle.isChecked():
+            for d in ('up', 'down', 'left', 'right'):
+                p_key, r_key = f'outer_{d}_press', f'outer_{d}_release'
+                if p_key in self.input_fields and r_key in self.input_fields:
+                    inputs[p_key] = self.input_fields[p_key].value() / 100
+                    inputs[r_key] = self.input_fields[r_key].value() / 100
+        else:
+            for d in ('up', 'down', 'left', 'right'):
+                inputs.pop(f'outer_{d}_press', None)
+                inputs.pop(f'outer_{d}_release', None)
         inputs['chord_window'] = self.chord_window.value() / 1000
         if hasattr(self, 'suppress_ls_up'):
             suppress_val = self.suppress_ls_up.currentData()
@@ -1111,6 +1236,17 @@ class VirtualKbmPage(QWidget):
         self.application_profiles_action.setToolTip('' if application_profiles_supported() else tr('当前平台不支持应用关联'))
         more_menu.addAction(tr('设为手动预设'), lambda: owner.change_profile(self.current_scheme()))
         self.swap_bindings_action = more_menu.addAction(tr('交换绑定'), self.swap_bindings)
+        self.scene_templates_menu = more_menu.addMenu(tr('常用玩法一键套用'))
+        self.scene_template_actions = {}
+        for tpl_id, tpl_title in (
+            ('dnf_dash', '横版动作：摇杆推底双击奔跑 (DNF)'),
+            ('sprint_3d', '3D 动作：左摇杆推底双击 W 冲刺'),
+            ('fps_gyro', '射击体感：按住左扳机开启陀螺仪瞄准'),
+            ('left_stick_mouse', '左手鼠标：切换左摇杆控制鼠标指针'),
+        ):
+            act = self.scene_templates_menu.addAction(tr(tpl_title))
+            act.triggered.connect(lambda checked=False, tid=tpl_id: self.apply_scene_template(tid))
+            self.scene_template_actions[tpl_id] = act
         more_menu.addSeparator()
         self.import_profile_action = more_menu.addAction(tr('导入预设'), lambda: getattr(owner, 'import_profile', lambda: None)())
         self.export_profile_action = more_menu.addAction(tr('导出此预设'), lambda: getattr(owner, 'export_profile', lambda name: None)(self.current_scheme()))
@@ -1464,6 +1600,79 @@ class VirtualKbmPage(QWidget):
         if first is not None:
             self.owner.open_mapping_swap(profile, first)
 
+    def apply_scene_template(self, template_id):
+        """Apply a one-click gameplay micro-template to the current KBM preset."""
+        from .mapping_engine import input_sources
+        profile = self.current_scheme()
+        if not profile:
+            return
+        available = set(input_sources(self.owner.snapshot))
+        if template_id == 'dnf_dash':
+            bindings = {
+                'LS:up': {'short': {'action': 'hold', 'value': 'Up'}, 'long': {'action': 'none'}},
+                'LS:down': {'short': {'action': 'hold', 'value': 'Down'}, 'long': {'action': 'none'}},
+                'LS:left': {'short': {'action': 'hold', 'value': 'Left'}, 'long': {'action': 'none'}},
+                'LS:right': {'short': {'action': 'hold', 'value': 'Right'}, 'long': {'action': 'none'}},
+                'LS:left:outer': {
+                    'short': {'action': 'hold', 'value': 'Left', 'mode': 'double_tap_hold'},
+                    'long': {'action': 'none'},
+                },
+                'LS:right:outer': {
+                    'short': {'action': 'hold', 'value': 'Right', 'mode': 'double_tap_hold'},
+                    'long': {'action': 'none'},
+                },
+            }
+            for trig, mapping in bindings.items():
+                if trig in available:
+                    self.owner.mapping_change({'op': 'binding', 'profile': profile, 'trigger': trig, 'mapping': mapping})
+            if hasattr(self.owner, 'notify'):
+                self.owner.notify(tr('已套用「横版动作：摇杆推底双击奔跑」模板'))
+        elif template_id == 'sprint_3d':
+            bindings = {
+                'LS:up': {'short': {'action': 'hold', 'value': 'W'}, 'long': {'action': 'none'}},
+                'LS:down': {'short': {'action': 'hold', 'value': 'S'}, 'long': {'action': 'none'}},
+                'LS:left': {'short': {'action': 'hold', 'value': 'A'}, 'long': {'action': 'none'}},
+                'LS:right': {'short': {'action': 'hold', 'value': 'D'}, 'long': {'action': 'none'}},
+                'LS:up:outer': {
+                    'short': {'action': 'hold', 'value': 'W', 'mode': 'double_tap_hold'},
+                    'long': {'action': 'none'},
+                },
+            }
+            for trig, mapping in bindings.items():
+                if trig in available:
+                    self.owner.mapping_change({'op': 'binding', 'profile': profile, 'trigger': trig, 'mapping': mapping})
+            if hasattr(self.owner, 'notify'):
+                self.owner.notify(tr('已套用「3D 动作：左摇杆推底双击 W 冲刺」模板'))
+        elif template_id == 'fps_gyro':
+            existing_mouse = copy.deepcopy(
+                (self.owner.config.get('profile_options', {}).get(profile, {}) or {}).get('mouse') or {}
+            )
+            existing_mouse.update({
+                'gyro_enabled': True,
+                'gyro_trigger': 'LT',
+                'gyro_sensitivity': float(existing_mouse.get('gyro_sensitivity', 18.0)),
+            })
+            self.owner.mapping_change({
+                'op': 'options',
+                'profile': profile,
+                'options': {'right_stick_mouse': True, 'mouse': existing_mouse},
+            })
+            if hasattr(self.owner, 'notify'):
+                self.owner.notify(tr('已套用「射击体感：按住左扳机开启陀螺仪瞄准」模板'))
+        elif template_id == 'left_stick_mouse':
+            existing_mouse = copy.deepcopy(
+                (self.owner.config.get('profile_options', {}).get(profile, {}) or {}).get('mouse') or {}
+            )
+            existing_mouse['stick_source'] = 'left'
+            self.owner.mapping_change({
+                'op': 'options',
+                'profile': profile,
+                'options': {'right_stick_mouse': True, 'mouse': existing_mouse},
+            })
+            if hasattr(self.owner, 'notify'):
+                self.owner.notify(tr('已切换为「左摇杆控制鼠标指针」'))
+        self.refresh_display()
+
     @staticmethod
     def key_token(key):
         from .actions import parse_keys
@@ -1521,7 +1730,15 @@ class VirtualKbmPage(QWidget):
 
         from .mapping_engine import input_sources
         sources = input_sources(self.owner.snapshot)
-        self.mouse_toggle.setVisible(bool({'RS:up', 'RS:down', 'RS:left', 'RS:right'} & set(sources)))
+        profile_opts = config.get('profile_options', {}).get(selected, {})
+        stick_source = (profile_opts.get('mouse') or {}).get('stick_source', 'right')
+        stick_axes_sources = (
+            {'LS:up', 'LS:down', 'LS:left', 'LS:right'}
+            if stick_source == 'left'
+            else {'RS:up', 'RS:down', 'RS:left', 'RS:right'}
+        )
+        self.mouse_toggle.setText(tr('左摇杆控制鼠标') if stick_source == 'left' else tr('右摇杆控制鼠标'))
+        self.mouse_toggle.setVisible(bool(stick_axes_sources & set(sources)))
         self.cloaking_action.setEnabled(bool((WINDOWS_FEATURES or sys.platform == 'darwin') and self.owner.snapshot and self.owner.snapshot.get('vendor') and self.owner.snapshot.get('product')))
         self.application_profiles_action.setEnabled(bool(application_profiles_supported() and self.owner.snapshot))
         self.import_profile_action.setEnabled(bool(self.owner.snapshot))
@@ -1529,7 +1746,7 @@ class VirtualKbmPage(QWidget):
         from .mapping_swap_ui import can_swap_bindings
         self.swap_bindings_action.setEnabled(can_swap_bindings(self.owner, selected))
         self.mouse_toggle.blockSignals(True)
-        self.mouse_toggle.setChecked(config.get('profile_options', {}).get(selected, {}).get('right_stick_mouse', False))
+        self.mouse_toggle.setChecked(profile_opts.get('right_stick_mouse', False))
         self.mouse_toggle.blockSignals(False)
         from .studio_core import is_nikki_profile
         self.layout_btn.setEnabled(is_nikki_profile(config, selected))
@@ -1651,17 +1868,20 @@ class VirtualKbmPage(QWidget):
             self.owner.notify(tr('HidHide 仅支持 Windows，macOS 无法隐藏手柄原始输入'))
             return
         if not hasattr(self, 'hidhide'):
+            from .hidhide import hidhide_usage_guidance
             self.hidhide = HidHideClient()
             self.cloaking_dialog = QDialog(self); self.cloaking_dialog.setWindowTitle(tr('设备隐身'))
             layout = QVBoxLayout(self.cloaking_dialog)
             self.cloaking_toggle = Toggle(tr('向其他应用隐藏手柄原始输入'))
             self.cloaking_status_label = QLabel(); self.cloaking_status_label.setWordWrap(True)
+            self.cloaking_guidance_label = label(hidhide_usage_guidance(), 'caption', True)
             self.btn_uncloak_all = QPushButton(tr('一键恢复所有手柄共享访问'))
             self.btn_uncloak_all.setToolTip(tr('清空驱动隐身黑名单并关闭过滤，立即恢复手柄在系统与其他游戏中的可见性'))
             self.btn_uncloak_all.clicked.connect(self.uncloak_all_controllers_action)
             self.btn_install_driver = QPushButton(tr('打开 HidHide 驱动页面'))
             self.btn_install_driver.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(HIDHIDE_RELEASE_URL)))
             layout.addWidget(self.cloaking_status_label); layout.addWidget(self.cloaking_toggle)
+            layout.addWidget(self.cloaking_guidance_label)
             layout.addWidget(self.btn_uncloak_all); layout.addWidget(self.btn_install_driver)
             self.cloaking_toggle.toggled.connect(self.toggle_cloaking)
         self.refresh_cloaking_status()

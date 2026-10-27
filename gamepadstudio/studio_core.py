@@ -1169,6 +1169,13 @@ class ConfigStore:
                     raise ValueError('预设视角与指针设置格式错误')
                 if 'invert_y' in mouse and not isinstance(mouse['invert_y'], bool):
                     raise ValueError('Y 轴反转设置应为开启或关闭')
+                if 'gyro_enabled' in mouse and not isinstance(mouse['gyro_enabled'], bool):
+                    raise ValueError('陀螺仪设置应为开启或关闭')
+                if 'gyro_invert_y' in mouse and not isinstance(mouse['gyro_invert_y'], bool):
+                    raise ValueError('陀螺仪 Y 轴反转设置应为开启或关闭')
+                if 'stick_source' in mouse and (
+                        type(mouse['stick_source']) is not str or mouse['stick_source'] not in ('right', 'left')):
+                    raise ValueError('鼠标控制摇杆应为右摇杆或左摇杆')
             self.data['profile_options'].setdefault(name, {}).update(copy.deepcopy(change['options']))
         elif op == 'delete':
             if self.delete_profile(name, state) is None:
@@ -1195,6 +1202,30 @@ class ConfigStore:
                 self.data['profiles'][name] = controller_defaults((state or {}).get('family', 'xbox'),
                                                                  (state or {}).get('available_buttons', list(range(15))))
                 self.data['profile_options'][name] = {}
+        elif op == 'allocate_unused_xinput':
+            from .device_quirks import partition_dinput_buttons_by_sdl_db
+            avail = list((state or {}).get('available_buttons') or range(15))
+            total = max(avail, default=14) + 1
+            sdl_map = str((state or {}).get('sdl_mapping') or '')
+            part = (state or {}).get('button_partition') or partition_dinput_buttons_by_sdl_db(total, sdl_map)
+            use_canonical = bool(change.get('use_canonical_slots', False))
+            seq_map = (
+                part.get('canonical_allocated_sequences', {})
+                if use_canonical
+                else {str(k): v for k, v in part.get('allocated_sequences', {}).items()}
+            )
+            valid_sources = set(input_sources(state))
+            overwrite = bool(change.get('overwrite', True))
+            current_prof = self.data['profiles'][name]
+            for trig, seq in seq_map.items():
+                if trig not in valid_sources:
+                    continue
+                existing = current_prof.get(trig, {})
+                if overwrite or existing.get('short', {}).get('action', 'none') == 'none':
+                    current_prof[trig] = {
+                        'short': copy.deepcopy(seq),
+                        'long': copy.deepcopy(existing.get('long', {'action': 'none'})),
+                    }
         else:
             raise ValueError('未知映射修改')
         self.data['mapping_revision'] = self.data.get('mapping_revision', 0) + 1

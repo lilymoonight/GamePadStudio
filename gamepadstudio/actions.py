@@ -43,7 +43,7 @@ KEYS.update({
     'Mute': 0xAD, 'VolumeMute': 0xAD,
     'Vol-': 0xAE, 'VolumeDown': 0xAE, 'VolDown': 0xAE,
     'Vol+': 0xAF, 'VolumeUp': 0xAF, 'VolUp': 0xAF,
-    'Calc': 0x87, 'Calculator': 0x87,
+    'Calc': 0xB7, 'Calculator': 0xB7,
     # Punctuation & Symbols
     '`': 0xC0, '~': 0xC0,
     '-': 0xBD, '_': 0xBD,
@@ -125,27 +125,55 @@ class WindowsActions:
         self.user32.SendInput.argtypes = [W.UINT, C.POINTER(INPUT), C.c_int]
         self.user32.SendInput.restype = W.UINT
 
+    def _ensure_virtual_pad(self):
+        if getattr(self, 'virtual_pad', None) is None:
+            from .virtual_xinput import VirtualXInputPad
+            self.virtual_pad = VirtualXInputPad(on_share=getattr(self, 'on_share_button', None))
+        return self.virtual_pad
+
+    def sync_virtual_gamepad(self, buttons=None, axes=(), trigger_overrides=None):
+        pad = self._ensure_virtual_pad()
+        active_buttons = self.held_gamepad_buttons if buttons is None else buttons
+        self._last_virtual_axes = tuple(axes or ())
+        return pad.emit_frame(buttons=active_buttons, axes=self._last_virtual_axes, trigger_overrides=trigger_overrides)
+
     def gamepad_button(self, button, down):
+        b = str(button).strip()
         if down:
-            self.held_gamepad_buttons.add(button)
+            self.held_gamepad_buttons.add(b)
         else:
-            self.held_gamepad_buttons.discard(button)
+            self.held_gamepad_buttons.discard(b)
+        self._ensure_virtual_pad().emit_frame(
+            buttons=self.held_gamepad_buttons,
+            axes=getattr(self, '_last_virtual_axes', ()),
+        )
 
     def gamepad_chord(self, buttons, down):
         parts = buttons.split('+') if isinstance(buttons, str) else list(buttons)
         for b in parts:
-            self.gamepad_button(b.strip(), down)
+            tok = str(b).strip()
+            if not tok:
+                continue
+            if down:
+                self.held_gamepad_buttons.add(tok)
+            else:
+                self.held_gamepad_buttons.discard(tok)
+        self._ensure_virtual_pad().emit_frame(
+            buttons=self.held_gamepad_buttons,
+            axes=getattr(self, '_last_virtual_axes', ()),
+        )
 
     def gamepad_turbo(self, button, down, rate_hz=15):
         if down:
             self.held_turbo[button] = rate_hz
         else:
             self.held_turbo.pop(button, None)
+            self.gamepad_button(button, False)
 
     def _send(self, keys, down):
         if not keys:
             return
-        extended = {33, 34, 35, 36, 37, 38, 39, 40, 45, 46, 91, 0x6F, 0xAD, 0xAE, 0xAF, 0x87}
+        extended = {33, 34, 35, 36, 37, 38, 39, 40, 45, 46, 91, 0x6F, 0xAD, 0xAE, 0xAF, 0xB7}
         events = []
         for k in keys:
             scan = self.user32.MapVirtualKeyW(k, 0)
@@ -362,6 +390,11 @@ class WindowsActions:
             self.held_gamepad_buttons.clear()
         if hasattr(self, 'held_turbo'):
             self.held_turbo.clear()
+        if getattr(self, 'virtual_pad', None) is not None:
+            try:
+                self.virtual_pad.reset()
+            except Exception:
+                pass
         if errors:
             raise OSError('部分键鼠按键未能释放；映射保持暂停，可再次尝试释放') from errors[0]
 

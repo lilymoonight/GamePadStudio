@@ -21,7 +21,7 @@ ALIASES = {'A': '0', 'B': '1', 'X': '2', 'Y': '3', 'BACK': '4',
            'RB': '10', 'R1': '10', 'UP': '11', 'DOWN': '12', 'LEFT': '13', 'RIGHT': '14',
            'SHARE': '15', 'CAPTURE': '15', 'L2': 'LT', 'R2': 'RT',
            'LS_UP': 'LS:up', 'LS_DOWN': 'LS:down', 'LS_LEFT': 'LS:left', 'LS_RIGHT': 'LS:right'}
-INPUTS = [str(i) for i in range(64)] + ['LT', 'RT'] + [f'{s}:{d}' for s in ('LS', 'RS') for d in ('up', 'down', 'left', 'right')] + ['LS:outer', 'LS:inner'] + list(TOUCH_INPUTS)
+INPUTS = [str(i) for i in range(128)] + ['LT', 'RT'] + [f'{s}:{d}' for s in ('LS', 'RS') for d in ('up', 'down', 'left', 'right')] + ['LS:outer', 'LS:inner', 'LS:up:outer', 'LS:down:outer', 'LS:left:outer', 'LS:right:outer'] + list(TOUCH_INPUTS)
 GESTURES = ('short', 'long')
 GAMEPAD_TARGETS = ['0', '1', '2', '3', '9', '10', 'LT', 'RT', '11', '12', '13', '14', '7', '8', '4', '6', '5', '15']
 GAMEPAD_ACTIONS = {'gamepad_button', 'gamepad_chord', 'gamepad_turbo', 'gamepad_macro'}
@@ -51,10 +51,19 @@ def validate_binding(binding):
         raise ValueError('未知映射动作')
     action = binding.get('action', 'none')
     if action in ('hold', 'mouse_hold'):
-        if 'mode' in binding and (type(binding['mode']) is not str or binding['mode'] not in ('hold', 'toggle')):
-            raise ValueError('键鼠按住模式应为按住或切换保持')
+        if 'mode' in binding and (
+                type(binding['mode']) is not str
+                or binding['mode'] not in ('hold', 'toggle', 'turbo', 'double_tap_hold')):
+            raise ValueError('键鼠按住模式应为按住、切换保持或连发（含双击并按住）')
+        if binding.get('mode') == 'turbo':
+            rate = binding.get('rate_hz', 15)
+            if isinstance(rate, bool) or not isinstance(rate, int):
+                raise ValueError('连发速率应为 5 至 30 Hz 之间的整数')
+            if not 5 <= rate <= 30:
+                raise ValueError('连发速率应在 5 至 30 Hz 之间')
+            binding['rate_hz'] = int(rate)
     elif action != 'antigravity' and 'mode' in binding:
-        raise ValueError('键鼠按住模式应为按住或切换保持')
+        raise ValueError('键鼠按住模式应为按住、切换保持或连发（含双击并按住）')
     if action == 'gamepad_button' and not str(binding.get('value', '')).strip():
         raise ValueError('请选择目标手柄按键')
     if action == 'gamepad_chord' and not str(binding.get('value', '')).strip():
@@ -68,6 +77,12 @@ def validate_binding(binding):
         # Lock keys already toggle OS state on key-down. Merely releasing the
         # synthetic key on the second press cannot undo that state change.
         raise ValueError('CapsLock、NumLock 和 ScrollLock 不能使用切换保持')
+    if action == 'hold' and binding.get('mode') == 'turbo' and any(
+            key in (20, 144, 145) for key in parse_keys(binding['value'])):
+        raise ValueError('CapsLock、NumLock 和 ScrollLock 不能使用连发')
+    if action == 'hold' and binding.get('mode') == 'double_tap_hold' and any(
+            key in (20, 144, 145) for key in parse_keys(binding['value'])):
+        raise ValueError('CapsLock、NumLock 和 ScrollLock 不能使用双击并按住')
     if action in ('mouse_hold', 'mouse_click') and binding.get('value') not in ('left', 'right', 'middle'):
         raise ValueError('请选择鼠标按键')
     if action == 'wheel' and binding.get('value') not in ('up', 'down'):
@@ -88,8 +103,9 @@ def validate_mappings(mappings):
         result[key] = {g: validate_binding(entry.get(g, {'action': 'none'})) for g in GESTURES}
         if key.startswith('TP:') and result[key]['long'].get('action') not in ('none', 'suppress'):
             raise ValueError('触摸板手势只设置一次触发动作')
-        if key.startswith('TP:') and any(result[key][g].get('mode') == 'toggle' for g in GESTURES):
-            raise ValueError('触摸板手势不能使用切换保持')
+        if key.startswith('TP:') and any(
+                result[key][g].get('mode') in ('toggle', 'turbo', 'double_tap_hold') for g in GESTURES):
+            raise ValueError('触摸板手势不能使用切换保持或连发（含双击并按住）')
         if 'long_press' in entry:
             threshold = float(entry['long_press'])
             if not .15 <= threshold <= 3:
@@ -147,7 +163,7 @@ def input_sources(state=None):
         buttons, axes = set(range(15)), set(range(6))
     else:
         buttons = {int(value) for value in state.get('available_buttons', range(15))
-                   if isinstance(value, (int, str)) and str(value).isdigit() and 0 <= int(value) < 64}
+                   if isinstance(value, (int, str)) and str(value).isdigit() and 0 <= int(value) < 128}
         if state.get('is_gamecontroller') is False and state.get('num_hats', 0):
             buttons.update(range(11, 15))
         if 'available_axes' in state:
@@ -163,7 +179,7 @@ def input_sources(state=None):
         if axis in axes:
             result.update(names)
     if {0, 1} <= axes:
-        result.update(('LS:inner', 'LS:outer'))
+        result.update(('LS:inner', 'LS:outer', 'LS:up:outer', 'LS:down:outer', 'LS:left:outer', 'LS:right:outer'))
     result.update(touch_sources(state))
     return [key for key in INPUTS if key in result]
 
@@ -216,7 +232,9 @@ def trigger_label(trigger, family='generic'):
     names = button_labels(family)
     extra = {'LT': 'L2' if family in ('dualsense', 'dualshock4') else 'ZL' if family == 'switch' else 'LT',
              'RT': 'R2' if family in ('dualsense', 'dualshock4') else 'ZR' if family == 'switch' else 'RT',
-             'LS:outer': '左摇杆推满', 'LS:inner': '左摇杆轻推'}
+             'LS:outer': '左摇杆推满', 'LS:inner': '左摇杆轻推',
+             'LS:up:outer': '左摇杆上推满', 'LS:down:outer': '左摇杆下推满',
+             'LS:left:outer': '左摇杆左推满', 'LS:right:outer': '左摇杆右推满'}
     from .i18n import tr
     extra.update({key: tr(title) for key, title in {
                   'TP:tap': '触摸轻点', 'TP:double_tap': '触摸双击', 'TP:hold': '触摸长按',
@@ -246,11 +264,21 @@ def binding_label(binding, family='generic'):
     if action in ('hold', 'shortcut'):
         if action == 'shortcut':
             return value
+        if binding.get('mode') == 'turbo':
+            hz = binding.get('rate_hz', 15)
+            return f"{value}（连发 {hz}Hz）"
+        if binding.get('mode') == 'double_tap_hold':
+            return value + tr('（双击并按住）')
         return value + tr('（切换保持）' if binding.get('mode') == 'toggle' else '（按住）')
     if action in ('mouse_hold', 'mouse_click'):
         target = tr('鼠标' + {'left': '左键', 'right': '右键', 'middle': '中键'}.get(value, value))
         if action == 'mouse_click':
             return target
+        if binding.get('mode') == 'turbo':
+            hz = binding.get('rate_hz', 15)
+            return f"{target}（连发 {hz}Hz）"
+        if binding.get('mode') == 'double_tap_hold':
+            return target + tr('（双击并按住）')
         return target + tr('（切换保持）' if binding.get('mode') == 'toggle' else '（按住）')
     if action == 'wheel':
         return tr('滚轮') + ('↑' if value == 'up' else '↓')
@@ -276,7 +304,12 @@ def output_tokens(binding):
 
 INPUT_THRESHOLD_DEFAULTS = {'trigger_press': .55, 'trigger_release': .35,
                             'stick_press': .50, 'stick_release': .35,
-                            'outer_press': .85, 'outer_release': .75, 'chord_window': .08,
+                            'outer_press': .85, 'outer_release': .75,
+                            'outer_up_press': .85, 'outer_up_release': .75,
+                            'outer_down_press': .85, 'outer_down_release': .75,
+                            'outer_left_press': .85, 'outer_left_release': .75,
+                            'outer_right_press': .85, 'outer_right_release': .75,
+                            'chord_window': .08,
                             'suppress_ls_up': 'off'}
 
 
@@ -296,6 +329,25 @@ def input_thresholds(settings=None):
                 result.update({press_key: press, release_key: release})
         except (TypeError, ValueError, OverflowError):
             pass
+    base_press = result['outer_press']
+    base_release = result['outer_release']
+    for d in ('up', 'down', 'left', 'right'):
+        press_key = f'outer_{d}_press'
+        release_key = f'outer_{d}_release'
+        result[press_key] = base_press
+        result[release_key] = base_release
+        if press_key in settings and release_key in settings:
+            try:
+                raw_press = settings.get(press_key, base_press)
+                raw_release = settings.get(release_key, base_release)
+                if isinstance(raw_press, bool) or isinstance(raw_release, bool):
+                    continue
+                press, release = float(raw_press), float(raw_release)
+                if math.isfinite(press) and math.isfinite(release) and 0 < release < press <= 1:
+                    result[press_key] = press
+                    result[release_key] = release
+            except (TypeError, ValueError, OverflowError):
+                pass
     # Walking is opt-in and uses reversed hysteresis: enter at a light push,
     # remain active through the transition band, leave at a stronger push.
     if 'walk_press' in settings and 'walk_release' in settings:
@@ -367,6 +419,12 @@ class InputNormalizer:
         left_magnitude = math.hypot(axes[0], axes[1])
         if left_magnitude >= outer_threshold:
             current.add('LS:outer')
+        for d in ('up', 'down', 'left', 'right'):
+            outer_key = f'LS:{d}:outer'
+            val = values[f'LS:{d}']
+            thresh_key = f'outer_{d}_release' if outer_key in self.active else f'outer_{d}_press'
+            if val >= thresholds[thresh_key]:
+                current.add(outer_key)
         if 'walk_press' in thresholds and current.intersection({'LS:up', 'LS:down', 'LS:left', 'LS:right'}):
             walk_threshold = thresholds['walk_release' if 'LS:inner' in self.active else 'walk_press']
             if left_magnitude <= walk_threshold:
@@ -500,15 +558,25 @@ class GestureEngine:
         self._prev_buttons = set(current)
 
     def reset(self):
+        errors = []
         for key, state in list(self.pressed.items()):
-            self._finish(key, state, 0, cancel=True)
-        for _, key, gesture, action in self.pending_releases:
-            self._emit(key, gesture, action, False)
+            try:
+                self._finish(key, state, 0, cancel=True)
+            except Exception as exc:
+                errors.append(exc)
+        for item in list(self.pending_releases):
+            _, key, gesture, action = item
+            try:
+                self._emit(key, gesture, action, False)
+            except Exception as exc:
+                errors.append(exc)
         self.pressed.clear()
         self.pending_releases.clear()
         self.consumed.clear()
         self.chord_locks.clear()
         self._prev_buttons = set()
+        if errors:
+            raise errors[0]
 
 
 class MappingRuntime:
@@ -519,6 +587,9 @@ class MappingRuntime:
         self.engine = GestureEngine(self._dispatch)
         self.output_counts = Counter()
         self.toggle_latches = {}
+        self.turbo_bindings = {}
+        self.double_tap_bindings = {}
+        self.macro_runners = []
         self.pulses = []
         self.recent = {}
         self.events = []
@@ -534,6 +605,8 @@ class MappingRuntime:
         self.mouse_thread = None
         self.config_signature = None
         self.unsupported_bindings = []
+        from .virtual_xinput import compose_xusb_report
+        self.virtual_xinput_state = compose_xusb_report()[1]
         if start_mouse:
             from .virtual_kbm import VirtualMouseThread
             self.mouse_thread = VirtualMouseThread(actions)
@@ -580,7 +653,7 @@ class MappingRuntime:
         # leave this one output inert; native posting failures still propagate.
         if self._unsupported_key_reason(binding):
             return
-        if action in ('hold', 'mouse_hold') and binding.get('mode') == 'toggle':
+        if action in ('hold', 'mouse_hold', 'gamepad_button', 'gamepad_chord') and binding.get('mode') == 'toggle':
             if down:
                 owner = (self.engine.current_trigger, self.engine.current_gesture)
                 held = self.toggle_latches.get(owner)
@@ -590,6 +663,83 @@ class MappingRuntime:
                 else:
                     self._hold(held, False)
                     del self.toggle_latches[owner]
+        elif action in ('hold', 'mouse_hold', 'gamepad_button', 'gamepad_chord') and binding.get('mode') == 'turbo':
+            owner = (self.engine.current_trigger, self.engine.current_gesture)
+            if down:
+                rate = binding.get('rate_hz', 15)
+                half_period = 0.5 / rate
+                self._hold(binding, True)
+                self.turbo_bindings[owner] = {
+                    'binding': copy.deepcopy(binding),
+                    'rate_hz': rate,
+                    'half_period': half_period,
+                    'next_toggle': self.now + half_period,
+                    'is_down': True,
+                }
+            else:
+                info = self.turbo_bindings.get(owner)
+                if not info:
+                    for k, v in list(self.turbo_bindings.items()):
+                        if v['binding']['action'] == binding['action'] and v['binding'].get('value') == binding.get('value'):
+                            owner = k
+                            info = v
+                            break
+                if info:
+                    if info.get('is_down'):
+                        self._hold(info['binding'], False)
+                        info['is_down'] = False
+                    self.turbo_bindings.pop(owner, None)
+        elif action in ('hold', 'mouse_hold', 'gamepad_button', 'gamepad_chord') and binding.get('mode') == 'double_tap_hold':
+            owner = (self.engine.current_trigger, self.engine.current_gesture)
+            if down:
+                self._hold(binding, True)
+                self.double_tap_bindings[owner] = {
+                    'binding': copy.deepcopy(binding),
+                    'step': 0,
+                    't_up': self.now + 0.045,
+                    't_hold': self.now + 0.090,
+                    'is_down': True,
+                }
+            else:
+                info = self.double_tap_bindings.get(owner)
+                if not info:
+                    for k, v in list(self.double_tap_bindings.items()):
+                        if v['binding']['action'] == binding['action'] and v['binding'].get('value') == binding.get('value'):
+                            owner = k
+                            info = v
+                            break
+                if info:
+                    if info.get('is_down'):
+                        self._hold(info['binding'], False)
+                        info['is_down'] = False
+                    self.double_tap_bindings.pop(owner, None)
+        elif down and action == 'gamepad_macro':
+            raw_steps = binding.get('sequence', [])
+            norm_steps = []
+            for st in (raw_steps if isinstance(raw_steps, list) else ()):
+                if not isinstance(st, dict):
+                    continue
+                if 'buttons' in st and isinstance(st['buttons'], (list, tuple)):
+                    val = '+'.join(str(b).strip() for b in st['buttons'] if str(b).strip())
+                else:
+                    val = str(st.get('value', '')).strip()
+                if not val:
+                    continue
+                hold_s = max(0.01, float(st.get('hold_ms', 50)) / 1000.0)
+                gap_s = max(0.0, float(st.get('gap_ms', 30)) / 1000.0)
+                sub = {'action': 'gamepad_chord' if '+' in val else 'gamepad_button', 'value': val}
+                norm_steps.append({'binding': sub, 'hold_s': hold_s, 'gap_s': gap_s})
+            if norm_steps:
+                first = norm_steps[0]
+                self._hold(first['binding'], True)
+                self.macro_runners.append({
+                    'steps': norm_steps,
+                    'index': 0,
+                    'phase': 'hold',
+                    'next_time': self.now + first['hold_s'],
+                    'active_binding': first['binding'],
+                    'is_down': True,
+                })
         elif action in HOLD_ACTIONS:
             self._hold(binding, down)
         elif down and action in ('shortcut', 'mouse_click'):
@@ -689,6 +839,62 @@ class MappingRuntime:
                 self.pulses.remove((when, binding))
         regular_mappings = {key: entry for key, entry in mappings.items() if not key.startswith('TP:')}
         self.engine.update(self.inputs - self.blocked - self.curve_blocked, regular_mappings, self.now)
+        for owner, info in list(self.turbo_bindings.items()):
+            toggles = 0
+            while self.now >= info['next_toggle'] - 1e-9 and toggles < 20:
+                info['is_down'] = not info['is_down']
+                self._hold(info['binding'], info['is_down'])
+                if info['is_down']:
+                    for token in output_tokens(info['binding']):
+                        self.recent[token] = self.now + .18
+                info['next_toggle'] += info['half_period']
+                toggles += 1
+            if toggles >= 20 and self.now >= info['next_toggle'] - 1e-9:
+                info['next_toggle'] = self.now + info['half_period']
+        for owner, info in list(self.double_tap_bindings.items()):
+            if info['step'] == 0 and self.now >= info['t_up'] - 1e-9:
+                self._hold(info['binding'], False)
+                info['is_down'] = False
+                info['step'] = 1
+            if info['step'] == 1 and self.now >= info['t_hold'] - 1e-9:
+                self._hold(info['binding'], True)
+                info['is_down'] = True
+                info['step'] = 2
+                for token in output_tokens(info['binding']):
+                    self.recent[token] = self.now + .18
+        for runner in list(self.macro_runners):
+            steps = runner['steps']
+            loops = 0
+            while self.now >= runner['next_time'] - 1e-9 and loops < 20:
+                loops += 1
+                idx = runner['index']
+                cur_step = steps[idx]
+                if runner['phase'] == 'hold':
+                    if runner.get('is_down'):
+                        self._hold(runner['active_binding'], False)
+                        runner['is_down'] = False
+                    if idx + 1 >= len(steps):
+                        self.macro_runners.remove(runner)
+                        break
+                    if cur_step['gap_s'] > 0:
+                        runner['phase'] = 'gap'
+                        runner['next_time'] += cur_step['gap_s']
+                    else:
+                        runner['index'] = idx + 1
+                        nxt = steps[idx + 1]
+                        runner['active_binding'] = nxt['binding']
+                        self._hold(nxt['binding'], True)
+                        runner['is_down'] = True
+                        runner['next_time'] += nxt['hold_s']
+                else:
+                    runner['index'] = idx + 1
+                    nxt = steps[idx + 1]
+                    runner['phase'] = 'hold'
+                    runner['active_binding'] = nxt['binding']
+                    self._hold(nxt['binding'], True)
+                    runner['is_down'] = True
+                    runner['next_time'] += nxt['hold_s']
+        self._update_virtual_xinput_state(state, regular_mappings)
         touch = self.touch_recognizer.update(state, self.now, config)
         self.touch_activity = {'contacts': touch['contacts'], 'mode': touch['mode']}
         if config.get('touch_gestures_enabled'):
@@ -717,12 +923,64 @@ class MappingRuntime:
         self.last_touch = state.get('touch')
         if self.mouse_thread:
             axes = list(state.get('axes', [])) + [0.] * 6
+            mouse_opts = options.get('mouse', {})
+            stick_source = mouse_opts.get('stick_source', 'right')
+            if stick_source == 'left':
+                stick_axes = (axes[0], axes[1])
+                required_sources = {'LS:left', 'LS:up'}
+                blocked_sources = {'LS:up', 'LS:down', 'LS:left', 'LS:right'}
+            else:
+                stick_axes = (axes[2], axes[3])
+                required_sources = {'RS:left', 'RS:up'}
+                blocked_sources = {'RS:up', 'RS:down', 'RS:left', 'RS:right'}
             move = (owns_profile and options.get('right_stick_mouse', profile_mode(config, config['active_profile']) == 'kbm')
-                    and {'RS:left', 'RS:up'} <= set(input_sources(state))
-                    and not self.blocked.intersection({'RS:up', 'RS:down', 'RS:left', 'RS:right'}))
-            desktop = options.get('mouse', {}).get('mode', 'game') == 'desktop' or (hasattr(self.actions, 'is_nikki_game_focused') and not self.actions.is_nikki_game_focused())
-            self.mouse_thread.update_stick(axes[2] if move else 0., axes[3] if move else 0., is_desktop=desktop)
+                    and required_sources <= set(input_sources(state))
+                    and not self.blocked.intersection(blocked_sources))
+            desktop = mouse_opts.get('mode', 'game') == 'desktop' or (hasattr(self.actions, 'is_nikki_game_focused') and not self.actions.is_nikki_game_focused())
+            self.mouse_thread.update_stick(stick_axes[0] if move else 0., stick_axes[1] if move else 0., is_desktop=desktop)
             self.mouse_thread.set_click_lock(any(n for k, n in self.output_counts.items() if k.startswith('mouse:')))
+
+            if hasattr(self.mouse_thread, 'update_gyro'):
+                gyro_enabled = bool(mouse_opts.get('gyro_enabled', False))
+                gyro_trigger = mouse_opts.get('gyro_trigger', 'LT')
+                trigger_active = (gyro_trigger in ('', 'always') or
+                                  gyro_trigger in self.inputs or
+                                  ALIASES.get(gyro_trigger.upper()) in self.inputs)
+                gyro_active = owns_profile and gyro_enabled and not self.preview and trigger_active
+                gyro_data = state.get('gyro', [])
+                if gyro_active and len(gyro_data) >= 3:
+                    self.mouse_thread.update_gyro(*gyro_data[:3])
+                else:
+                    self.mouse_thread.update_gyro(0.0, 0.0, 0.0)
+
+    def _update_virtual_xinput_state(self, state, regular_mappings):
+        from .virtual_xinput import XUSB_BUTTON_MASKS, compose_xusb_report
+        intercepted = set()
+        for trig_key, entry in (regular_mappings or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            if any(entry.get(g, {}).get('action', 'none') != 'none' for g in GESTURES):
+                parts = trig_key.split('+')
+                if len(parts) == 1:
+                    intercepted.add(parts[0])
+                elif set(parts) <= self.inputs:
+                    intercepted.update(parts)
+        intercepted.update(self.engine.consumed)
+        passthrough = {
+            b for b in self.inputs
+            if (b in XUSB_BUTTON_MASKS or b in ('LT', 'RT')) and b not in intercepted
+        }
+        emitted = {
+            tok.split(':', 1)[1]
+            for tok, cnt in self.output_counts.items()
+            if cnt > 0 and tok.startswith('pad:')
+        }
+        combined = passthrough | emitted
+        _, snap = compose_xusb_report(combined, (state or {}).get('axes', ()))
+        snap['passthrough_buttons'] = sorted(passthrough)
+        snap['emitted_buttons'] = sorted(emitted)
+        snap['intercepted_buttons'] = sorted(intercepted & self.inputs)
+        self.virtual_xinput_state = snap
 
     def feedback(self):
         return {'preview': self.preview, 'inputs': sorted(self.inputs), 'active': list(self.engine.pressed),
@@ -734,7 +992,11 @@ class MappingRuntime:
     def reset(self, blocked=None):
         # Stop continuous motion even if a following key-up is rejected.
         if self.mouse_thread:
+            if hasattr(self.mouse_thread, 'update_gyro'):
+                self.mouse_thread.update_gyro(0.0, 0.0, 0.0)
             self.mouse_thread.update_stick(0., 0.)
+            if hasattr(self.mouse_thread, '_reset_motion'):
+                self.mouse_thread._reset_motion()
             clear_error = getattr(self.mouse_thread, 'clear_output_error', None)
             if callable(clear_error):
                 clear_error()
@@ -743,6 +1005,33 @@ class MappingRuntime:
             self.engine.reset()
         except Exception as exc:
             errors.append(exc)
+        for owner, info in list(self.turbo_bindings.items()):
+            try:
+                if info.get('is_down'):
+                    self._hold(info['binding'], False)
+                    info['is_down'] = False
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                del self.turbo_bindings[owner]
+        for owner, info in list(self.double_tap_bindings.items()):
+            try:
+                if info.get('is_down'):
+                    self._hold(info['binding'], False)
+                    info['is_down'] = False
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                del self.double_tap_bindings[owner]
+        for runner in list(self.macro_runners):
+            try:
+                if runner.get('is_down') and runner.get('active_binding'):
+                    self._hold(runner['active_binding'], False)
+                    runner['is_down'] = False
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                self.macro_runners.remove(runner)
         for owner, binding in list(self.toggle_latches.items()):
             try:
                 self._hold(binding, False)
@@ -763,6 +1052,8 @@ class MappingRuntime:
         self.last_touch = None
         self.touch_recognizer.reset(block_until_release=True)
         self.touch_activity = {'contacts': 0, 'mode': 'idle'}
+        from .virtual_xinput import compose_xusb_report
+        self.virtual_xinput_state = compose_xusb_report()[1]
         self.blocked.update(self.inputs if blocked is None else blocked)
         if self.mouse_thread:
             self.mouse_thread.update_stick(0., 0.)

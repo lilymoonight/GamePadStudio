@@ -39,8 +39,15 @@ def button_text(key, family='generic'):
         return (('L2', 'R2') if family in PLAYSTATION else
                 ('ZL', 'ZR') if family == 'switch' else ('LT', 'RT'))[key == 'RT']
     if key.startswith(('LS:', 'RS:')):
-        stick, direction = key.split(':', 1)
+        parts = key.split(':')
         arrows = {'up': '↑', 'down': '↓', 'left': '←', 'right': '→'}
+        if len(parts) == 3 and parts[2] in ('outer', 'inner'):
+            stick, direction, zone = parts[0], parts[1], parts[2]
+            suffix = ('轻推' if zone == 'inner' else '推满') if get_language() != 'en' else ('Soft' if zone == 'inner' else 'Full')
+            arrow = arrows.get(direction, direction)
+            sep = '' if get_language() != 'en' else ' '
+            return stick + arrow + sep + suffix
+        stick, direction = key.split(':', 1)
         if direction in arrows:
             return stick + arrows[direction]
         if direction in ('inner', 'outer'):

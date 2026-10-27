@@ -210,7 +210,7 @@ def test_reset_releases_other_latches_even_when_one_key_up_fails_then_can_retry(
     assert actions.keys[ord('W')] == 0 and not engine.toggle_latches
 
 
-@pytest.mark.parametrize('mode', [None, True, 1, '', 'turbo', 'TOGGLE', [], {}])
+@pytest.mark.parametrize('mode', [None, True, 1, '', 'rapid', 'TOGGLE', [], {}])
 def test_invalid_modes_are_rejected(mode):
     with pytest.raises(ValueError, match='模式'):
         validate_mappings({'0': entry(binding(mode=mode))})

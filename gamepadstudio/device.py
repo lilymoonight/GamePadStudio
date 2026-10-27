@@ -53,6 +53,10 @@ class AxisBind(C.Structure):
     _fields_ = [('bind_type', C.c_int), ('value', AxisBindValue)]
 
 
+SDL_SENSOR_GYRO = 2
+
+
+
 def input_backend_for_guid(guid):
     """SDL records the backend and XInput subtype in the final GUID bytes."""
     try:
@@ -147,6 +151,9 @@ class Device:
             ('SDL_JoystickGetSerial', [C.c_void_p], C.c_char_p),
             ('SDL_GameControllerGetSerial', [C.c_void_p], C.c_char_p),
             ('SDL_JoystickPathForIndex', [C.c_int], C.c_char_p),
+            ('SDL_GameControllerHasSensor', [C.c_void_p, C.c_int], C.c_bool),
+            ('SDL_GameControllerSetSensorEnabled', [C.c_void_p, C.c_int, C.c_bool], C.c_int),
+            ('SDL_GameControllerGetSensorData', [C.c_void_p, C.c_int, C.POINTER(C.c_float), C.c_int], C.c_int),
         ]:
             fn = getattr(self.lib, name, None)
             if fn is not None:
@@ -171,22 +178,47 @@ class Device:
             raise RuntimeError(self.lib.SDL_GetError().decode())
         self.event = C.create_string_buffer(128)
 
+    def _apply_pending_db_mappings(self):
+        from .device_quirks import get_controller_database
+        add_fn = getattr(self.lib, 'SDL_GameControllerAddMapping', None)
+        if not add_fn:
+            return
+        for mapping in get_controller_database().drain_pending_sdl_mappings():
+            try:
+                add_fn(mapping.encode('utf-8'))
+            except Exception:
+                pass
+
     def enumerate_devices(self):
+        self._apply_pending_db_mappings()
         try:
             self.lib.SDL_JoystickUpdate()
             self.lib.SDL_GameControllerUpdate()
         except Exception:
             pass
         self.lib.SDL_PumpEvents()
+        from .device_quirks import detect_input_protocol, identify_controller_hardware
         rows=[]
         for i in range(self.lib.SDL_NumJoysticks()):
             instance=self.lib.SDL_JoystickGetDeviceInstanceID(i)
             if instance<0:continue
             is_gamecontroller=bool(self.lib.SDL_IsGameController(i))
             vendor=self.lib.SDL_JoystickGetDeviceVendor(i);product=self.lib.SDL_JoystickGetDeviceProduct(i)
-            controller_type=self.lib.SDL_GameControllerTypeForIndex(i) if is_gamecontroller else 0
             name=(self.lib.SDL_JoystickNameForIndex(i) or b'Controller').decode('utf-8','replace')
             guid=bytes(self.lib.SDL_JoystickGetDeviceGUID(i).data).hex()
+            backend=input_backend_for_guid(guid) if is_gamecontroller else ''
+            protocol=detect_input_protocol(guid=guid, is_gamecontroller=is_gamecontroller,
+                                           vendor=vendor, product=product, name=name, input_backend=backend)
+            hw_info=identify_controller_hardware(dict(vendor=vendor, product=product, guid=guid, name=name,
+                                                      controller_type=0, is_gamecontroller=is_gamecontroller,
+                                                      input_backend=backend, input_protocol=protocol))
+            if not is_gamecontroller and hw_info.get('sdl_mapping'):
+                try:
+                    self.lib.SDL_GameControllerAddMapping(hw_info['sdl_mapping'].encode('utf-8'))
+                    is_gamecontroller=bool(self.lib.SDL_IsGameController(i))
+                except Exception:
+                    pass
+            controller_type=self.lib.SDL_GameControllerTypeForIndex(i) if is_gamecontroller else 0
             family=family_for(controller_type,vendor,product,name)
             model_key=f'{family}:{vendor:04x}:{product:04x}:{guid}'
             path_api=getattr(self.lib, 'SDL_JoystickPathForIndex', None)
@@ -197,7 +229,13 @@ class Device:
             rows.append(dict(instance_id=instance,index=i,name=name,vendor=vendor,product=product,
                              controller_type=controller_type,family=family,supported=True,
                              is_gamecontroller=is_gamecontroller,
-                             input_backend=input_backend_for_guid(guid) if is_gamecontroller else '',
+                             input_backend=backend,
+                             input_protocol=protocol,
+                             brand=hw_info['brand'],
+                             model=hw_info['model'],
+                             dinput_layout=hw_info['dinput_layout'],
+                             sdl_mapping=hw_info.get('sdl_mapping', ''),
+                             recommended_preset=hw_info['recommended_preset'],
                              profile_key=model_key,model_key=model_key,device_key=device_key,
                              device_path=path.decode('utf-8', 'replace') if path else ''))
         self.available=rows
@@ -235,7 +273,16 @@ class Device:
             self.close_handle()
             self.handle=handle;self.index=row['index'];self.instance_id=instance_id;self.is_raw_joystick=False
             self.metadata={k:v for k,v in row.items() if k!='index'}
-            self.metadata.update(available_buttons=[i for i in range(21) if self.lib.SDL_GameControllerHasButton(handle,i)],
+            avail_btns = [i for i in range(21) if self.lib.SDL_GameControllerHasButton(handle, i)]
+            try:
+                joy_handle = self.lib.SDL_GameControllerGetJoystick(handle)
+                if joy_handle:
+                    raw_total = self.lib.SDL_JoystickNumButtons(joy_handle)
+                    if isinstance(raw_total, int) and raw_total > 21:
+                        avail_btns.extend(range(21, min(128, raw_total)))
+            except Exception:
+                pass
+            self.metadata.update(available_buttons=avail_btns,
                                  touchpad=self.lib.SDL_GameControllerGetNumTouchpads(handle)>0,
                                  led=bool(self.lib.SDL_GameControllerHasLED(handle)),
                                  rumble=bool(self.lib.SDL_GameControllerHasRumble(handle)))
@@ -256,6 +303,15 @@ class Device:
             trigger_api = getattr(self.lib, 'SDL_GameControllerHasRumbleTriggers', None)
             self.metadata['trigger_rumble'] = bool(trigger_api and
                 getattr(self.lib, 'SDL_GameControllerRumbleTriggers', None) and trigger_api(handle))
+            has_sensor_fn = getattr(self.lib, 'SDL_GameControllerHasSensor', None)
+            set_sensor_fn = getattr(self.lib, 'SDL_GameControllerSetSensorEnabled', None)
+            has_gyro = bool(has_sensor_fn and has_sensor_fn(handle, SDL_SENSOR_GYRO))
+            if has_gyro and set_sensor_fn:
+                try:
+                    set_sensor_fn(handle, SDL_SENSOR_GYRO, 1)
+                except Exception:
+                    pass
+            self.metadata['gyro'] = has_gyro
             serial_api=getattr(self.lib, 'SDL_GameControllerGetSerial', None)
             serial=serial_api(handle) if serial_api else None
             if serial:
@@ -272,7 +328,7 @@ class Device:
             num_axes=self.lib.SDL_JoystickNumAxes(handle)
             num_hats=self.lib.SDL_JoystickNumHats(handle)
             self.metadata={k:v for k,v in row.items() if k!='index'}
-            available_buttons=set(range(min(64, num_buttons)))
+            available_buttons=set(range(min(128, num_buttons)))
             if num_hats:
                 available_buttons.update(range(11, 15))
             rumble_api=getattr(self.lib, 'SDL_JoystickHasRumble', None)
@@ -280,7 +336,11 @@ class Device:
                                  num_axes=num_axes, num_hats=num_hats,
                                  touchpad=False, led=False, rumble=bool(rumble_api(handle)) if rumble_api else False)
             self.metadata.update(analog_trigger_axes=[], trigger_rumble=False)
-            self.metadata.update(touchpad_count=0, touch_finger_counts=[], touchpad_fingers=0)
+            self.metadata.update(touchpad_count=0, touch_finger_counts=[], touchpad_fingers=0, gyro=False)
+            from .device_quirks import partition_dinput_buttons_by_sdl_db
+            self.metadata['button_partition'] = partition_dinput_buttons_by_sdl_db(
+                num_buttons, self.metadata.get('sdl_mapping', '')
+            )
             serial_api=getattr(self.lib, 'SDL_JoystickGetSerial', None)
             serial=serial_api(handle) if serial_api else None
             if serial:
@@ -334,34 +394,51 @@ class Device:
             num_buttons = self.lib.SDL_JoystickNumButtons(h)
             num_axes = self.lib.SDL_JoystickNumAxes(h)
             num_hats = self.lib.SDL_JoystickNumHats(h)
-            buttons = [i for i in range(min(64, num_buttons)) if self.lib.SDL_JoystickGetButton(h, i)]
-            axes = [self.lib.SDL_JoystickGetAxis(h, i) / 32768.0 for i in range(num_axes)]
-            for hat_idx in range(min(1, num_hats)):
-                hat_val = self.lib.SDL_JoystickGetHat(h, hat_idx)
-                if hat_val & 0x01: buttons.append(11) # Up
-                if hat_val & 0x04: buttons.append(12) # Down
-                if hat_val & 0x08: buttons.append(13) # Left
-                if hat_val & 0x02: buttons.append(14) # Right
+            raw_buttons = [i for i in range(min(128, num_buttons)) if self.lib.SDL_JoystickGetButton(h, i)]
+            raw_axes = [self.lib.SDL_JoystickGetAxis(h, i) / 32768.0 for i in range(num_axes)]
+            hat_val = self.lib.SDL_JoystickGetHat(h, 0) if num_hats > 0 else 0
+            from .device_quirks import normalize_dinput_gamepad_state
+            buttons, axes = normalize_dinput_gamepad_state(
+                raw_buttons,
+                raw_axes,
+                hat_mask=hat_val,
+                dinput_layout=self.metadata.get('dinput_layout'),
+                num_buttons=num_buttons,
+            )
             name = (self.lib.SDL_JoystickName(h) or b'Joystick').decode('utf-8', 'replace')
-            return {**self.metadata, 'name': name, 'buttons': sorted(set(buttons)),
+            return {**self.metadata, 'name': name, 'buttons': buttons,
                     'axes': axes, 'power': self.lib.SDL_JoystickCurrentPowerLevel(h),
                     'vendor': self.metadata.get('vendor', 0), 'product': self.metadata.get('product', 0),
                     'led': False, 'rumble': self.metadata.get('rumble', False),
-                    'touch': [], 'touch_fingers': [], 'touch_read_error': False, 'touch_valid': True}
+                    'touch': [], 'touch_fingers': [], 'touch_read_error': False, 'touch_valid': True,
+                    'gyro': []}
 
         if not self.lib.SDL_GameControllerGetAttached(self.handle):
             return None
         h = self.handle
         touch_fingers, touch_error = self._read_touch_fingers(h)
         fingers = [touch_fingers[0]['x'], touch_fingers[0]['y']] if touch_fingers else []
+        gyro_data = self._read_gyro(h) if self.metadata.get('gyro') else []
+        pressed_buttons = [i for i in range(21) if self.lib.SDL_GameControllerGetButton(h, i)]
+        avail = self.metadata.get('available_buttons', ())
+        if avail and max(avail, default=0) >= 21:
+            try:
+                joy_h = self.lib.SDL_GameControllerGetJoystick(h)
+                if joy_h:
+                    for i in avail:
+                        if i >= 21 and self.lib.SDL_JoystickGetButton(joy_h, i):
+                            pressed_buttons.append(i)
+            except Exception:
+                pass
         return {**self.metadata,'name': (self.lib.SDL_GameControllerName(h) or b'Controller').decode('utf-8', 'replace'),
-                'buttons': [i for i in range(21) if self.lib.SDL_GameControllerGetButton(h, i)],
+                'buttons': pressed_buttons,
                 'axes': [self.lib.SDL_GameControllerGetAxis(h, i) / 32768 for i in range(6)],
                 'power': self.lib.SDL_JoystickCurrentPowerLevel(self.lib.SDL_GameControllerGetJoystick(h)),
                 'vendor': self.lib.SDL_GameControllerGetVendor(h), 'product': self.lib.SDL_GameControllerGetProduct(h),
                 'led': bool(self.lib.SDL_GameControllerHasLED(h)), 'rumble': bool(self.lib.SDL_GameControllerHasRumble(h)),
                 'touch': fingers, 'touch_fingers': touch_fingers, 'touch_read_error': touch_error,
-                'touch_valid': not touch_error}
+                'touch_valid': not touch_error,
+                'gyro': gyro_data}
 
     def _new_touch_contact(self, slot):
         self._touch_contact_serial = getattr(self, '_touch_contact_serial', 0) + 1
@@ -405,6 +482,23 @@ class Device:
                                 'x': max(0., min(1., x.value)), 'y': max(0., min(1., y.value)),
                                 'pressure': max(0., min(1., pressure.value))})
         return fingers, failed
+
+    def _read_gyro(self, handle):
+        import math
+        get_sensor = getattr(self.lib, 'SDL_GameControllerGetSensorData', None)
+        if not get_sensor:
+            return [0.0, 0.0, 0.0]
+        data = (C.c_float * 3)()
+        try:
+            res = get_sensor(handle, SDL_SENSOR_GYRO, data, 3)
+            if res != 0 and res is not None:
+                return [0.0, 0.0, 0.0]
+            values = [float(data[0]), float(data[1]), float(data[2])]
+            if not all(math.isfinite(v) for v in values):
+                return [0.0, 0.0, 0.0]
+            return values
+        except Exception:
+            return [0.0, 0.0, 0.0]
 
     def rumble(self, strength):
         try:
@@ -484,10 +578,29 @@ class Device:
             if getattr(self, 'is_raw_joystick', False):
                 self.lib.SDL_JoystickClose(self.handle)
             else:
-                self.lib.SDL_GameControllerRumble(self.handle, 0, 0, 0)
+                if self.metadata.get('gyro'):
+                    set_sensor_fn = getattr(self.lib, 'SDL_GameControllerSetSensorEnabled', None)
+                    if set_sensor_fn:
+                        try:
+                            set_sensor_fn(self.handle, SDL_SENSOR_GYRO, 0)
+                        except Exception:
+                            pass
+                rumble_fn = getattr(self.lib, 'SDL_GameControllerRumble', None)
+                if rumble_fn:
+                    try:
+                        rumble_fn(self.handle, 0, 0, 0)
+                    except Exception:
+                        pass
                 if self.metadata.get('trigger_rumble'):
-                    self.lib.SDL_GameControllerRumbleTriggers(self.handle, 0, 0, 0)
-                self.lib.SDL_GameControllerClose(self.handle)
+                    trig_rumble = getattr(self.lib, 'SDL_GameControllerRumbleTriggers', None)
+                    if trig_rumble:
+                        try:
+                            trig_rumble(self.handle, 0, 0, 0)
+                        except Exception:
+                            pass
+                close_fn = getattr(self.lib, 'SDL_GameControllerClose', None)
+                if close_fn:
+                    close_fn(self.handle)
             self.handle = None
         if isolation is not None:
             isolation.forget_closed_handle()

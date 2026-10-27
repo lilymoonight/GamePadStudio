@@ -215,9 +215,16 @@ QPushButton#danger:pressed {{
 
 QPushButton#icon {{
     padding: 0;
+    min-width: 0;
+    min-height: 0;
     border-radius: {TOKENS['r_sm']}px;
     background: transparent;
     border: 1px solid transparent;
+}}
+QPushButton[iconOnly="true"], QPushButton#primary[iconOnly="true"] {{
+    padding: 0;
+    min-width: 0;
+    min-height: 0;
 }}
 QPushButton#icon:hover {{
     background: {TOKENS['elevated']};
@@ -607,7 +614,7 @@ def tag_style(color_hex, bg_alpha=0.15, border_alpha=0.35):
 
 # ─── SVG Glyphs (Lucide-grade) ──────────────────────────────────────
 PATHS = {
-    'controller':'<rect x="2" y="6" width="20" height="12" rx="4"/><path d="M6 12h4m-2-2v4"/><circle cx="16" cy="11" r="1"/><circle cx="18" cy="13" r="1"/>',
+    'controller':'<path d="M6 11h4M8 9v4"/><circle cx="15" cy="12" r="0.9"/><circle cx="18" cy="10" r="0.9"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/>',
     'grid':'<rect x="3" y="3" width="7" height="7" rx="2.5"/><rect x="14" y="3" width="7" height="7" rx="2.5"/><rect x="3" y="14" width="7" height="7" rx="2.5"/><rect x="14" y="14" width="7" height="7" rx="2.5"/>',
     'mapping':'<circle cx="5" cy="5" r="2.5"/><circle cx="19" cy="5" r="2.5"/><circle cx="5" cy="19" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="M8 5h8M8 19h8M5 8v8m14-8v8"/>',
     'photos':'<rect x="3" y="4" width="18" height="16" rx="4"/><circle cx="8" cy="9" r="1.5"/><path d="m4 17 6-6 5 5 3-3 3 3"/>',
@@ -655,26 +662,57 @@ PATHS = {
     'touchpad':'<rect x="3" y="6" width="18" height="12" rx="4"/><path d="M12 6v5m-4 7h8"/>',
     'monitor':'<rect x="2" y="3" width="20" height="14" rx="3.5"/><path d="M8 21h8m-4-4v4"/>',
     'globe':'<circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+    'gamepad':'<path d="M6 11h4M8 9v4"/><circle cx="15" cy="12" r="0.9"/><circle cx="18" cy="10" r="0.9"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/>',
 }
 
 
-@lru_cache(maxsize=180)
-def glyph(name, color=INK):
-    svg = (
+def _glyph_svg(name, color=INK, stroke_width=1.85):
+    return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
-        f'<g fill="none" stroke="{color}" stroke-width="1.8" '
+        f'<g fill="none" stroke="{color}" stroke-width="{stroke_width}" '
         f'stroke-linecap="round" stroke-linejoin="round">'
         f'{PATHS.get(name, PATHS["info"])}</g></svg>'
     )
-    pix = QPixmap(96, 96)
+
+
+@lru_cache(maxsize=240)
+def _glyph_pixmap(name, color=INK, px=96):
+    svg = _glyph_svg(name, color)
+    pix = QPixmap(px, px)
     pix.fill(Qt.transparent)
     painter = QPainter(pix)
+    painter.setRenderHint(QPainter.Antialiasing, True)
     QSvgRenderer(QByteArray(svg.encode())).render(painter)
     painter.end()
-    return QIcon(pix)
+    return pix
 
 
+@lru_cache(maxsize=240)
+def glyph(name, color=INK, active_color=None):
+    icon = QIcon(_glyph_pixmap(name, color))
+    if active_color:
+        on_pix = _glyph_pixmap(name, active_color)
+        icon.addPixmap(on_pix, QIcon.Normal, QIcon.On)
+        icon.addPixmap(on_pix, QIcon.Active, QIcon.On)
+    return icon
+
+
+@lru_cache(maxsize=1)
 def app_icon():
+    svg_path = ASSETS / 'studio.svg'
+    if svg_path.is_file():
+        renderer = QSvgRenderer(str(svg_path))
+        if renderer.isValid():
+            icon = QIcon()
+            for sz in (32, 64, 128, 256):
+                pix = QPixmap(sz, sz)
+                pix.fill(Qt.transparent)
+                p = QPainter(pix)
+                p.setRenderHint(QPainter.Antialiasing, True)
+                renderer.render(p, QRectF(0, 0, sz, sz))
+                p.end()
+                icon.addPixmap(pix)
+            return icon
     return QIcon(str(ASSETS / 'studio.ico'))
 
 
@@ -787,8 +825,18 @@ class Indicator(QLabel):
         super().__init__(parent)
         self.kind = kind
         self.current = None
+        self.symbol = 'disconnected' if kind == 'connection' else 'battery'
+        self.color = TOKENS['ink_dim']
         self.setFixedSize(30, 30)
         self.setAlignment(Qt.AlignCenter)
+        self._apply_glyph(self.symbol, self.color)
+
+    def _apply_glyph(self, symbol, color):
+        self.symbol = symbol
+        self.color = color
+        pix = _glyph_pixmap(symbol, color, 40)
+        pix.setDevicePixelRatio(2.0)
+        self.setPixmap(pix)
 
     def setText(self, text):
         if text == self.current:
@@ -811,9 +859,8 @@ class Indicator(QLabel):
                      TOKENS['green'])
             if any(k in text for k in ('未', '未知', 'Unknown', 'Disconnected')):
                 symbol = 'info'
-        self.symbol = symbol
-        self.color = color
-        self.setPixmap(glyph(symbol, color).pixmap(20, 20))
+                color = TOKENS['ink_dim']
+        self._apply_glyph(symbol, color)
 
 
 class Toggle(QCheckBox):
@@ -1290,23 +1337,31 @@ class SquircleBadge(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.Antialiasing, True)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         path = QPainterPath()
         radius = round(self.width() * 0.28)
         path.addRoundedRect(r, radius, radius)
 
-        # Milled recessed bay background
+        # Milled recessed bay background with subtle accent tint
         painter.fillPath(path, QColor(TOKENS['void']))
-        painter.setPen(QPen(QColor(TOKENS['border']), 1))
+        acc_col = QColor(self.accent)
+        tint_fill = QColor(acc_col)
+        tint_fill.setAlpha(30)
+        painter.fillPath(path, tint_fill)
+
+        border_col = QColor(acc_col)
+        border_col.setAlpha(82)
+        painter.setPen(QPen(border_col, 1.0))
         painter.drawPath(path)
 
-        # Crisp laser glyph in accent color
-        icon = glyph(self.symbol, self.accent)
-        pix = icon.pixmap(QSize(self.icon_size, self.icon_size))
-        x = (self.width() - self.icon_size) / 2
-        y = (self.height() - self.icon_size) / 2
-        painter.drawPixmap(round(x), round(y), pix)
+        # Crisp direct-vector laser glyph in accent color (Retina sharp)
+        svg = _glyph_svg(self.symbol, self.accent, stroke_width=1.9)
+        x = (self.width() - self.icon_size) / 2.0
+        y = (self.height() - self.icon_size) / 2.0
+        QSvgRenderer(QByteArray(svg.encode())).render(
+            painter, QRectF(x, y, self.icon_size, self.icon_size)
+        )
 
 
 class AppleRow(QWidget):

@@ -44,6 +44,7 @@ UNSUPPORTED_KEY_REASONS = {
     45: 'Insert 的插入／覆盖作用需使用目标应用提供的快捷键。',
     144: 'macOS 数字区的 Clear 与 Windows NumLock 的数字／导航切换作用不同。',
     145: 'ScrollLock 的滚动锁定作用需使用目标应用提供的快捷键。',
+    0xB7: 'Windows 多媒体应用启动按键（Calc）在 macOS 上需要绑定 launch 动作，系统没有对应的通用硬件键码输出。',
     **{key: 'F21–F24 在 AppKit 有逻辑函数字符，但没有公开的通用硬件键码输出；目标应用可能忽略函数字符。'
        for key in range(132, 136)},
 }
@@ -234,9 +235,6 @@ class MacActions(WindowsActions):
         if not keys or missing:
             reason = (UNSUPPORTED_KEY_REASONS.get(missing[0], '此按键暂不支持 macOS 输出。')
                       if missing else '没有可输出的按键。')
-            if isinstance(value, str) and any(part.strip().casefold() in ('calc', 'calculator')
-                                              for part in value.split('+')):
-                reason = '当前配置将 Calc 与 F24 存为同一键值，尚不能区分计算器启动与 F24 输出。'
             return {'supported': False, 'reason': reason}
         return {'supported': True, 'reason': ''}
 

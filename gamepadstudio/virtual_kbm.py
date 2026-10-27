@@ -219,8 +219,12 @@ class VirtualMouseThread(threading.Thread):
         
         # 共享线程安全输入状态
         self._lock = threading.Lock()
+        self.lock = self._lock
         self.stick_x = 0.0
         self.stick_y = 0.0
+        self.gyro_pitch = 0.0
+        self.gyro_yaw = 0.0
+        self.gyro_roll = 0.0
         self.is_desktop = False
         self.click_locked = False
         
@@ -230,6 +234,9 @@ class VirtualMouseThread(threading.Thread):
         self.y_ratio = 0.70
         self.edge_boost = 1.70
         self.invert_y = False
+        self.gyro_enabled = False
+        self.gyro_sensitivity = 18.0
+        self.gyro_invert_y = False
         
         # 亚像素积分累加器
         self.acc_x = 0.0
@@ -246,6 +253,12 @@ class VirtualMouseThread(threading.Thread):
                       settings.get("invert_y") is True)
             previous = (self.deadzone, self.sensitivity, self.y_ratio, self.edge_boost, self.invert_y)
             self.deadzone, self.sensitivity, self.y_ratio, self.edge_boost, self.invert_y = values
+            self.gyro_enabled = bool(settings.get("gyro_enabled", False))
+            try:
+                self.gyro_sensitivity = max(1.0, min(100.0, float(settings.get("gyro_sensitivity", 18.0))))
+            except (TypeError, ValueError):
+                self.gyro_sensitivity = 18.0
+            self.gyro_invert_y = bool(settings.get("gyro_invert_y", False))
             if values != previous:
                 self._reset_motion()
 
@@ -253,12 +266,19 @@ class VirtualMouseThread(threading.Thread):
         """Caller holds the motion lock; old fractional direction never leaks."""
         self.acc_x = self.acc_y = self.outer_hold_time = 0.0
 
+    def update_gyro(self, pitch: float, yaw: float, roll: float):
+        with self._lock:
+            self.gyro_pitch = float(pitch)
+            self.gyro_yaw = float(yaw)
+            self.gyro_roll = float(roll)
+
     def update_stick(self, rx: float, ry: float, is_desktop: bool = False):
         with self._lock:
             if self._output_failed:
                 rx = ry = 0.0
             if is_desktop != self.is_desktop or (rx == 0 and ry == 0):
-                self._reset_motion()
+                if not (self.gyro_pitch != 0.0 or self.gyro_yaw != 0.0 or self.gyro_roll != 0.0):
+                    self._reset_motion()
             self.stick_x = rx
             self.stick_y = ry
             self.is_desktop = is_desktop
@@ -272,6 +292,7 @@ class VirtualMouseThread(threading.Thread):
         self._output_error = error
         self._output_failed = True
         self.stick_x = self.stick_y = 0.0
+        self.gyro_pitch = self.gyro_yaw = self.gyro_roll = 0.0
         self._reset_motion()
 
     def consume_output_error(self):
@@ -285,6 +306,7 @@ class VirtualMouseThread(threading.Thread):
             self._output_error = None
             self._output_failed = False
             self.stick_x = self.stick_y = 0.0
+            self.gyro_pitch = self.gyro_yaw = self.gyro_roll = 0.0
             self._reset_motion()
 
     def run(self):
@@ -314,23 +336,41 @@ class VirtualMouseThread(threading.Thread):
                     desktop = self.is_desktop
                     if desktop and self.click_locked and mag < 0.35:
                         mag = 0.0
-                    if mag <= self.deadzone:
-                        self._reset_motion()
-                        continue
-                    norm = min(1.0, (mag - self.deadzone) / (1.0 - self.deadzone))
-                    if norm >= 0.88:
-                        self.outer_hold_time = min(0.30, self.outer_hold_time + dt)
+
+                    if mag > self.deadzone:
+                        norm = min(1.0, (mag - self.deadzone) / (1.0 - self.deadzone))
+                        if norm >= 0.88:
+                            self.outer_hold_time = min(0.30, self.outer_hold_time + dt)
+                        else:
+                            self.outer_hold_time = max(0.0, self.outer_hold_time - dt * 3.0)
+                        boost = 1.0 + (self.edge_boost - 1.0) * (self.outer_hold_time / 0.30)
+                        power_exp = 1.5 if desktop else 2.0
+                        curve = 0.25 * norm + 0.75 * norm ** power_exp
+                        effective_sens = self.sensitivity * (1.20 if desktop else 1.0)
+                        speed = effective_sens * curve * boost * 60.0
+                        y_ratio = 1.0 if desktop else self.y_ratio
+                        direction_y = -1.0 if self.invert_y and not desktop else 1.0
+                        stick_vx = rx / mag * speed
+                        stick_vy = ry / mag * speed * y_ratio * direction_y
                     else:
                         self.outer_hold_time = max(0.0, self.outer_hold_time - dt * 3.0)
-                    boost = 1.0 + (self.edge_boost - 1.0) * (self.outer_hold_time / 0.30)
-                    power_exp = 1.5 if desktop else 2.0
-                    curve = 0.25 * norm + 0.75 * norm ** power_exp
-                    effective_sens = self.sensitivity * (1.20 if desktop else 1.0)
-                    speed = effective_sens * curve * boost * 60.0
-                    y_ratio = 1.0 if desktop else self.y_ratio
-                    direction_y = -1.0 if self.invert_y and not desktop else 1.0
-                    target_vx = rx / mag * speed
-                    target_vy = ry / mag * speed * y_ratio * direction_y
+                        stick_vx = 0.0
+                        stick_vy = 0.0
+
+                    if self.gyro_enabled:
+                        gyro_vx = (-self.gyro_yaw - self.gyro_roll) * (self.gyro_sensitivity * 60.0)
+                        gyro_vy = (1.0 if self.gyro_invert_y else -1.0) * self.gyro_pitch * (self.gyro_sensitivity * 60.0)
+                    else:
+                        gyro_vx = 0.0
+                        gyro_vy = 0.0
+
+                    target_vx = stick_vx + gyro_vx
+                    target_vy = stick_vy + gyro_vy
+
+                    if target_vx == 0.0 and target_vy == 0.0 and mag <= self.deadzone:
+                        self._reset_motion()
+                        continue
+
                     if not desktop and (not hasattr(self, '_last_guard') or now - self._last_guard > 0.10):
                         self._last_guard = now
                         if hasattr(self.actions, 'guard_cursor_edge'):
@@ -359,6 +399,7 @@ class VirtualMouseThread(threading.Thread):
         with self._lock:
             self.running = False
             self.stick_x = self.stick_y = 0.0
+            self.gyro_pitch = self.gyro_yaw = self.gyro_roll = 0.0
             self._reset_motion()
 
 

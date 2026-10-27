@@ -161,8 +161,8 @@ def workspace(tmp_path, monkeypatch):
 
 def test_studio_workspace_navigation_to_antigravity_page(workspace):
     window = workspace
-    assert 7 in window.nav
-    assert window.nav_titles[7] == 'Antigravity'
+    assert 7 not in window.nav
+    assert not window.voice_entry_group.isVisible()
 
     window.navigate(7)
     assert window.stack.currentIndex() == 7

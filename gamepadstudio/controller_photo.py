@@ -1,16 +1,14 @@
-"""Controller product art rendered using GamepadTester.cn SVG vector graphics.
+"""Unified standard XInput controller schematic rendered via offline SVG vector graphics.
 
-Faithfully reproduces GamepadTester.cn's tactile hardware cards with
-warm stone-800 body tones, crisp outlines, glowing blue DualSense lightbar,
-and active button highlights.
+All controllers share the single standard XInput layout schematic (`reference_xbox.svg`).
+When a physical device is connected, the UI switches the displayed controller name and
+reported capabilities without switching per-model product photos.
 """
 from functools import lru_cache
-import json
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal, QByteArray
-from PySide6.QtGui import (QColor, QPainter, QPainterPath, QPixmap, QPen, QFont,
-                           QRadialGradient, QImage)
+from PySide6.QtGui import QColor, QPainter, QPixmap, QPen, QFont
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget, QSizePolicy
 
@@ -18,61 +16,35 @@ from .glass import TOKENS
 from .controller_catalog import axis_labels
 
 
-ASSET_DIR = Path(__file__).resolve().parent / 'assets' / 'controllers'
 ASSETS = Path(__file__).resolve().parent / 'assets'
-PHOTOS = json.loads((ASSET_DIR / 'sources.json').read_text(encoding='utf-8'))
+XINPUT_SVG_FILE = 'reference_xbox.svg'
+XINPUT_VIEWBOX = (0, 0, 441, 383)
 
-SVG_FILES = {
-    'xbox': 'reference_xbox.svg',
-    'playstation': 'reference_playstation.svg',
-    'switch': 'reference_switch.svg',
+_DEFAULT_CAPTION = '通用 XInput 键位示意'
+PHOTOS = {
+    family: {'caption': _DEFAULT_CAPTION}
+    for family in ('dualsense', 'dualshock4', 'xbox', 'switch', 'stadia', 'flightstick', 'generic')
 }
 
-VIEWBOX = {
-    'xbox': (0, 0, 441, 383),
-    'playstation': (0, 19, 128, 84),
-    'switch': (0, 0, 400, 250),
+# Standard button centers in the 441x383 XInput vector schematic.
+XINPUT_SVG_CENTERS = {
+    0: (330.0, 181.0),
+    1: (348.0, 161.0),
+    2: (310.0, 162.0),
+    3: (329.0, 140.0),
+    4: (188.0, 162.0),
+    5: (220.5, 125.0),
+    6: (253.0, 162.0),
+    7: (113.0, 160.0),
+    8: (278.0, 238.0),
+    9: (138.5, 77.0),
+    10: (302.5, 77.0),
+    11: (166.0, 221.0),
+    12: (166.0, 254.0),
+    13: (149.0, 238.0),
+    14: (183.0, 238.0),
+    15: (220.5, 188.0),
 }
-
-
-def _svg_family(family):
-    if family in ('dualsense', 'dualshock4'):
-        return 'playstation'
-    if family == 'switch':
-        return 'switch'
-    return 'xbox'
-
-
-def tint_playstation(svg_bytes, led_color=None):
-    if led_color is None:
-        led_color = TOKENS['accent']
-    s = svg_bytes.decode('utf-8')
-    s = s.replace('viewBox="0 0 128 128"', 'viewBox="0 19 128 84"', 1)
-
-    # 1. DualSense outer chassis: stone body #2d2926 with visible stone-500 (#78716c) stroke
-    s = s.replace(
-        'style="fill:rgb(245, 245, 244);stroke:none;stroke-width:1px;',
-        'style="fill:#2d2926;stroke:#78716c;stroke-width:1.2px;'
-    )
-    # 2. Touchpad & center: deep stone #161412 with glowing LED border!
-    s = s.replace(
-        'style="fill:rgb(28, 25, 23);stroke:none;stroke-width:1px;',
-        f'style="fill:#161412;stroke:{led_color};stroke-width:1.0px;'
-    )
-    # 3. Bumpers & D-pad & button bases: #3e3a37 with stone-500 stroke
-    s = s.replace(
-        'style="fill:rgb(214, 211, 209);stroke:none;',
-        'style="fill:#3e3a37;stroke:#68625d;stroke-width:0.6px;'
-    )
-    # 4. Stick wells & sticks
-    s = s.replace(
-        'style="fill:rgb(68, 64, 60);stroke:rgb(120, 113, 108);stroke-width:1px;',
-        'style="fill:#1c1917;stroke:#57534e;stroke-width:1px;'
-    )
-    # 5. Crisp white button symbols
-    s = s.replace('style="fill:rgb(168, 162, 158);', 'style="fill:#f5f5f4;')
-    s = s.replace('stroke:rgb(168, 162, 158);', 'stroke:#f5f5f4;')
-    return s.encode('utf-8')
 
 
 def tint_xbox(svg_bytes):
@@ -100,139 +72,45 @@ def tint_xbox(svg_bytes):
     # 5. Buttons & D-pad cross
     s = s.replace('fill:rgb(231, 229, 228);', 'fill:#383533;')
     s = s.replace('stroke:rgb(168, 162, 158);', 'stroke:#a8a29e;')
+    # 6. Face button caps (Y, X, B, A) with dark tactile caps & crisp colored rings
+    s = s.replace(
+        'fill:none;stroke:rgb(234, 179, 8);stroke-opacity:0.5;stroke-width:2px',
+        'fill:#1f1c1a;stroke:#eab308;stroke-opacity:0.9;stroke-width:2px'
+    )
+    s = s.replace(
+        'fill:none;stroke:rgb(59, 130, 246);stroke-opacity:0.5;stroke-width:2px',
+        'fill:#1f1c1a;stroke:#3b82f6;stroke-opacity:0.9;stroke-width:2px'
+    )
+    s = s.replace(
+        'fill:none;stroke:rgb(239, 68, 68);stroke-opacity:0.5;stroke-width:2px',
+        'fill:#1f1c1a;stroke:#ef4444;stroke-opacity:0.9;stroke-width:2px'
+    )
+    s = s.replace(
+        'fill:none;stroke:rgb(22, 163, 74);stroke-opacity:0.5;stroke-width:2px',
+        'fill:#1f1c1a;stroke:#22c55e;stroke-opacity:0.9;stroke-width:2px'
+    )
     return s.encode('utf-8')
 
 
-def tint_switch(svg_bytes):
-    s = svg_bytes.decode('utf-8')
-    # Background behind buttons:
-    s = s.replace('fill:rgb(41, 37, 36)', 'fill:#1c1917;stroke:#383533;stroke-width:1px')
-    s = s.replace('fill:rgb(214, 211, 209)', 'fill:#292524;stroke:#44403c;stroke-width:1px')
-    s = s.replace('fill:rgb(87, 83, 78)', 'fill:#292524;stroke:#44403c;stroke-width:1px')
-    # Joy-Con bodies: iconic vibrant neon cyan & coral red
-    s = s.replace('fill:rgb(0, 195, 227)', 'fill:#00C3E3;stroke:#009ab3;stroke-width:1px')
-    s = s.replace('fill:rgb(255, 60, 40)', 'fill:#FF3C28;stroke:#c92a18;stroke-width:1px')
-    return s.encode('utf-8')
+# Compatibility aliases
+tint_playstation = tint_xbox
+tint_switch = tint_xbox
+
+_renderer = None
 
 
-_renderer_cache = {}
-
-
-def _get_renderer(kind, led_color=None):
-    cache_key = (kind, led_color)
-    if cache_key in _renderer_cache:
-        return _renderer_cache[cache_key]
-
-    raw = (ASSETS / SVG_FILES[kind]).read_bytes()
-    if kind == 'playstation':
-        tinted = tint_playstation(raw, led_color)
-    elif kind == 'xbox':
+def _get_renderer():
+    global _renderer
+    if _renderer is None:
+        raw = (ASSETS / XINPUT_SVG_FILE).read_bytes()
         tinted = tint_xbox(raw)
-    else:
-        tinted = tint_switch(raw)
-
-    renderer = QSvgRenderer(QByteArray(tinted))
-    _renderer_cache[cache_key] = renderer
-    return renderer
+        _renderer = QSvgRenderer(QByteArray(tinted))
+    return _renderer
 
 
-TE_ASSET_NAMES = {
-    'dualsense': 'te_dualsense.png',
-    'dualshock4': 'te_dualshock4.png',
-    'xbox': 'te_xbox.png',
-    'switch': 'te_switch.png',
-    'generic': 'te_generic.png',
-}
-
-# Button centers in the source PNG pixels, independent of crop and stage size.
-RASTER_BUTTON_CENTERS = {
-    'dualsense': {
-        0: (859, 400), 1: (920, 341), 2: (799, 341), 3: (859, 282),
-        4: (406, 253), 5: (600, 453), 6: (794, 253),
-        7: (463, 454), 8: (736, 454), 9: (344, 209), 10: (855, 209),
-        11: (340, 296), 12: (340, 386), 13: (294, 341), 14: (383, 341),
-        15: (600, 505), 20: (600, 290),
-    },
-    'dualshock4': {
-        0: (843, 440), 1: (900, 383), 2: (786, 382), 3: (844, 327),
-        4: (441, 308), 5: (600, 495), 6: (758, 308),
-        7: (475, 485), 8: (725, 485), 9: (351, 269), 10: (846, 269),
-        11: (355, 344), 12: (355, 420), 13: (316, 383), 14: (395, 383),
-        15: (600, 549), 20: (600, 350),
-    },
-    'xbox': {
-        0: (836, 399), 1: (900, 341), 2: (774, 338), 3: (836, 278),
-        4: (533, 336), 5: (600, 244), 6: (667, 336),
-        7: (361, 334), 8: (719, 479), 9: (374, 183), 10: (826, 183),
-        11: (480, 435), 12: (480, 525), 13: (432, 479), 14: (528, 479),
-        15: (600, 370),
-    },
-    'switch': {
-        0: (864, 412), 1: (935, 344), 2: (790, 344), 3: (864, 280),
-        4: (484, 276), 5: (675, 347), 6: (727, 276),
-        7: (335, 347), 8: (729, 477), 9: (353, 174), 10: (842, 174),
-        11: (458, 438), 12: (458, 527), 13: (411, 482), 14: (504, 482),
-        15: (537, 347),
-    },
-    'generic': {
-        0: (844, 424), 1: (903, 367), 2: (788, 368), 3: (845, 311),
-        4: (534, 368), 5: (600, 368), 6: (669, 368),
-        7: (359, 370), 8: (715, 501), 9: (357, 188), 10: (849, 188),
-        11: (486, 455), 12: (486, 541), 13: (442, 499), 14: (528, 499),
-        15: (844, 503),
-    },
-}
-
-_te_pixmap_cache = {}
-
-
-def get_te_controller_pixmap(family):
-    if family == 'generic':
-        return None
-    if family not in _te_pixmap_cache:
-        fname = TE_ASSET_NAMES.get(family)
-        if fname:
-            path = ASSET_DIR / fname
-            if path.exists():
-                _te_pixmap_cache[family] = QPixmap(str(path))
-            else:
-                _te_pixmap_cache[family] = None
-        else:
-            _te_pixmap_cache[family] = None
-    return _te_pixmap_cache[family]
-
-
-@lru_cache(maxsize=5)
-def controller_source_rect(family):
-    """Cache visible hardware bounds, excluding the raster's transparent canvas."""
-    pixmap = get_te_controller_pixmap(family)
-    if pixmap is None or pixmap.isNull():
-        return QRectF()
-    image = pixmap.toImage().convertToFormat(QImage.Format_Alpha8)
-    # Ignore near-transparent export noise while retaining antialiased edges.
-    threshold = bytes(0 if value <= 3 else 255 for value in range(256))
-    alpha = bytes(image.constBits()).translate(threshold)
-    width, height, stride = image.width(), image.height(), image.bytesPerLine()
-    left, top, right, bottom = width, height, -1, -1
-    for y in range(height):
-        row = alpha[y * stride:y * stride + width]
-        first = row.find(b'\xff')
-        if first >= 0:
-            left, right = min(left, first), max(right, row.rfind(b'\xff'))
-            top, bottom = min(top, y), y
-    if right < left:
-        return QRectF()
-    bounds = QRectF(left, top, right - left + 1, bottom - top + 1)
-    return bounds.adjusted(-2, -2, 2, 2).intersected(QRectF(pixmap.rect()))
-
-
-def controller_art_rect(rect, family):
-    """Use the same proportional stage fit for the image and interactive anchors."""
-    source = controller_source_rect(family)
-    if source.isEmpty():
-        _, _, width, height = VIEWBOX[_svg_family(family)]
-    else:
-        width, height = source.width(), source.height()
+def controller_art_rect(rect, family='generic'):
+    """Use the same proportional stage fit for the unified XInput schematic and interactive anchors."""
+    _, _, width, height = XINPUT_VIEWBOX
     margin = max(8., min(24., min(rect.width(), rect.height()) * .035))
     area = rect.adjusted(margin, margin, -margin, -margin)
     if area.width() <= 0 or area.height() <= 0:
@@ -243,40 +121,52 @@ def controller_art_rect(rect, family):
     return target
 
 
-def draw_controller_svg(painter: QPainter, rect: QRectF, family: str, led_color: str = None):
-    """Render the Teenage Engineering hardware asset or fallback to vector graphic."""
-    if led_color is None:
-        led_color = TOKENS['accent']
-
+def draw_controller_svg(painter: QPainter, rect: QRectF, family: str = 'generic', led_color: str = None):
+    """Render the unified standard XInput vector graphic with crisp button engravings."""
     target = controller_art_rect(rect, family)
     if target.isEmpty():
         return
-    te_pixmap = get_te_controller_pixmap(family)
-    source = controller_source_rect(family)
-    if te_pixmap is not None and not te_pixmap.isNull() and not source.isEmpty():
-
-        # Smooth render of isolated transparent controller hardware (pure matte, no halo)
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        painter.drawPixmap(target, te_pixmap, source)
-        painter.restore()
-        return
-
-    kind = _svg_family(family)
-
-    # Render tinted SVG (pure matte, no halo)
     painter.save()
-    _get_renderer(kind, led_color).render(painter, target)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.TextAntialiasing, True)
+    _get_renderer().render(painter, target)
+
+    _, _, vw, vh = XINPUT_VIEWBOX
+    sx = target.width() / vw
+    sy = target.height() / vh
+    scale = min(sx, sy)
+
+    def _pt(x, y, w, h):
+        return QRectF(
+            target.left() + (x - w / 2.0) * sx,
+            target.top() + (y - h / 2.0) * sy,
+            w * sx,
+            h * sy,
+        )
+
+    # Face button engravings (A / B / X / Y)
+    face_font = QFont('Segoe UI')
+    face_font.setPixelSize(max(8, round(12.0 * scale)))
+    face_font.setWeight(QFont.Bold)
+    painter.setFont(face_font)
+    for cx, cy, text, color in (
+        (330.0, 181.0, 'A', '#4ade80'),
+        (348.0, 161.0, 'B', '#f87171'),
+        (310.0, 162.0, 'X', '#60a5fa'),
+        (329.0, 140.0, 'Y', '#facc15'),
+    ):
+        painter.setPen(QColor(color))
+        painter.drawText(_pt(cx, cy, 24.0, 24.0), Qt.AlignCenter, text)
+
     painter.restore()
 
 
-def draw_controller_contour(painter, rect, family, led_color=None):
+def draw_controller_contour(painter, rect, family='generic', led_color=None):
     draw_controller_svg(painter, rect, family, led_color)
 
 
-@lru_cache(maxsize=5)
-def product_pixmap(family):
+@lru_cache(maxsize=2)
+def product_pixmap(family='generic'):
     pix = QPixmap(800, 500)
     pix.fill(Qt.transparent)
     painter = QPainter(pix)
@@ -288,11 +178,12 @@ def product_pixmap(family):
 
 
 def photo_health():
-    return {family: True for family in PHOTOS}
+    exists = (ASSETS / XINPUT_SVG_FILE).is_file()
+    return {family: exists for family in PHOTOS}
 
 
 class ControllerPhoto(QWidget):
-    """GamepadTester Controller Art Widget."""
+    """Unified XInput Controller Schematic Widget."""
 
     def __init__(self, family='generic', parent=None):
         super().__init__(parent)
@@ -311,10 +202,8 @@ class ControllerPhoto(QWidget):
             return
         self.family = family
         self.info = dict(PHOTOS[family])
-        if family == 'generic':
-            self.info['caption'] = '通用 XInput 键位示意'
         self.setAccessibleName(self.info['caption'])
-        self.setToolTip(self.info['caption'] + '\n图形来源：GamepadTester.cn')
+        self.setToolTip(self.info['caption'])
         self.update()
 
     def set_led(self, color_hex):
@@ -326,30 +215,18 @@ class ControllerPhoto(QWidget):
         return controller_art_rect(stage, self.family)
 
     def product_stage(self):
-        # Front views hide the triggers behind the shoulder buttons. One compact
-        # label row keeps those inputs visible without covering the hardware.
-        label_height = max(18., min(28., self.height() * .11))
-        return QRectF(self.rect()).adjusted(1, label_height + 1, -1, -1)
+        return QRectF(self.rect()).adjusted(1, 1, -1, -1)
 
     def trigger_anchors(self):
         rect = self.product_rect()
         if rect.isEmpty():
             return {}
-        source = controller_source_rect(self.family)
-        if not source.isEmpty() and self.family in RASTER_BUTTON_CENTERS:
-            return {trigger: ((RASTER_BUTTON_CENTERS[self.family][button][0] - source.left()) / source.width(),
-                              -12. / rect.height())
-                    for trigger, button in (('LT', 9), ('RT', 10))}
-        if _svg_family(self.family) == 'xbox':
-            return {'LT': (138.5 / 441, 29 / 383), 'RT': (302.5 / 441, 29 / 383)}
-        positions = (30 / 128, 98 / 128) if _svg_family(self.family) == 'playstation' else (96 / 400, 274 / 400)
-        return {key: (x, -12. / rect.height()) for key, x in zip(('LT', 'RT'), positions)}
+        _, _, vw, vh = XINPUT_VIEWBOX
+        return {'LT': (138.5 / vw, 35.0 / vh), 'RT': (302.5 / vw, 35.0 / vh)}
 
     def input_is_available(self, key):
         available = getattr(self, 'available', None)
         if key in ('LT', 'RT'):
-            # New consumers pass every canonical source. Legacy consumers keep
-            # integer buttons and report axes independently.
             if available is not None and (not available or any(isinstance(item, str) for item in available)):
                 return key in available
             axes = getattr(self, 'available_axes', None)
@@ -359,29 +236,40 @@ class ControllerPhoto(QWidget):
     def trigger_regions(self):
         rect = self.product_rect()
         return {key: QRectF(rect.left() + x * rect.width() - 23,
-                           rect.top() + y * rect.height() - 11, 46, 22)
+                            rect.top() + y * rect.height() - 11, 46, 22)
                 for key, (x, y) in self.trigger_anchors().items()}
 
     def draw_trigger_labels(self, painter):
         labels = axis_labels(self.family)[-2:]
         font = QFont('Segoe UI')
-        font.setPixelSize(12)
+        font.setPixelSize(11)
         font.setWeight(QFont.DemiBold)
         painter.setFont(font)
         selected = getattr(self, 'selected_buttons', set())
+        hovered = getattr(self, 'hovered_key', None)
+        interactive = getattr(self, 'is_interactive_input', False)
         axes = getattr(self, 'axes', [])
         for index, (key, region) in enumerate(self.trigger_regions().items()):
             if not self.input_is_available(key):
                 continue
             amount = max(0., min(1., axes[index + 4])) if len(axes) > index + 4 else 0.
             active = key in selected or amount > .01
-            painter.setPen(QColor(TOKENS['accent'] if active else TOKENS['ink_2']))
-            painter.drawText(region, Qt.AlignCenter, labels[index])
-            if active:
-                width = 23 if key in selected else 23 * amount
-                painter.setPen(QPen(QColor(TOKENS['accent']), 2.))
+            is_hovered = key == hovered
+            if not active and not is_hovered and not interactive:
+                continue
+            if active or is_hovered:
+                color = QColor(TOKENS['accent'])
+                if is_hovered and not active:
+                    color.setAlpha(210)
+                painter.setPen(color)
+                painter.drawText(region, Qt.AlignCenter, labels[index])
+                width = 22 if (key in selected or is_hovered) else 22 * amount
+                painter.setPen(QPen(color, 2. if active else 1.5))
                 painter.drawLine(QPointF(region.center().x() - width / 2, region.bottom()),
                                  QPointF(region.center().x() + width / 2, region.bottom()))
+            else:
+                painter.setPen(QColor(168, 162, 158, 105))
+                painter.drawText(region, Qt.AlignCenter, labels[index])
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -392,13 +280,16 @@ class ControllerPhoto(QWidget):
 
 
 class ControllerInput(ControllerPhoto):
-    """Live interactive controller diagram with clickable button anchors and glow nodes."""
+    """Live interactive standard XInput diagram with clickable button anchors and glow nodes."""
     button_clicked = Signal(int)
     input_clicked = Signal(str)
 
     def __init__(self, parent=None):
+        self.is_interactive_input = True
+        self.hovered_key = None
         super().__init__(parent=parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self.setMouseTracking(True)
         self.buttons = set()
         self.axes = [0.] * 6
         self.available = None
@@ -422,59 +313,8 @@ class ControllerInput(ControllerPhoto):
         return {**self.button_anchors(), **self.trigger_anchors()}
 
     def button_anchors(self):
-        if self.family == 'generic':
-            centers = {0: (330,181), 1: (348,161), 2: (310,162), 3: (329,140),
-                       4: (188,162), 5: (220.5,125), 6: (253,162),
-                       7: (113,160), 8: (278,238), 9: (138.5,77), 10: (302.5,77),
-                       11: (166,221), 12: (166,254), 13: (149,238), 14: (183,238)}
-            return {key: (x / 441, y / 383) for key, (x, y) in centers.items()}
-        source = controller_source_rect(self.family)
-        if not source.isEmpty() and self.family in RASTER_BUTTON_CENTERS:
-            return {key: ((x - source.left()) / source.width(), (y - source.top()) / source.height())
-                    for key, (x, y) in RASTER_BUTTON_CENTERS[self.family].items()}
-        if self.family in ('dualsense', 'dualshock4'):
-            return {
-                0: (.773, .440),  # Cross
-                1: (.845, .340),  # Circle
-                2: (.700, .340),  # Square
-                3: (.773, .240),  # Triangle
-                4: (.290, .180),  # Create/Share
-                5: (.500, .580),  # PS button
-                6: (.710, .180),  # Options
-                7: (.355, .535),  # L3 (left stick)
-                8: (.645, .535),  # R3 (right stick)
-                9: (.250, .070),  # L1
-                10: (.750, .070), # R1
-                11: (.227, .240), # Dpad Up
-                12: (.227, .440), # Dpad Down
-                13: (.155, .340), # Dpad Left
-                14: (.300, .340), # Dpad Right
-                15: (.500, .645), # Mic button
-                20: (.500, .260), # Touchpad
-            }
-        if self.family == 'switch':
-            return {
-                0: (.66, .34), 1: (.78, .27), 2: (.62, .23), 3: (.73, .16),
-                4: (.32, .18), 5: (.70, .52), 6: (.58, .14),
-                7: (.23, .31), 8: (.49, .48), 9: (.30, .06), 10: (.81, .08),
-                11: (.19, .46), 12: (.19, .58), 13: (.13, .52), 14: (.25, .52),
-                15: (.32, .36)
-            }
-        # Xbox
-        return {
-            0: (round((840 - 45) / 1060, 4), round((520 - 272) / 680, 4)),
-            1: (round((902 - 45) / 1060, 4), round((454 - 272) / 680, 4)),
-            2: (round((776 - 45) / 1060, 4), round((452 - 272) / 680, 4)),
-            3: (round((842 - 45) / 1060, 4), round((394 - 272) / 680, 4)),
-            4: (round((532 - 45) / 1060, 4), round((454 - 272) / 680, 4)),
-            5: (.500, .180),
-            6: (round((668 - 45) / 1060, 4), round((454 - 272) / 680, 4)),
-            7: (round((362 - 45) / 1060, 4), round((450 - 272) / 680, 4)),
-            8: (round((721 - 45) / 1060, 4), round((593 - 272) / 680, 4)),
-            9: (.280, .080), 10: (.720, .080),
-            11: (.406, .400), 12: (.406, .490), 13: (.360, .445), 14: (.452, .445),
-            15: (round((600 - 45) / 1060, 4), round((506 - 272) / 680, 4))
-        }
+        _, _, vw, vh = XINPUT_VIEWBOX
+        return {key: (x / vw, y / vh) for key, (x, y) in XINPUT_SVG_CENTERS.items()}
 
     def update_state(self, state):
         previous_available = self.available
@@ -497,38 +337,95 @@ class ControllerInput(ControllerPhoto):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if not self.selected_buttons:
-            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self.product_rect()
+        if rect.isEmpty():
+            return
+        active_keys = self.selected_buttons | {k for k in self.buttons if isinstance(k, int)}
+        anchors = self.anchors()
+
+        # Subtle interactive shoulder bumper micro-captions (LB / RB) inside the shoulder ridge
+        bumper_names = ('L1', 'R1') if self.family in ('dualsense', 'dualshock4', 'stadia') else (
+            ('L', 'R') if self.family == 'switch' else ('LB', 'RB'))
+        b_font = QFont('Segoe UI')
+        b_font.setPixelSize(10)
+        b_font.setWeight(QFont.DemiBold)
+        painter.setFont(b_font)
+        for idx, b_key in enumerate((9, 10)):
+            if b_key not in anchors or not self.input_is_available(b_key):
+                continue
+            bx, by = anchors[b_key]
+            b_pt = QPointF(rect.left() + bx * rect.width(), rect.top() + by * rect.height())
+            b_rect = QRectF(b_pt.x() - 18, b_pt.y() - 22, 36, 16)
+            if b_key in active_keys or b_key == self.hovered_key:
+                painter.setPen(QColor(TOKENS['accent']))
+            else:
+                painter.setPen(QColor(168, 162, 158, 115))
+            painter.drawText(b_rect, Qt.AlignCenter, bumper_names[idx])
+
         radius = max(9., min(20., rect.width() * .026))
+        if isinstance(self.hovered_key, int) and self.hovered_key not in active_keys and self.input_is_available(self.hovered_key):
+            hx, hy = anchors[self.hovered_key]
+            h_stroke = QColor(TOKENS['accent'])
+            h_stroke.setAlpha(165)
+            h_fill = QColor(TOKENS['accent'])
+            h_fill.setAlpha(26)
+            painter.setPen(QPen(h_stroke, 1.5))
+            painter.setBrush(h_fill)
+            painter.drawEllipse(QPointF(rect.left() + hx * rect.width(), rect.top() + hy * rect.height()), radius, radius)
+
+        if not active_keys:
+            return
         stroke = QColor(TOKENS['accent'])
         fill = QColor(stroke)
-        fill.setAlpha(38)
+        fill.setAlpha(48)
         painter.setPen(QPen(stroke, 2.))
         painter.setBrush(fill)
-        for key, (x, y) in self.anchors().items():
-            if isinstance(key, int) and key in self.selected_buttons and self.input_is_available(key):
+        for key, (x, y) in anchors.items():
+            if isinstance(key, int) and key in active_keys and self.input_is_available(key):
                 painter.drawEllipse(QPointF(rect.left() + x * rect.width(), rect.top() + y * rect.height()), radius, radius)
 
-    def mousePressEvent(self, event):
-        if event.button() != Qt.LeftButton:
-            return
+    def _hit_key_at(self, pos):
         for key, region in self.trigger_regions().items():
-            if region.contains(event.position()):
-                if self.input_is_available(key):
-                    self.input_clicked.emit(key)
-                return
+            if region.contains(pos):
+                return key if self.input_is_available(key) else None
         rect = self.product_rect()
         points = {k: QPointF(rect.left() + x * rect.width(), rect.top() + y * rect.height())
                   for k, (x, y) in self.button_anchors().items()}
         if not points:
-            return
+            return None
         def distance_squared(point):
-            delta = point - event.position()
+            delta = point - pos
             return delta.x() ** 2 + delta.y() ** 2
         key = min(points, key=lambda k: distance_squared(points[k]))
         if self.input_is_available(key) and distance_squared(points[key]) < max(20, rect.width() * .075) ** 2:
-            self.button_clicked.emit(key)
-            self.input_clicked.emit(str(key))
+            return key
+        return None
+
+    def mouseMoveEvent(self, event):
+        hit = self._hit_key_at(event.position())
+        if hit != self.hovered_key:
+            self.hovered_key = hit
+            self.setCursor(Qt.PointingHandCursor if hit is not None else Qt.ArrowCursor)
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if self.hovered_key is not None:
+            self.hovered_key = None
+            self.setCursor(Qt.ArrowCursor)
+            self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        hit = self._hit_key_at(event.position())
+        if hit is None:
+            return
+        if isinstance(hit, str):
+            self.input_clicked.emit(hit)
+        else:
+            self.button_clicked.emit(hit)
+            self.input_clicked.emit(str(hit))

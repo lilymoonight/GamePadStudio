@@ -10,6 +10,18 @@ import tempfile
 
 from .controller_catalog import CATALOG
 from .mapping_engine import GAMEPAD_TARGETS, canonical_trigger, input_sources, validate_mappings
+from .schema_registry import (
+    GYRO_TRIGGERS,
+    HOLD_MODES,
+    INPUT_OPTION_FIELDS,
+    MOUSE_BOOL_FIELDS,
+    MOUSE_MODES,
+    MOUSE_NUMERIC_RANGES,
+    MOUSE_OPTION_FIELDS,
+    STICK_SOURCES,
+    SUPPRESS_LS_UP_MODES,
+    THRESHOLD_GROUPS,
+)
 
 
 PROFILE_FORMAT = 'gamepadstudio-profile'
@@ -21,8 +33,7 @@ _SAFE_ACTIONS = {'none', 'suppress', 'hold', 'shortcut', 'mouse_hold', 'mouse_cl
                  'wheel', 'capture', 'replay_record', 'record_toggle', 'home', 'gallery',
                  'volume_mute', 'volume_up', 'volume_down', 'media',
                  'gamepad_button', 'gamepad_chord', 'gamepad_turbo'}
-_INPUT_FIELDS = {'stick_press', 'stick_release', 'trigger_press', 'trigger_release',
-                 'outer_press', 'outer_release', 'walk_press', 'walk_release', 'chord_window'}
+_INPUT_FIELDS = INPUT_OPTION_FIELDS
 
 
 def _fields(value, allowed, required=(), error='便携预设格式错误'):
@@ -93,8 +104,13 @@ def _options(value):
         _fields(settings, _INPUT_FIELDS, error='预设按键响应设置格式错误')
         normalized = {}
         for key, item in settings.items():
-            normalized[key] = _number(item, .02, .20) if key == 'chord_window' else _number(item, .01, 1.)
-        for group in ('stick', 'trigger', 'outer', 'walk'):
+            if key == 'suppress_ls_up':
+                if type(item) is not str or item not in SUPPRESS_LS_UP_MODES:
+                    raise ValueError('格斗防串跳设置不受支持')
+                normalized[key] = item
+            else:
+                normalized[key] = _number(item, .02, .20) if key == 'chord_window' else _number(item, .01, 1.)
+        for group in THRESHOLD_GROUPS:
             press, release = group + '_press', group + '_release'
             if (press in normalized) != (release in normalized):
                 raise ValueError('开始响应与松开位置需要成对设置')
@@ -106,19 +122,29 @@ def _options(value):
         result['input'] = normalized
     if 'mouse' in value:
         mouse = value['mouse']
-        _fields(mouse, {'mode', 'sensitivity', 'deadzone', 'y_ratio', 'edge_boost', 'invert_y'},
+        _fields(mouse, MOUSE_OPTION_FIELDS,
                 error='预设视角与指针设置格式错误')
         normalized = {}
-        if 'invert_y' in mouse:
-            if not isinstance(mouse['invert_y'], bool):
-                raise ValueError('Y 轴反转设置应为开启或关闭')
-            normalized['invert_y'] = mouse['invert_y']
+        for bool_field in MOUSE_BOOL_FIELDS:
+            if bool_field in mouse:
+                if not isinstance(mouse[bool_field], bool):
+                    if 'invert_y' in bool_field:
+                        raise ValueError('Y 轴反转设置应为开启或关闭')
+                    raise ValueError('陀螺仪开关设置应为开启或关闭')
+                normalized[bool_field] = mouse[bool_field]
         if 'mode' in mouse:
-            if mouse['mode'] not in ('game', 'desktop'):
+            if type(mouse['mode']) is not str or mouse['mode'] not in MOUSE_MODES:
                 raise ValueError('请选择游戏视角或桌面指针')
             normalized['mode'] = mouse['mode']
-        for key, (low, high) in {'sensitivity': (1., 100.), 'deadzone': (.01, .50),
-                               'y_ratio': (.1, 2.), 'edge_boost': (1., 3.)}.items():
+        if 'stick_source' in mouse:
+            if type(mouse['stick_source']) is not str or mouse['stick_source'] not in STICK_SOURCES:
+                raise ValueError('请选择右摇杆或左摇杆作为鼠标控制源')
+            normalized['stick_source'] = mouse['stick_source']
+        if 'gyro_trigger' in mouse:
+            if type(mouse['gyro_trigger']) is not str or mouse['gyro_trigger'] not in GYRO_TRIGGERS:
+                raise ValueError('陀螺仪激活条件不受支持')
+            normalized['gyro_trigger'] = mouse['gyro_trigger']
+        for key, (low, high) in MOUSE_NUMERIC_RANGES.items():
             if key in mouse:
                 normalized[key] = _number(mouse[key], low, high)
         result['mouse'] = normalized
@@ -142,12 +168,22 @@ def _binding(binding):
     allowed = {'action', 'value'} | ({'rate_hz'} if action == 'gamepad_turbo' else set())
     if action in ('hold', 'mouse_hold'):
         allowed.add('mode')
+        allowed.add('rate_hz')
     _fields(binding, allowed, ('value',) if has_value else ())
     result = {'action': action}
     if 'mode' in binding:
-        if type(binding['mode']) is not str or binding['mode'] not in ('hold', 'toggle'):
-            raise ValueError('键鼠按住模式应为按住或切换保持')
+        if type(binding['mode']) is not str or binding['mode'] not in HOLD_MODES:
+            raise ValueError('键鼠按住模式应为按住、切换保持或连发（含双击并按住）')
         result['mode'] = binding['mode']
+    if action in ('hold', 'mouse_hold') and 'rate_hz' in binding:
+        if binding.get('mode') != 'turbo':
+            raise ValueError('仅连发模式允许设置连发速率')
+        rate = binding['rate_hz']
+        if isinstance(rate, bool) or not isinstance(rate, int) or not 5 <= rate <= 30:
+            raise ValueError('连发速率应为 5 至 30 Hz 之间的整数')
+        result['rate_hz'] = rate
+    elif action in ('hold', 'mouse_hold') and binding.get('mode') == 'turbo':
+        result['rate_hz'] = 15
     if 'value' in binding:
         value = _text(binding['value'], 256, allow_empty=not has_value)
         if has_value:

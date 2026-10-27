@@ -105,7 +105,7 @@ def test_invalid_threshold_pairs_fall_back_and_neutral_always_releases(settings)
     assert input_thresholds(settings) == INPUT_THRESHOLD_DEFAULTS
     normalizer = InputNormalizer()
     assert normalizer.update(frame(axes=[1, 0, 0, 0, 1, 1]), settings) == {
-        'LS:right', 'LS:outer', 'LT', 'RT'}
+        'LS:right', 'LS:outer', 'LS:right:outer', 'LT', 'RT'}
     assert not normalizer.update(frame(), settings)
 
 

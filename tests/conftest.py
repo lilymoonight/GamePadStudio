@@ -15,6 +15,8 @@ os.environ.setdefault('PYGAME_HIDE_SUPPORT_PROMPT', '1')
 @pytest.fixture(autouse=True)
 def isolate_workspace_output(monkeypatch):
     """UI regression tests must never send synthetic events to the desktop."""
+    from gamepadstudio.i18n import set_language
+    set_language('zh')
     if sys.platform == 'darwin':
         from tests.test_unified_mapping import Actions
         from types import SimpleNamespace

@@ -4,6 +4,7 @@ from __future__ import annotations
 import ctypes as C
 from ctypes import wintypes as W
 import ntpath
+import os
 from pathlib import Path
 import plistlib
 import re
@@ -253,6 +254,64 @@ def foreground_application():
         return _foreground_reader.read()
     except (OSError, ValueError, TypeError, AttributeError):
         return {'pid': 0, 'hwnd': 0, 'executable': ''}
+
+
+def is_process_elevated(pid=None):
+    """Return True on Windows when the specified process (or current process if pid is None) runs elevated."""
+    if sys.platform != 'win32':
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        advapi32 = ctypes.WinDLL('advapi32', use_last_error=True)
+        TOKEN_QUERY = 0x0008
+        TokenElevation = 20
+        close_process = False
+        if pid is None:
+            process = kernel32.GetCurrentProcess()
+        else:
+            process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if not process:
+                return False
+            close_process = True
+        token = wintypes.HANDLE()
+        try:
+            if not advapi32.OpenProcessToken(process, TOKEN_QUERY, ctypes.byref(token)):
+                return False
+            try:
+                elevation = wintypes.DWORD()
+                ret_len = wintypes.DWORD()
+                ok = advapi32.GetTokenInformation(
+                    token,
+                    TokenElevation,
+                    ctypes.byref(elevation),
+                    ctypes.sizeof(elevation),
+                    ctypes.byref(ret_len),
+                )
+                return bool(ok and elevation.value)
+            finally:
+                kernel32.CloseHandle(token)
+        finally:
+            if close_process:
+                kernel32.CloseHandle(process)
+    except Exception:
+        return False
+
+
+def uipi_elevation_warning(foreground):
+    """Return a user-facing warning if a Windows foreground game runs elevated while GamePad Studio does not."""
+    if sys.platform != 'win32' or not isinstance(foreground, dict):
+        return ''
+    pid = int(foreground.get('pid') or 0)
+    if pid <= 0 or pid == os.getpid():
+        return ''
+    if is_process_elevated(None) or not is_process_elevated(pid):
+        return ''
+    exe = str(foreground.get('executable') or '').strip()
+    name = Path(exe).name if exe else f'PID {pid}'
+    return f'检测到前台程序（{name}）以管理员权限运行，Windows UIPI 会拦截普通权限的键鼠模拟；请以管理员身份运行 GamePad Studio。'
 
 
 def _foreground_identity(foreground):

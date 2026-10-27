@@ -20,7 +20,12 @@ from .manual_recording import ManualRecording
 from .haptic_engine import HapticEngine
 from .ipc import LocalServer, request, spawn, default_root, read_lock_pid
 from .mapping_engine import MappingRuntime
-from .application_profiles import ApplicationProfileResolver, foreground_application, application_profiles_supported
+from .application_profiles import (
+    ApplicationProfileResolver,
+    application_profiles_supported,
+    foreground_application,
+    uipi_elevation_warning,
+)
 from .battery_monitor import BatteryMonitor
 from .emergency_hotkey import EmergencyHotkey, emergency_hotkey_supported
 from .screenshot_hotkey import ScreenshotHotkey
@@ -34,6 +39,16 @@ class Agent(QObject):
         super().__init__();self.root=Path(root);self.store=ConfigStore(self.root);self.config=self.store.data
         if not self.store.path.exists():self.store.save()
         self.device=device or Device();self.actions=actions or create_actions()
+        try:
+            self.actions.on_share_button = self.capture
+            if hasattr(self.actions, '_ensure_virtual_pad'):
+                pad = self.actions._ensure_virtual_pad()
+                pad.on_share = self.capture
+                pad.register_rumble_callback(
+                    lambda l_m, s_m: self.device.rumble(max(l_m, s_m)) if self.state and self.state.get('rumble') else None
+                )
+        except Exception:
+            pass
         if sys.platform == 'darwin':
             from .macos_windows import configure_window_exclusions
             configure_window_exclusions({os.getpid(),read_lock_pid(self.root/'studio.lock')})
@@ -217,6 +232,13 @@ class Agent(QObject):
             return False
         self.last_application_check = now
         foreground = foreground_application()
+        warning = uipi_elevation_warning(foreground)
+        if warning and warning != getattr(self, '_last_uipi_warning', ''):
+            self._last_uipi_warning = warning
+            try:
+                self.log(warning)
+            except Exception:
+                pass
         protected_pids = {os.getpid(), read_lock_pid(self.root / 'studio.lock')}
         protected_pids.discard(0)
         if sys.platform == 'darwin':

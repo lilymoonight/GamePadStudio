@@ -156,7 +156,7 @@ class RotaryKnob(QWidget):
         p.setPen(QPen(QColor(TOKENS['border']), 1.0))
         p.drawRoundedRect(text_rect.adjusted(w * 0.15, 0, -w * 0.15, 0), 3, 3)
 
-        p.setFont(QFont("Cascadia Mono, Consolas, Courier New", 9, QFont.Bold))
+        p.setFont(QFont("Menlo", 9, QFont.Bold))
         p.setPen(QColor(TOKENS['ink']))
         p.drawText(text_rect, Qt.AlignCenter, val_str)
 
@@ -234,7 +234,7 @@ class RockerSwitch(QWidget):
             p.drawLine(bot_half.bottomLeft() + QPointF(2, 0), bot_half.bottomRight() - QPointF(2, 0))
 
         # Debossed I and O symbols
-        p.setFont(QFont("Cascadia Mono, Arial", 8, QFont.Bold))
+        p.setFont(QFont("Menlo", 8, QFont.Bold))
         p.setPen(QColor(TOKENS['ink'] if self._checked else TOKENS['ink_dim']))
         p.drawText(top_half, Qt.AlignCenter, "I")
         p.setPen(QColor(TOKENS['ink'] if not self._checked else TOKENS['ink_dim']))
@@ -306,7 +306,7 @@ class DotMatrixDisplay(QWidget):
                    Qt.AlignLeft, self.title.upper())
 
         # Matrix lines
-        p.setFont(QFont("Cascadia Mono, Consolas", 9, QFont.Bold))
+        p.setFont(QFont("Menlo", 9, QFont.Bold))
         y_cursor = screen.top() + 20
         line_height = 18
 

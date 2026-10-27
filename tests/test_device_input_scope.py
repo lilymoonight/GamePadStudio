@@ -33,7 +33,8 @@ def test_offline_sources_and_labels_are_standard_xinput():
 def test_connected_sources_follow_buttons_and_individual_axes():
     state = device_state('dualsense', buttons=[0, 4, 20], axes=[0, 1, 5])
     assert set(input_sources(state)) == {'0', '4', '20', 'LS:left', 'LS:right', 'LS:up', 'LS:down',
-                                        'LS:inner', 'LS:outer', 'RT'}
+                                        'LS:inner', 'LS:outer', 'LS:up:outer', 'LS:down:outer',
+                                        'LS:left:outer', 'LS:right:outer', 'RT'}
     assert not input_sources(device_state(buttons=[], axes=[]))
     empty = device_state(buttons=[], axes=[])
     empty['axes'] = [1., 1., 1., 1., 1., 1.]

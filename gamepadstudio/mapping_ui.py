@@ -12,6 +12,7 @@ from .mapping_engine import (INPUTS, GAMEPAD_TARGETS, InputNormalizer, canonical
 from .studio_core import ACTION_NAMES, device_config
 from .glass import TOKENS
 from .touch_gestures import TouchGestureRecognizer, touch_sources
+from .i18n import tr
 
 
 class GamepadTargetSelector(QWidget):
@@ -73,6 +74,7 @@ class GamepadTargetSelector(QWidget):
         self.info_row = QHBoxLayout()
         self.info_row.setSpacing(10)
         self.info_label = QLabel(self._summary_text())
+        self.info_label.setWordWrap(True)
         self.info_label.setStyleSheet(f"color: {TOKENS['ink_2']}; font-size: 11.5px; font-weight: 600;")
         self.info_row.addWidget(self.info_label, 1)
 
@@ -87,6 +89,7 @@ class GamepadTargetSelector(QWidget):
         self.turbo_spin.setRange(5, 30)
         self.turbo_spin.setValue(15)
         self.turbo_spin.setSuffix(' Hz')
+        self.turbo_spin.setToolTip(tr('手柄连发速率（5–30 Hz），通过虚拟 XInput 总线实时输出高频脉冲'))
         self.turbo_spin.valueChanged.connect(self._on_turbo_changed)
         tb_l.addWidget(self.turbo_spin)
         self.info_row.addWidget(self.turbo_box)
@@ -136,7 +139,12 @@ class GamepadTargetSelector(QWidget):
         if self.mode == 'chord':
             return '🎯 目标手柄组合宏: ' + ' + '.join(names) + ' (一键同时触发)'
         elif self.mode == 'turbo':
-            return '⚡ 目标手柄连发: ' + names[0] + f' ({self.turbo_rate} 次/秒)'
+            from .virtual_xinput import virtual_gamepad_backend_available
+            if virtual_gamepad_backend_available():
+                return ('⚡ 目标手柄连发: ' + names[0] + f' ({self.turbo_rate} 次/秒) · ' +
+                        tr('通过虚拟 XInput / HID 总线实时输出高频脉冲'))
+            return ('⚡ 目标手柄连发: ' + names[0] + f' ({self.turbo_rate} 次/秒) · ' +
+                    tr('未接入虚拟手柄驱动；游戏内连发请改用虚拟键鼠模式的“按住高频连发 (Turbo)”'))
         else:
             return '🎯 映射为目标手柄按键: ' + names[0]
 
@@ -312,7 +320,6 @@ class BindingDialog(QDialog):
             ('gamepad_button', '映射为手柄按键 (Remap)'),
             ('gamepad_chord', '手柄多键组合宏 (一键出招)'),
             ('gamepad_turbo', '手柄高频连发 (Turbo)'),
-            ('antigravity', tr('唤起 Antigravity 对话框')),
             ('capture', '保存截图 (Screenshot)'),
             ('replay_record', '保存精彩瞬间 (回放录制)'),
             ('home', '打开控制中心 (Home)'),
@@ -326,7 +333,6 @@ class BindingDialog(QDialog):
             ('mouse_hold', '按住鼠标键 (Mouse Hold)'),
             ('mouse_click', '单击鼠标键 (Mouse Click)'),
             ('wheel', '鼠标滚轮滚动 (Mouse Wheel)'),
-            ('antigravity', tr('唤起 Antigravity 对话框')),
             ('none', '保留原始输入 (Pass-through)'),
             ('suppress', '屏蔽此按键 (Suppress)'),
             ('launch', '启动应用程序 (Launch App)'),
@@ -341,7 +347,6 @@ class BindingDialog(QDialog):
                 ('shortcut', tr('键盘按键或组合键')),
                 ('mouse_click', tr('鼠标单击')),
                 ('wheel', tr('鼠标滚轮滚动')),
-                ('antigravity', tr('唤起 Antigravity 对话框')),
                 ('capture', tr('保存截图')),
                 ('replay_record', tr('保存精彩瞬间')),
                 ('record_toggle', tr('开始或结束录屏')),
@@ -359,6 +364,7 @@ class BindingDialog(QDialog):
         self.mouse_combos = {}
         self.hold_modes = {}
         self.hold_mode_rows = {}
+        self.turbo_spins = {}
         self.launch_paths = {}
         self.launch_args = {}
         self.action_boxes = {}
@@ -450,9 +456,34 @@ class BindingDialog(QDialog):
             hold_mode = QComboBox()
             hold_mode.addItem(tr('按住时生效'), 'hold')
             hold_mode.addItem(tr('按一次保持，再按一次取消'), 'toggle')
+            hold_mode.addItem(tr('按住高频连发 (Turbo)'), 'turbo')
+            hold_mode.addItem(tr('双击并按住 (冲刺/奔跑)'), 'double_tap_hold')
             hold_mode.setToolTip(tr('切换保持会在暂停、断线、切换预设或退出时自动释放'))
             hold_mode.setCurrentIndex(max(0, hold_mode.findData(binding.get('mode', 'hold'))))
             hold_mode_layout.addWidget(hold_mode, 1)
+
+            turbo_spin = QSpinBox()
+            turbo_spin.setRange(5, 30)
+            try:
+                raw_rate = binding.get('rate_hz', 15)
+                rate_val = 15 if isinstance(raw_rate, bool) else int(raw_rate)
+            except (TypeError, ValueError):
+                rate_val = 15
+            turbo_spin.setValue(max(5, min(30, rate_val)))
+            turbo_spin.setSuffix(' Hz')
+            turbo_spin.setAccessibleName(tr('连发速率'))
+            turbo_spin.setToolTip(tr('设置按住连发频率（5 - 30 Hz）'))
+            hold_mode_layout.addWidget(turbo_spin)
+            self.turbo_spins[gesture] = turbo_spin
+
+            def make_turbo_updater(hm=hold_mode, ts=turbo_spin, a=action):
+                def update():
+                    ts.setVisible(not self.touch_gesture and self.mode == 'kbm' and a.currentData() in ('hold', 'mouse_hold') and hm.currentData() == 'turbo')
+                return update
+            t_updater = make_turbo_updater(hold_mode, turbo_spin, action)
+            hold_mode.currentIndexChanged.connect(t_updater)
+            t_updater()
+
             b_l.addWidget(hold_mode_row)
             self.hold_modes[gesture] = hold_mode
             self.hold_mode_rows[gesture] = hold_mode_row
@@ -473,13 +504,14 @@ class BindingDialog(QDialog):
             self.launch_paths[gesture] = path_edit
             self.launch_args[gesture] = args_edit
 
-            def make_kbm_updater(a=action, kr=kbm_row, mc=mouse_combo, lr=launch_row, mr=hold_mode_row):
+            def make_kbm_updater(a=action, kr=kbm_row, mc=mouse_combo, lr=launch_row, mr=hold_mode_row, tu=t_updater):
                 def update():
                     k = a.currentData()
                     kr.setVisible(k in ('hold', 'shortcut'))
                     mc.setVisible(k in ('mouse_hold', 'mouse_click', 'wheel'))
                     mr.setVisible(not self.touch_gesture and self.mode == 'kbm' and k in ('hold', 'mouse_hold'))
                     lr.setVisible(k == 'launch')
+                    tu()
                 return update
             updater = make_kbm_updater(action, kbm_row, mouse_combo, launch_row)
             action.currentIndexChanged.connect(updater)
@@ -505,10 +537,16 @@ class BindingDialog(QDialog):
         layout.addWidget(self.timing_box)
 
         # Tip banner
+        from .virtual_xinput import virtual_gamepad_backend_available
+        has_vpad = virtual_gamepad_backend_available()
         if self.touch_gesture:
             tip_text = tr('每个手势触发一次动作；按下触摸板仍使用独立按键映射。')
         elif self.mode == 'gamepad':
-            tip_text = tr('手柄输出配置；当前未接入系统虚拟手柄后端。')
+            tip_text = (
+                tr('手柄输出配置；已检测到虚拟手柄后端（ViGEmBus / VirtualHID），实时合成标准 XInput 报告。')
+                if has_vpad else
+                tr('手柄输出配置；当前未接入系统虚拟手柄驱动后端。若需在游戏内高频自动连发，请切换到虚拟键鼠模式使用“按住高频连发 (Turbo)”。')
+            )
         else:
             tip_text = '💡 虚拟键鼠模拟：将物理手柄输入无缝转换为真实键盘按键、鼠标点击、滚轮或应用快捷键。'
         tip_lbl = QLabel(tip_text)
@@ -604,7 +642,12 @@ class BindingDialog(QDialog):
         elif self.mode == 'kbm':
             self.tip_label.setText(tr('选择手柄按键或触摸手势，也可以点击录入后实际操作。'))
         else:
-            self.tip_label.setText(tr('手柄输出配置；当前未接入系统虚拟手柄后端。'))
+            from .virtual_xinput import virtual_gamepad_backend_available
+            self.tip_label.setText(
+                tr('手柄输出配置；已检测到虚拟手柄后端（ViGEmBus / VirtualHID），实时合成标准 XInput 报告。')
+                if virtual_gamepad_backend_available() else
+                tr('手柄输出配置；当前未接入系统虚拟手柄驱动后端。若需在游戏内高频自动连发，请切换到虚拟键鼠模式使用“按住高频连发 (Turbo)”。')
+            )
 
     @staticmethod
     def _device_context(state):
@@ -675,7 +718,10 @@ class BindingDialog(QDialog):
         inputs = copy.deepcopy(options.get('input') or {})
         inputs['trigger_curves'] = device_config(self.owner.config, state).get('trigger_curves', {})
         current = self.normalizer.update(state, inputs)
-        current.difference_update({'LS:outer', 'LS:inner'})
+        current.difference_update({
+            'LS:outer', 'LS:inner',
+            'LS:up:outer', 'LS:down:outer', 'LS:left:outer', 'LS:right:outer'
+        })
         if not self.capturing:
             self.live.setText(' + '.join(trigger_label(k, self.family) for k in sorted(current)) if current else
                               trigger_label(self.inputs[0].currentData(), self.family) if self.touch_gesture else
@@ -744,9 +790,12 @@ class BindingDialog(QDialog):
                     binding['value'] = self.mouse_combos[g].currentData()
                 elif action_code == 'launch':
                     binding.update(executable=self.launch_paths[g].text().strip(), arguments=self.launch_args[g].text().strip())
-                if (not self.touch_gesture and action_code in ('hold', 'mouse_hold')
-                        and self.hold_modes[g].currentData() == 'toggle'):
-                    binding['mode'] = 'toggle'
+                if not self.touch_gesture and action_code in ('hold', 'mouse_hold'):
+                    mode = self.hold_modes[g].currentData()
+                    if mode in ('toggle', 'turbo', 'double_tap_hold'):
+                        binding['mode'] = mode
+                        if mode == 'turbo':
+                            binding['rate_hz'] = self.turbo_spins[g].value()
             mapping[g] = binding
         if self.touch_gesture:
             mapping['long'] = {'action': 'none'}
@@ -810,12 +859,15 @@ class BindingList(QWidget):
         self.heading.setMinimumWidth(0)
         self.heading.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         tools.addWidget(self.heading, 1)
-        for name, title, symbol, callback in [
+        button_specs = [
             ('add_button', '添加映射', 'plus', self.add),
             ('edit_button', '编辑', 'edit', self.edit),
             ('swap_button', '交换', None, self.swap),
             ('clear_button', '清除', 'trash', self.clear),
-        ]:
+        ]
+        if mode == 'gamepad':
+            button_specs.insert(1, ('allocate_unused_button', '分配余键序列', None, self.allocate_unused))
+        for name, title, symbol, callback in button_specs:
             btn = QPushButton(tr(title))
             btn.setObjectName('pill')
             btn.setCursor(Qt.PointingHandCursor)
@@ -890,6 +942,15 @@ class BindingList(QWidget):
     def add(self):
         profile_name = self.get_profile_name()
         self.owner.edit_mapping('0', new=True, profile=profile_name, mode=self.mode)
+
+    def allocate_unused(self, overwrite=False, use_canonical_slots=False):
+        profile_name = self.get_profile_name()
+        self.owner.mapping_change({
+            'op': 'allocate_unused_xinput',
+            'profile': profile_name,
+            'overwrite': bool(overwrite),
+            'use_canonical_slots': bool(use_canonical_slots),
+        })
 
     def edit(self):
         if self.list.currentItem():

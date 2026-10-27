@@ -227,7 +227,7 @@ def test_menu_uses_apples_contextual_menu_key_and_not_help_or_pointer_click():
 
 
 @pytest.mark.parametrize('key,reason', [('Insert', '插入'), ('NumLock', '导航'),
-                                      ('F21', '逻辑'), ('Calc', '同一键值')])
+                                      ('F21', '逻辑'), ('F24', '逻辑'), ('Calc', 'launch')])
 def test_unsupported_key_capability_explains_effect_without_substitution(key, reason):
     capability = MacActions.key_capability(key)
     assert capability['supported'] is False and reason in capability['reason']

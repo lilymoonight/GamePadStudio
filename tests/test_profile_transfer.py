@@ -97,7 +97,7 @@ def test_toggle_bindings_roundtrip_without_changing_old_hold_bindings(tmp_path):
     assert 'mode' not in result['profile']['mappings']['2']['short']
 
 
-@pytest.mark.parametrize('mode', [None, True, 1, '', 'turbo', 'TOGGLE', [], {}])
+@pytest.mark.parametrize('mode', [None, True, 1, '', 'rapid', 'TOGGLE', [], {}])
 def test_portable_toggle_rejects_invalid_modes(mode):
     original = package({'0': mapping('hold', 'W', mode=mode)})
     with pytest.raises(ValueError, match='模式'):

@@ -1,4 +1,4 @@
-"""Only the selected physical input device appears in the device library."""
+"""Only the selected physical input device appears in the device switcher, switching name without photos."""
 import os
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
@@ -6,31 +6,30 @@ os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from gamepadstudio.controller_gallery import ControllerGallery
+from gamepadstudio.controller_photo import ControllerPhoto
 
 
 def test_offline_gallery_only_previews_xinput_and_cannot_manage_unowned_models():
     app = QApplication.instance() or QApplication([])
     managed = []
     gallery = ControllerGallery(lambda instance: None, lambda values: None, lambda: None,
-                                lambda: managed.append(True), favorites=['dualsense'])
+                                lambda: managed.append(True))
     try:
         gallery.set_devices([], None)
         assert gallery.grid.count() == 1
         assert gallery.current_family() == 'generic'
         assert gallery.grid.itemAt(0).widget().accessibleName() in ('通用 XInput', 'Standard XInput')
+        assert not gallery.findChildren(ControllerPhoto)
         gallery.open_family('dualsense')
         assert not managed and gallery.detail_dialog('dualsense') is None
         preview = gallery.detail_dialog('generic')
         try:
+            assert not preview.findChildren(ControllerPhoto)
             labels = ' '.join(label.text() for label in preview.findChildren(QLabel))
             assert '8BitDo' not in labels and 'DualSense' not in labels
             assert all(button.text() not in ('管理', 'Manage') for button in preview.findChildren(QPushButton))
         finally:
             preview.close()
-        gallery.filter.setCurrentIndex(2)
-        assert gallery.empty_state
-        gallery.reset_filters()
-        assert gallery.current_family() == 'generic' and not gallery.empty_state
     finally:
         gallery.close()
 
@@ -46,6 +45,7 @@ def test_connected_device_switcher_keeps_other_models_out_of_current_device_card
         gallery.set_devices(devices, 1)
         assert gallery.grid.count() == 1 and gallery.current_family() == 'xbox'
         assert gallery.grid.itemAt(0).widget().accessibleName() == 'My Xbox'
+        assert not gallery.findChildren(ControllerPhoto)
         gallery.open_family('dualsense')
         assert not selected and not managed
         switch = next(button for button in gallery.connections.findChildren(QPushButton)

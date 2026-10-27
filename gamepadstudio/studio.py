@@ -42,7 +42,7 @@ from .mapping_engine import profile_family, input_sources, canonical_trigger, tr
 from .screenshot_service import take_screenshot, list_captures, set_favorite, delete_capture
 from .manual_recording import ManualRecording
 
-from .glass import (TOKENS, tag_style, token, token_color, STYLE, GlassWindow, GlassCanvas, GlassPanel, TitleBar,
+from .glass import (TOKENS, MONO_FONT_STACK, tag_style, token, token_color, STYLE, GlassWindow, GlassCanvas, GlassPanel, TitleBar,
                     IconButton, Indicator, Toggle, glyph, app_icon,
                     SquircleBadge, AppleRow, AppleGroup, LedSwatch)
 from .te_widgets import DotMatrixDisplay, SpeakerGrille, RotaryKnob, RockerSwitch
@@ -195,7 +195,6 @@ class Studio(GlassWindow):
         self.nav_sections = []
         self.nav_titles = {}
         for group, items in [('工作空间', [(0, '设备概览'), (1, '按键配置'), (6, '虚拟键鼠')]),
-                             ('AI 联动', [(7, 'Antigravity')]),
                              ('设备与内容', [(5, '控制器库'), (2, '截图图库'), (3, '硬件遥测')])]:
             heading = label(tr(group), 'navSection')
             self.nav_sections.append(heading)
@@ -203,7 +202,7 @@ class Studio(GlassWindow):
             for i, title in items:
                 b = QPushButton(tr(title))
                 b.setObjectName('sidebarNav')
-                b.setIcon(glyph({5: 'grid', 0: 'controller', 1: 'mapping', 6: 'keyboard', 2: 'photos', 3: 'wave', 7: 'sparkle'}[i]))
+                b.setIcon(glyph({5: 'grid', 0: 'controller', 1: 'mapping', 6: 'keyboard', 2: 'photos', 3: 'wave', 7: 'sparkle'}[i], TOKENS['ink_2'], TOKENS['accent']))
                 b.setIconSize(QSize(20, 20))
                 b.setCursor(Qt.PointingHandCursor)
                 b.setFixedHeight(44)
@@ -228,7 +227,7 @@ class Studio(GlassWindow):
                                             (-1, 'help', '使用指南', self.show_help)]:
             b = QPushButton(tr(title))
             b.setObjectName('sidebarNav')
-            b.setIcon(glyph(symbol))
+            b.setIcon(glyph(symbol, TOKENS['ink_2'], TOKENS['accent'] if i == 4 else None))
             b.setIconSize(QSize(22, 22))
             b.setFixedHeight(44)
             b.setCursor(Qt.PointingHandCursor)
@@ -273,8 +272,8 @@ class Studio(GlassWindow):
         capsule_layout.addWidget(self.status_badge)
 
         self.status_label = label(tr('未连接'), 'section')
-        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.status_label.setMinimumWidth(100)
+        self.status_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.status_label.setMinimumWidth(52)
         self.status_label.setMaximumWidth(200)
         self.status_label.setStyleSheet(f"font-size: 11.5px; font-weight: 700; color: {TOKENS['ink_2']}; padding-right: 4px;")
         capsule_layout.addWidget(self.status_label)
@@ -343,7 +342,7 @@ class Studio(GlassWindow):
                                     if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick) else None)
         self.tray.messageClicked.connect(self.show_home)
         self.tray.show()
-        self.navigate(5); self.refresh_gallery(); self.update_controller_ui(None)
+        self.navigate(0); self.refresh_gallery(); self.update_controller_ui(None)
         self.timer=QTimer(self); self.timer.timeout.connect(self.poll); self.timer.start(16)
         self.scan_timer=QTimer(self); self.scan_timer.timeout.connect(self.scan); self.scan_timer.start(1000)
         self.gallery_timer=QTimer(self); self.gallery_timer.timeout.connect(self.refresh_gallery); self.gallery_timer.start(5000)
@@ -409,8 +408,8 @@ class Studio(GlassWindow):
 
         # 2. Right: Single Unified Operations Rack
         right_panel = AppleGroup()
-        right_panel.setMinimumWidth(300)
-        right_panel.setMaximumWidth(400)
+        right_panel.setMinimumWidth(320)
+        right_panel.setMaximumWidth(420)
 
         # Unified monochrome badge icon color (Dieter Rams & Teenage Engineering hardware tone)
         BADGE_COLOR = (TOKENS['ink_2'], TOKENS['ink_2'])
@@ -426,7 +425,8 @@ class Studio(GlassWindow):
         self.profile_combo.setCurrentText(self.config['active_profile'])
         self.profile_combo.currentTextChanged.connect(self.change_profile)
         self.profile_combo.activated.connect(lambda index: self.use_current_as_manual(self.profile_combo.itemText(index)))
-        self.profile_combo.setFixedWidth(148)
+        self.profile_combo.setMinimumWidth(138)
+        self.profile_combo.setMaximumWidth(168)
         self.profile_combo.setMinimumHeight(36)
         self.profile_combo.setMaxVisibleItems(10)
         row_profile = AppleRow('controller', BADGE_COLOR, tr('配置预设'), '', self.profile_combo)
@@ -442,7 +442,7 @@ class Studio(GlassWindow):
         right_panel.vbox.addWidget(mode_box)
 
         self.rumble_button = button(tr('脉冲测试'), self.rumble, icon='wave', pill=True)
-        self.rumble_button.setFixedWidth(112)
+        self.rumble_button.setMinimumWidth(116)
         self.rumble_button.setMinimumHeight(36)
         row_rumble = AppleRow('wave', BADGE_COLOR, tr('触觉反馈'), '', self.rumble_button)
         self.home_rumble_row = row_rumble
@@ -450,7 +450,7 @@ class Studio(GlassWindow):
         right_panel.add_row(row_rumble)
 
         self.nav_mapping_btn = button(tr('编辑按键 ›'), self._on_nav_mapping_clicked, pill=True)
-        self.nav_mapping_btn.setFixedWidth(112)
+        self.nav_mapping_btn.setMinimumWidth(116)
         self.nav_mapping_btn.setMinimumHeight(36)
         row_map = AppleRow('mapping', BADGE_COLOR, tr('按键映射'), '', self.nav_mapping_btn)
         row_map.setToolTip(tr('自定义按键键位与长按/短按宏映射'))
@@ -463,7 +463,7 @@ class Studio(GlassWindow):
         right_panel.vbox.addWidget(hdr2)
 
         self.capture_action_btn = button(tr('查看图库 ›'), lambda: self.navigate(2), pill=True)
-        self.capture_action_btn.setFixedWidth(112)
+        self.capture_action_btn.setMinimumWidth(116)
         self.capture_action_btn.setMinimumHeight(36)
         self.row_capture = AppleRow('camera', BADGE_COLOR, tr('截图'), '', self.capture_action_btn)
         self.capture_heading = self.row_capture.title_label
@@ -472,7 +472,7 @@ class Studio(GlassWindow):
         right_panel.add_row(self.row_capture)
 
         self.guide_action_btn = button(tr('系统菜单 ›'), lambda: self.navigate(1), pill=True)
-        self.guide_action_btn.setFixedWidth(112)
+        self.guide_action_btn.setMinimumWidth(116)
         self.guide_action_btn.setMinimumHeight(36)
         self.row_guide = AppleRow('controller', BADGE_COLOR, tr('Xbox 导航'), '', self.guide_action_btn)
         self.guide_heading = self.row_guide.title_label
@@ -481,7 +481,7 @@ class Studio(GlassWindow):
         right_panel.add_row(self.row_guide)
 
         self.touch_action_btn = button(tr('手势映射 ›'), lambda checked=False: self.open_touch_editor(), pill=True)
-        self.touch_action_btn.setFixedWidth(112)
+        self.touch_action_btn.setMinimumWidth(116)
         self.touch_action_btn.setMinimumHeight(36)
         self.row_touchpad = AppleRow('touchpad', BADGE_COLOR, tr('触摸板'), tr('设置鼠标与手势动作'), self.touch_action_btn)
         right_panel.add_row(self.row_touchpad)
@@ -840,10 +840,9 @@ class Studio(GlassWindow):
         idx = self.mode_combo.findData(cur_mode)
         self.mode_combo.setCurrentIndex(max(0, idx))
         self.mode_combo.currentIndexChanged.connect(lambda: self.setting('capture_mode', self.mode_combo.currentData()))
-        self.mode_combo.setMinimumWidth(190)
-        self.mode_combo.setMaximumWidth(270)
-        self.mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.mode_combo.setMinimumContentsLength(14)
+        self.mode_combo.setMinimumWidth(245)
+        self.mode_combo.setMaximumWidth(320)
+        self.mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         cap.add_row(AppleRow('camera', (TOKENS['accent'], TOKENS['accent_lo']), tr('捕获目标屏幕与范围'), tr('选择截图范围；录制屏幕在精彩回放中单独设置。'), self.mode_combo))
 
         if sys.platform == 'darwin' and not WINDOWS_FEATURES:
@@ -887,7 +886,7 @@ class Studio(GlassWindow):
         c_top.addWidget(label(tr('防抖冷却间隔'), 'section'))
         c_top.addStretch()
         cool_val = label(f"{self.config['cooldown']:.2f} " + tr('秒'), 'metric')
-        cool_val.setStyleSheet(f"font: 12px 'Cascadia Code', monospace; font-weight: 700; color: {TOKENS['amber']};")
+        cool_val.setStyleSheet(f"font: 12px {MONO_FONT_STACK}; font-weight: 700; color: {TOKENS['amber']};")
         c_top.addWidget(cool_val)
         c_tv.addLayout(c_top)
         c_desc = label(tr('连击防误触时间阈值'), 'caption')
@@ -1003,7 +1002,7 @@ class Studio(GlassWindow):
         r_top.addWidget(label(tr('双马达振动强度'), 'section'))
         r_top.addStretch()
         rumble_val = label(f"{round(device_config(self.config, self.snapshot)['rumble'] * 100)}%", 'metric')
-        rumble_val.setStyleSheet(f"font: 12px 'Cascadia Code', monospace; font-weight: 700; color: {TOKENS['accent']};")
+        rumble_val.setStyleSheet(f"font: 12px {MONO_FONT_STACK}; font-weight: 700; color: {TOKENS['accent']};")
         r_top.addWidget(rumble_val)
         r_tv.addLayout(r_top)
         r_desc = label(tr('触觉反馈马达输出力度'), 'caption')
@@ -1094,6 +1093,7 @@ class Studio(GlassWindow):
         self.haptic_settings_row = haptic_row
         hardware.add_row(haptic_row)
         self.hardware_empty = label(tr('连接手柄后显示它支持的硬件设置。'), 'caption', True)
+        self.hardware_empty.setContentsMargins(16, 4, 16, 12)
         hardware.add_row(self.hardware_empty)
 
         grid.addWidget(hardware, 0, 1)
@@ -1117,7 +1117,7 @@ class Studio(GlassWindow):
         lp_top.addWidget(label(tr('长按手势识别阈值'), 'section'))
         lp_top.addStretch()
         lp_val = label(f"{self.config['long_press']:.2f} " + tr('秒'), 'metric')
-        lp_val.setStyleSheet(f"font: 12px 'Cascadia Code', monospace; font-weight: 700; color: {TOKENS['chalk']};")
+        lp_val.setStyleSheet(f"font: 12px {MONO_FONT_STACK}; font-weight: 700; color: {TOKENS['chalk']};")
         lp_top.addWidget(lp_val)
         lp_tv.addLayout(lp_top)
         lp_desc = label(tr('按住按键达到设定时长触发二次宏动作'), 'caption')
@@ -1152,10 +1152,9 @@ class Studio(GlassWindow):
             set_language(val)
             self.notify(tr('界面语言已更新，部分设置重启后生效'))
         self.lang_combo.currentIndexChanged.connect(on_lang_change)
-        self.lang_combo.setMinimumWidth(180)
-        self.lang_combo.setMaximumWidth(240)
-        self.lang_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.lang_combo.setMinimumContentsLength(14)
+        self.lang_combo.setMinimumWidth(235)
+        self.lang_combo.setMaximumWidth(290)
+        self.lang_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         general.add_row(AppleRow('globe', (TOKENS['purple'], TOKENS['accent_lo']), tr('界面语言 / Language'), tr('界面语言与国际化设置'), self.lang_combo))
 
         help_btn = button(tr('查阅指南 ›'), self.show_help, pill=True)
@@ -1276,7 +1275,7 @@ class Studio(GlassWindow):
 
         cur_min = int(self.config.get('replay_buffer_minutes', 5))
         self.replay_min_label = label(f"{cur_min} " + tr('分钟'))
-        self.replay_min_label.setStyleSheet(f"background: transparent; font: 12px 'Cascadia Code', monospace; font-weight: 700; color: {TOKENS['accent']}; padding: 0 2px;")
+        self.replay_min_label.setStyleSheet(f"background: transparent; font: 12px {MONO_FONT_STACK}; font-weight: 700; color: {TOKENS['accent']}; padding: 0 2px;")
         
         self.replay_slider = QSlider(Qt.Horizontal)
         self.replay_slider.setRange(1, 10)
@@ -1336,7 +1335,7 @@ class Studio(GlassWindow):
         
         self.replay_hud_label = label(tr('正在检测编码器状态...') if sys.platform == 'darwin' and not WINDOWS_FEATURES
                                       else tr('正在探测硬件加速状态...'), 'muted')
-        self.replay_hud_label.setStyleSheet(f"font: 11.5px 'Cascadia Code', monospace; color: {TOKENS['ink_2']}; font-weight: 600;")
+        self.replay_hud_label.setStyleSheet(f"font: 11.5px {MONO_FONT_STACK}; color: {TOKENS['ink_2']}; font-weight: 600;")
         hud_layout.addWidget(self.replay_hud_label, 1)
 
         save_rep_btn = button(tr('立即保存当前回放'), self.trigger_manual_replay, pill=True)
@@ -1347,6 +1346,7 @@ class Studio(GlassWindow):
 
         from .voice_entry_ui import VoiceEntryGroup
         self.voice_entry_group = VoiceEntryGroup(platform=sys.platform)
+        self.voice_entry_group.hide()
         grid.addWidget(self.voice_entry_group, 3, 0, 1, 2)
         self.settings_groups = [cap, hardware, general, background, replay_group, self.voice_entry_group]
         for group in self.settings_groups:
@@ -1677,12 +1677,12 @@ class Studio(GlassWindow):
                 self.store.activate_controller(state)
                 self._activated_device_identity = identity
                 self.store.save()
-        title = CATALOG[family]['name'] if state else tr('通用 XInput')
+        title = (state.get('name') or CATALOG[family]['name']) if state else tr('通用 XInput')
         description = state.get('name', title) if state else tr('未连接设备 · 通用 XInput 键位预览')
         self.controller_heading.setText(title)
         self.controller_heading.setToolTip(description)
         self.art.set_family(family); self.mapping_art.set_family(family)
-        self.photo_caption.setText(PHOTOS[family]['caption'] if state else tr('通用 XInput 键位示意'))
+        self.photo_caption.setText(PHOTOS.get(family, PHOTOS['generic'])['caption'] if state else tr('通用 XInput 键位示意'))
         self.mapping_model.setText(title); self.mapping_model.setToolTip(description)
         sources = set(input_sources(state))
         available = {int(key) for key in sources if key.isdigit()}
@@ -2172,8 +2172,9 @@ class Studio(GlassWindow):
                 self.status_badge.setText(tr('●  已连接'))
                 if hasattr(self, 'status_label'):
                     full_status = f"{dev_name} · {tr('已连接')}"
-                    self.status_label.setFixedWidth(200)
-                    self.status_label.setText(self.status_label.fontMetrics().elidedText(full_status, Qt.ElideRight, 200))
+                    self.status_label.setMinimumWidth(64)
+                    self.status_label.setMaximumWidth(200)
+                    self.status_label.setText(self.status_label.fontMetrics().elidedText(full_status, Qt.ElideRight, 196))
                     self.status_label.setToolTip(full_status)
                     self.status_label.setStyleSheet(f"font-size: 11.5px; font-weight: 700; color: {TOKENS['ink']}; padding-right: 4px;")
                 if hasattr(self, 'status_capsule'):
@@ -2181,7 +2182,8 @@ class Studio(GlassWindow):
             else:
                 self.status_badge.setText(tr('○  等待连接'))
                 if hasattr(self, 'status_label'):
-                    self.status_label.setFixedWidth(100)
+                    self.status_label.setMinimumWidth(52)
+                    self.status_label.setMaximumWidth(140)
                     self.status_label.setText(tr('未连接'))
                     self.status_label.setToolTip(tr('未连接手柄'))
                     self.status_label.setStyleSheet(f"font-size: 11.5px; font-weight: 700; color: {TOKENS['ink_2']}; padding-right: 4px;")
@@ -3286,7 +3288,7 @@ def run():
     parser.add_argument('--data-dir',type=Path,default=None)
     parser.add_argument('--cli',action='store_true',help='使用原命令行截图模式')
     parser.add_argument('--smoke-test',action='store_true',help=argparse.SUPPRESS)
-    parser.add_argument('--page',choices=list(pages),default='controllers')
+    parser.add_argument('--page',choices=list(pages),default='home')
     parser.add_argument('--lang',choices=['auto','zh','en'],default=None,help=tr('UI 界面语言选择 (auto/zh/en)'))
     args,extra=parser.parse_known_args()
     if args.cli or extra:
