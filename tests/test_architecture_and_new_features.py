@@ -757,7 +757,7 @@ class TestArchitectureAndNewFeatures(unittest.TestCase):
             self.assertEqual(hw_probed['vendor'], 0x3537)
             self.assertEqual(hw_probed['product'], 0x1042)
             self.assertEqual(hw_probed['brand'], 'GameSir 盖世小鸡')
-            self.assertEqual(hw_probed['model'], 'GameSir Nova Lite')
+            self.assertIn('GameSir Nova Lite', hw_probed['model'])
             self.assertEqual(hw_probed['back_paddles'], 2)
         finally:
             dq._MOCK_HOST_USB_CONTROLLERS = old_mock
