@@ -1267,9 +1267,9 @@ class Studio(GlassWindow):
         rm_tv = QVBoxLayout()
         rm_tv.setContentsMargins(0, 0, 0, 0)
         rm_tv.setSpacing(2)
-        rm_title = label(tr('最大回看时间 (纯内存滑动窗口)'), 'section')
+        rm_title = label(tr('最大回看时间'), 'section')
         rm_tv.addWidget(rm_title)
-        rm_desc = label(tr('100% 纯内存环形缓冲区保留的最长历史片段（零磁盘写入损耗）'), 'muted')
+        rm_desc = label(tr('滑动窗口保留的最长历史回放片段（零磁盘写入损耗）'), 'muted')
         rm_desc.setObjectName('caption')
         rm_tv.addWidget(rm_desc)
 
@@ -1373,11 +1373,8 @@ class Studio(GlassWindow):
 
     def _update_replay_hud(self):
         try:
-            from .replay_service import calculate_estimated_ram_gb
-            minutes = int(self.config.get('replay_buffer_minutes', 5))
             codec = self.config.get('replay_codec', 'hevc')
             bitrate = int(self.config.get('replay_bitrate_mbps', 50))
-            ram_gb = calculate_estimated_ram_gb(minutes, bitrate)
             replay_status = self.client.status.get('replay', {}) if self.remote else {}
             enc = replay_status.get('encoder') or ('待启动' if get_language() == 'zh' else 'Not started')
             enabled = self.config.get('replay_buffer_enabled', False)
@@ -1389,11 +1386,10 @@ class Studio(GlassWindow):
                 status_text = '回放录制中' if get_language() == 'zh' else 'Replay recording'
             else:
                 status_text = '等待录制启动' if get_language() == 'zh' else 'Waiting for recording'
-            overhead_txt = f"{minutes} " + tr('分钟') + ("纯内存预估" if get_language() == 'zh' else " est. RAM")
             hw_core = ("编码器" if get_language() == 'zh' else "Encoder") if sys.platform == 'darwin' and not WINDOWS_FEATURES else (
                 "硬件核心" if get_language() == 'zh' else "GPU Engine")
             self.replay_hud_label.setText(
-                f"{status_text}  |  {codec.upper()} {bitrate}Mbps  |  {overhead_txt}: ~{ram_gb:.2f} GB (0 磁盘损耗)  |  {hw_core}: {enc}"
+                f"{status_text}  |  {codec.upper()} {bitrate}Mbps  |  {hw_core}: {enc}"
             )
             if replay_status.get('running') and replay_status.get('color_mode'):
                 self.replay_hud_label.setText(self.replay_hud_label.text() + '  |  ' + replay_status['color_mode'])
