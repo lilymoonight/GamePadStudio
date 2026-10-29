@@ -1677,8 +1677,18 @@ class Studio(GlassWindow):
                 self.store.activate_controller(state)
                 self._activated_device_identity = identity
                 self.store.save()
-        title = (state.get('name') or CATALOG[family]['name']) if state else tr('通用 XInput')
-        description = state.get('name', title) if state else tr('未连接设备 · 通用 XInput 键位预览')
+        from .device_quirks import THIRD_PARTY_BRANDS, identify_controller_hardware
+        hw_info = identify_controller_hardware(state, trigger_async=False) if state else {}
+        tp_brand = (state.get('brand') if state else '') or hw_info.get('brand', '')
+        is_third_party = bool(state and tp_brand in THIRD_PARTY_BRANDS)
+        if is_third_party:
+            paddles_count = int(state.get('back_paddles') or hw_info.get('back_paddles') or 0)
+            if paddles_count > 0 and not state.get('back_paddles'):
+                state = dict(state, back_paddles=paddles_count)
+            title = state.get('model') or hw_info.get('display_name') or state.get('name') or CATALOG[family]['name']
+        else:
+            title = (state.get('name') or CATALOG[family]['name']) if state else tr('通用 XInput')
+        description = (state.get('raw_name') or state.get('name') or title) if state else tr('未连接设备 · 通用 XInput 键位预览')
         self.controller_heading.setText(title)
         self.controller_heading.setToolTip(description)
         self.art.set_family(family); self.mapping_art.set_family(family)
@@ -1749,7 +1759,13 @@ class Studio(GlassWindow):
             'generic': tr('通用手柄')
         }
         if hasattr(self, 'controller_eyebrow'):
-            self.controller_eyebrow.setText(specs.get(family, specs['generic']))
+            if is_third_party:
+                proto_label = str(state.get('input_protocol') or hw_info.get('protocol') or 'XINPUT').upper()
+                paddles_count = int(state.get('back_paddles') or hw_info.get('back_paddles') or 0)
+                paddle_suffix = f" · {paddles_count} {tr('背键')}" if paddles_count > 0 else ""
+                self.controller_eyebrow.setText(f"{tp_brand.upper()} · {proto_label}{paddle_suffix}")
+            else:
+                self.controller_eyebrow.setText(specs.get(family, specs['generic']))
         if hasattr(self, 'controller_features'):
             self.controller_features.hide()
         if hasattr(self, 'row_touchpad'):
@@ -1765,7 +1781,9 @@ class Studio(GlassWindow):
         if not state:
             return None
         capabilities = curve_capabilities(state)
-        return (state.get('family'), state.get('controller_type'), tuple(input_sources(state)),
+        return (state.get('family'), state.get('controller_type'), state.get('name'),
+                state.get('brand'), state.get('model'), state.get('back_paddles'),
+                tuple(input_sources(state)),
                 tuple(capabilities['trigger_axes']), capabilities['rumble'], capabilities['trigger_rumble'],
                 bool(state.get('led')), bool(state.get('touchpad')))
 

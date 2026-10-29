@@ -17,6 +17,8 @@ from ctypes import wintypes as W
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 
+from .i18n import tr
+
 # HidHide 官方 IOCTL 控制码
 IOCTL_GET_WHITELIST = 0x80016000
 IOCTL_SET_WHITELIST = 0x80016004
@@ -173,13 +175,13 @@ def hidhide_usage_guidance(bootcamp: Optional[bool] = None) -> str:
     if bootcamp is None:
         bootcamp = is_apple_bootcamp_environment()
     lines = [
-        "💡 提示：设备隐身为可选功能（非必装），不安装也可正常使用虚拟键鼠、陀螺仪、连发与截图等全部核心功能。",
-        "🔄 生效说明：开启隐身后，已运行的游戏仍持有旧设备连接；请重新拔插一次手柄（或重启游戏），并关闭 Steam 后台的手柄接管。",
+        tr("💡 提示：设备隐身为可选功能（非必装），不安装也可正常使用虚拟键鼠、陀螺仪、连发与截图等全部核心功能。"),
+        tr("🔄 生效说明：开启隐身后，已运行的游戏仍持有旧设备连接；请重新拔插一次手柄（或重启游戏），并关闭 Steam 后台的手柄接管。"),
     ]
     if bootcamp:
-        lines.append("⚠️ Bootcamp 警告：检测到 Apple Mac 双系统环境，请勿安装或启用 HidHide，以免与 Apple 内置键盘/触控板复合驱动冲突！")
+        lines.append(tr("⚠️ Bootcamp 警告：检测到 Apple Mac 双系统环境，请勿安装或启用 HidHide，以免与 Apple 内置键盘/触控板复合驱动冲突！"))
     else:
-        lines.append("⚠️ Mac 双系统提示：若使用 Mac Bootcamp 双系统，请勿安装 HidHide，以免导致内置键盘/触控板失灵。")
+        lines.append(tr("⚠️ Mac 双系统提示：若使用 Mac Bootcamp 双系统，请勿安装 HidHide，以免导致内置键盘/触控板失灵。"))
     return "\n".join(lines)
 
 

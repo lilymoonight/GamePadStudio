@@ -53,7 +53,7 @@ class GamepadTargetSelector(QWidget):
         for col, k in enumerate(row1):
             btn = QPushButton(clean_lbl(k))
             btn.setCheckable(True)
-            btn.setFixedSize(54, 30)
+            btn.setMinimumSize(58, 30)
             btn.setCursor(Qt.PointingHandCursor)
             btn.clicked.connect(lambda chk=False, key=k: self._on_btn_clicked(key))
             self.grid.addWidget(btn, 0, col)
@@ -62,7 +62,7 @@ class GamepadTargetSelector(QWidget):
         for col, k in enumerate(row2):
             btn = QPushButton(clean_lbl(k))
             btn.setCheckable(True)
-            btn.setFixedSize(54, 30)
+            btn.setMinimumSize(58, 30)
             btn.setCursor(Qt.PointingHandCursor)
             btn.clicked.connect(lambda chk=False, key=k: self._on_btn_clicked(key))
             self.grid.addWidget(btn, 1, col)
@@ -123,11 +123,11 @@ class GamepadTargetSelector(QWidget):
             if is_sel:
                 btn.setStyleSheet(
                     f"background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #ff6d3b, stop:1 #ff5722); "
-                    f"color: #ffffff; font-weight: 700; border: 1px solid rgba(255,255,255,0.45); border-radius: 6px;"
+                    f"color: #ffffff; font-weight: 700; padding: 0 4px; border: 1px solid rgba(255,255,255,0.45); border-radius: 6px;"
                 )
             else:
                 btn.setStyleSheet(
-                    f"background: {TOKENS['surface']}; color: {TOKENS['ink_2']}; font-weight: 600; "
+                    f"background: {TOKENS['surface']}; color: {TOKENS['ink_2']}; font-weight: 600; padding: 0 4px; "
                     f"border: 1px solid {TOKENS['border']}; border-radius: 6px;"
                 )
         self.info_label.setText(self._summary_text())
@@ -434,7 +434,7 @@ class BindingDialog(QDialog):
             k_layout = QHBoxLayout(kbm_row)
             k_layout.setContentsMargins(0, 0, 0, 0)
             field = KeySequenceField(binding.get('value', ''))
-            record_btn = QPushButton('录入键盘按键')
+            record_btn = QPushButton(tr('录入键盘按键'))
             record_btn.clicked.connect(field.start_recording)
             k_layout.addWidget(field, 1)
             k_layout.addWidget(record_btn)
@@ -442,7 +442,7 @@ class BindingDialog(QDialog):
             self.kbm_fields[gesture] = field
 
             mouse_combo = QComboBox()
-            for v, m_name in [('left', '鼠标左键'), ('right', '鼠标右键'), ('middle', '鼠标中键'), ('up', '滚轮向上'), ('down', '滚轮向下')]:
+            for v, m_name in [('left', tr('鼠标左键')), ('right', tr('鼠标右键')), ('middle', tr('鼠标中键')), ('up', tr('滚轮向上')), ('down', tr('滚轮向下'))]:
                 mouse_combo.addItem(m_name, v)
             m_idx = mouse_combo.findData(binding.get('value', 'left'))
             mouse_combo.setCurrentIndex(max(0, m_idx))
@@ -458,7 +458,7 @@ class BindingDialog(QDialog):
             hold_mode.addItem(tr('按一次保持，再按一次取消'), 'toggle')
             hold_mode.addItem(tr('按住高频连发 (Turbo)'), 'turbo')
             hold_mode.addItem(tr('双击并按住 (冲刺/奔跑)'), 'double_tap_hold')
-            hold_mode.setToolTip(tr('切换保持会在暂停、断线、切换预设或退出时自动释放'))
+            hold_mode.setToolTip(tr('选择按键触发逻辑：按住生效、切换保持、高频连发 (5-30Hz) 或双击并按住；切换保持与连发在暂停、断线或切换预设时会自动释放。'))
             hold_mode.setCurrentIndex(max(0, hold_mode.findData(binding.get('mode', 'hold'))))
             hold_mode_layout.addWidget(hold_mode, 1)
 
@@ -548,7 +548,7 @@ class BindingDialog(QDialog):
                 tr('手柄输出配置；当前未接入系统虚拟手柄驱动后端。若需在游戏内高频自动连发，请切换到虚拟键鼠模式使用“按住高频连发 (Turbo)”。')
             )
         else:
-            tip_text = '💡 虚拟键鼠模拟：将物理手柄输入无缝转换为真实键盘按键、鼠标点击、滚轮或应用快捷键。'
+            tip_text = tr('💡 虚拟键鼠模拟：将物理手柄输入无缝转换为真实键盘按键、鼠标点击、滚轮或应用快捷键。')
         tip_lbl = QLabel(tip_text)
         tip_lbl.setWordWrap(True)
         tip_lbl.setStyleSheet(f"color: {TOKENS['ink_3']}; font-size: 11px; padding: 4px 0;")
@@ -562,8 +562,8 @@ class BindingDialog(QDialog):
 
         controls = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         self.save_button = controls.button(QDialogButtonBox.Save)
-        controls.button(QDialogButtonBox.Save).setText('保存映射')
-        controls.button(QDialogButtonBox.Cancel).setText('取消')
+        controls.button(QDialogButtonBox.Save).setText(tr('保存映射'))
+        controls.button(QDialogButtonBox.Cancel).setText(tr('取消'))
         controls.accepted.connect(self.validate)
         controls.rejected.connect(self.reject)
         layout.addWidget(controls)
@@ -874,7 +874,10 @@ class BindingList(QWidget):
             if symbol:
                 btn.setIcon(glyph(symbol, TOKENS['ink_2']))
             btn.setAccessibleName(tr(title))
-            btn.setToolTip(tr(title))
+            if name == 'allocate_unused_button':
+                btn.setToolTip(tr('将手柄背键、额外硬件按键自动分配为标准 XInput 连招或组合快捷键'))
+            else:
+                btn.setToolTip(tr(title))
             btn.clicked.connect(callback)
             tools.addWidget(btn)
             setattr(self, name, btn)

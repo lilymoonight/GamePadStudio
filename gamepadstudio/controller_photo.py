@@ -44,6 +44,10 @@ XINPUT_SVG_CENTERS = {
     13: (149.0, 238.0),
     14: (183.0, 238.0),
     15: (220.5, 188.0),
+    16: (132.0, 316.0),
+    17: (309.0, 316.0),
+    18: (132.0, 350.0),
+    19: (309.0, 350.0),
 }
 
 
@@ -363,6 +367,23 @@ class ControllerInput(ControllerPhoto):
             else:
                 painter.setPen(QColor(168, 162, 158, 115))
             painter.drawText(b_rect, Qt.AlignCenter, bumper_names[idx])
+
+        if self.available is not None:
+            for p_idx, p_key in enumerate((16, 17, 18, 19), 1):
+                if p_key not in anchors or not self.input_is_available(p_key):
+                    continue
+                px, py = anchors[p_key]
+                p_pt = QPointF(rect.left() + px * rect.width(), rect.top() + py * rect.height())
+                p_rect = QRectF(p_pt.x() - 18, p_pt.y() - 9, 36, 18)
+                is_act = p_key in active_keys or p_key == self.hovered_key
+                bg = QColor(TOKENS['accent'] if is_act else '#292524')
+                bg.setAlpha(42 if is_act else 200)
+                border = QColor(TOKENS['accent'] if is_act else '#57534e')
+                painter.setPen(QPen(border, 1.4 if is_act else 1.0))
+                painter.setBrush(bg)
+                painter.drawRoundedRect(p_rect, 5.0, 5.0)
+                painter.setPen(QColor(TOKENS['accent']) if is_act else QColor(168, 162, 158, 185))
+                painter.drawText(p_rect, Qt.AlignCenter, f'P{p_idx}')
 
         radius = max(9., min(20., rect.width() * .026))
         if isinstance(self.hovered_key, int) and self.hovered_key not in active_keys and self.input_is_available(self.hovered_key):

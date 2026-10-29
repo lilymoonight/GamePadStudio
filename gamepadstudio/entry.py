@@ -1,5 +1,4 @@
 import os
-os.environ['SDL_JOYSTICK_RAWINPUT'] = '0'
 import argparse
 import json
 from pathlib import Path

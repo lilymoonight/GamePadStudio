@@ -26,7 +26,17 @@ INPUT_OPTION_FIELDS = INPUT_NUMERIC_FIELDS | {'suppress_ls_up'}
 
 MOUSE_MODES = ('game', 'desktop')
 STICK_SOURCES = ('right', 'left')
-GYRO_TRIGGERS = ('LT', 'RT', '9', '10', '7', '8', 'always', '')
+GYRO_TRIGGERS = (
+    'LT', 'RT', 'LB', 'RB', 'L3', 'R3',
+    'L1', 'R1', 'L2', 'R2',
+    '9', '10', '7', '8',
+    'always', '',
+)
+
+DEFAULT_GYRO_SENSITIVITY = 18.0
+DEFAULT_GYRO_TRIGGER = 'LT'
+DEFAULT_STICK_SOURCE = 'right'
+DEFAULT_TURBO_RATE = 15
 
 MOUSE_NUMERIC_RANGES = {
     'sensitivity': (1.0, 100.0),

@@ -54,15 +54,55 @@ COMMON_CONTROLLER_MODELS: dict[tuple[int, int], dict[str, Any]] = {
     (0x2DC8, 0x2100): {'brand': '8BitDo 八位堂', 'model': 'SN30 Pro / Pro 2 (Switch Mode)', 'family': 'switch', 'protocol': 'hidapi', 'gyro': True},
     (0x2DC8, 0x2101): {'brand': '8BitDo 八位堂', 'model': 'Ultimate (Switch Mode)', 'family': 'switch', 'protocol': 'hidapi', 'gyro': True},
     # Flydigi 飞智 (DirectInput & Multi-mode)
+    (0x04B4, 0x2410): {'brand': 'Flydigi 飞智', 'model': 'Flydigi Apex 八爪鱼 (DInput)', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 4, 'gyro': True},
     (0x04B4, 0x2412): {'brand': 'Flydigi 飞智', 'model': 'Vader / Apex 黑武士/八爪鱼 (DInput)', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 4, 'gyro': True},
     (0x04B4, 0x2411): {'brand': 'Flydigi 飞智', 'model': 'Flydigi Controller (DInput)', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 4},
+    (0x1915, 0x0040): {'brand': 'Flydigi 飞智', 'model': 'Flydigi Vader 2 黑武士 2', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 4, 'gyro': True},
+    (0x37D7, 0x2414): {'brand': 'Flydigi 飞智', 'model': 'Flydigi Direwolf 冰原狼', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2, 'gyro': True},
+    (0xFADE, 0xC001): {'brand': 'Flydigi 飞智', 'model': 'Flydigi Vader 4 / 5 Pro', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 4, 'gyro': True},
     # Beitong 北通 (DirectInput / BFM)
     (0x20BC, 0x5500): {'brand': 'Beitong 北通', 'model': 'Asura / Zeus 阿修罗/宙斯 (DInput)', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 4},
     (0x20BC, 0x5501): {'brand': 'Beitong 北通', 'model': 'Kunpeng 鲲鹏 (DInput)', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 4},
-    (0x20BC, 0x5264): {'brand': 'Beitong 北通', 'model': 'Beitong Wireless (DInput)', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b'},
-    # GameSir 盖世小鸡 (DirectInput / Multi-mode)
-    (0x3537, 0x1001): {'brand': 'GameSir 盖世小鸡', 'model': 'T4 / Cyclone / Nova (DInput)', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2},
+    (0x20BC, 0x5264): {'brand': 'Beitong 北通', 'model': 'Beitong Wireless (DInput)', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2},
+    (0x20BC, 0x504D): {'brand': 'Beitong 北通', 'model': 'Beitong BFM Controller', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2},
+    (0x20BC, 0x5052): {'brand': 'Beitong 北通', 'model': 'Beitong G3 Controller', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2},
+    (0x11C0, 0x5505): {'brand': 'Beitong 北通', 'model': 'Beitong Wired Controller', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2},
+    (0x11C0, 0x5506): {'brand': 'Beitong 北通', 'model': 'Beitong Wireless Controller', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2},
+    # GameSir 盖世小鸡 (DirectInput / XInput / Multi-mode)
+    (0x3537, 0x1001): {'brand': 'GameSir 盖世小鸡', 'model': 'T4 / Cyclone / Nova (DInput)', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2, 'gyro': True},
     (0x3537, 0x1002): {'brand': 'GameSir 盖世小鸡', 'model': 'G7 / Kaleid (DInput)', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2},
+    (0x3537, 0x1003): {'brand': 'GameSir 盖世小鸡', 'model': 'GameSir G7 SE / G7 HE', 'family': 'generic', 'protocol': 'xinput', 'dinput_layout': 'type_b', 'back_paddles': 2},
+    (0x3537, 0x1004): {
+        'brand': 'GameSir 盖世小鸡', 'model': 'GameSir T4 Kaleid', 'family': 'generic', 'protocol': 'dinput',
+        'dinput_layout': 'type_b', 'back_paddles': 2, 'gyro': True,
+        'sdl_mapping': '03000000373500000410000000000000,GameSir T4 Kaleid,a:b0,b:b1,back:b6,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b8,leftshoulder:b4,leftstick:b9,lefttrigger:a2,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b10,righttrigger:a5,rightx:a3,righty:a4,start:b7,x:b2,y:b3,',
+    },
+    (0x3537, 0x1007): {'brand': 'GameSir 盖世小鸡', 'model': 'GameSir Nova / RG P01', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2, 'gyro': True},
+    (0x3537, 0x100B): {
+        'brand': 'GameSir 盖世小鸡', 'model': 'GameSir Cyclone 2 (风行者 2)', 'family': 'generic', 'protocol': 'dinput',
+        'dinput_layout': 'type_b', 'back_paddles': 2, 'gyro': True,
+        'sdl_mapping': '03000000373500000b10000019010000,GameSir Cyclone 2,a:b0,b:b1,back:b6,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b8,leftshoulder:b4,leftstick:b9,lefttrigger:a2,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b10,righttrigger:a5,rightx:a3,righty:a4,start:b7,x:b2,y:b3,',
+    },
+    (0x3537, 0x100E): {'brand': 'GameSir 盖世小鸡', 'model': 'GameSir Tarantula Pro (九尾狐)', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2, 'gyro': True},
+    (0x3537, 0x1010): {'brand': 'GameSir 盖世小鸡', 'model': 'GameSir Super Nova (超新星)', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2, 'gyro': True},
+    (0x3537, 0x1022): {
+        'brand': 'GameSir 盖世小鸡', 'model': 'GameSir G7 Pro', 'family': 'generic', 'protocol': 'dinput',
+        'dinput_layout': 'type_b', 'back_paddles': 2, 'gyro': True,
+        'sdl_mapping': '03000000373500002210000030020000,GameSir G7 Pro,a:b0,b:b1,x:b3,y:b4,back:b10,guide:b12,start:b11,leftstick:b13,rightstick:b14,leftshoulder:b6,rightshoulder:b7,dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:a5,righttrigger:a4,',
+    },
+    (0x3537, 0x1041): {
+        'brand': 'GameSir 盖世小鸡', 'model': 'GameSir Nova Lite (启明星)', 'family': 'generic', 'protocol': 'dinput',
+        'dinput_layout': 'type_b', 'back_paddles': 2,
+        'sdl_mapping': '03000000373500004110000000010000,GameSir Nova Lite,a:b0,b:b1,x:b3,y:b4,back:b10,guide:b12,start:b11,leftstick:b13,rightstick:b14,leftshoulder:b6,rightshoulder:b7,dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:a5,righttrigger:a4,',
+    },
+    (0x3537, 0x1046): {'brand': 'GameSir 盖世小鸡', 'model': 'GameSir Wireless Controller', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2},
+    (0x3537, 0x1058): {'brand': 'GameSir 盖世小鸡', 'model': 'GameSir K1 Kaleid', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2},
+    (0x3537, 0x1094): {'brand': 'GameSir 盖世小鸡', 'model': 'GameSir Tegenaria Lite', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2},
+    (0x3537, 0x1097): {'brand': 'GameSir 盖世小鸡', 'model': 'GameSir Kaleid Flux', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2},
+    (0x3537, 0x1104): {'brand': 'GameSir 盖世小鸡', 'model': 'GameSir X4A Controller', 'family': 'generic', 'protocol': 'xinput', 'dinput_layout': 'type_b', 'back_paddles': 2},
+    (0x3537, 0x1116): {'brand': 'GameSir 盖世小鸡', 'model': 'GameSir X5 Lite', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b'},
+    (0x8555, 0x061B): {'brand': 'GameSir 盖世小鸡', 'model': 'GameSir G4 Pro', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 2, 'gyro': True},
+    (0x20BC, 0x5656): {'brand': 'GameSir 盖世小鸡', 'model': 'GameSir T4w / T4 Pro', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_b', 'back_paddles': 4},
     # Logitech 罗技 DirectInput 经典系列 & 模拟外设
     (0x046D, 0xC216): {'brand': 'Logitech 罗技', 'model': 'Dual Action / F310 (DInput)', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_a'},
     (0x046D, 0xC218): {'brand': 'Logitech 罗技', 'model': 'RumblePad 2 / F510 (DInput)', 'family': 'generic', 'protocol': 'dinput', 'dinput_layout': 'type_a'},
@@ -107,8 +147,13 @@ VENDOR_BRAND_NAMES: dict[int, str] = {
     0x18D1: 'Google',
     0x2DC8: '8BitDo 八位堂',
     0x04B4: 'Flydigi 飞智',
+    0x1915: 'Flydigi 飞智',
+    0x37D7: 'Flydigi 飞智',
+    0xFADE: 'Flydigi 飞智',
     0x20BC: 'Beitong 北通',
+    0x11C0: 'Beitong 北通',
     0x3537: 'GameSir 盖世小鸡',
+    0x8555: 'GameSir 盖世小鸡',
     0x046D: 'Logitech 罗技',
     0x1532: 'Razer 雷蛇',
     0x0F0D: 'HORI',
@@ -125,18 +170,50 @@ VENDOR_BRAND_NAMES: dict[int, str] = {
     0x0E6F: 'PDP',
     0x0738: 'Mad Catz',
     0x06A3: 'Saitek / Logitech Flight',
+    0x2F24: 'Mayflash 魔派',
+    0x10F5: 'Turtle Beach',
 }
 
 KNOWN_GAMING_VENDOR_IDS: tuple[int, ...] = tuple(sorted(set(VENDOR_BRAND_NAMES.keys())))
 
+THIRD_PARTY_BRANDS: frozenset[str] = frozenset({
+    'GameSir 盖世小鸡',
+    'Flydigi 飞智',
+    '8BitDo 八位堂',
+    'Beitong 北通',
+    'GuliKit 谷粒',
+    'Machenike 机械师',
+    'ThundeRobot 雷神',
+    'BIGBIG WON 墨将',
+    'EasySMX 易速马',
+    'Logitech 罗技',
+    'Razer 雷蛇',
+    'HORI',
+    'Qanba 拳霸',
+    'PowerA',
+    'PDP',
+    'Mayflash 魔派',
+    'Turtle Beach',
+})
+
 BRAND_NAME_TOKENS: tuple[tuple[str, str], ...] = (
+    ('gamesir', 'GameSir 盖世小鸡'), ('盖世小鸡', 'GameSir 盖世小鸡'), ('小鸡', 'GameSir 盖世小鸡'),
+    ('cyclone 2', 'GameSir 盖世小鸡'), ('cyclone pro', 'GameSir 盖世小鸡'),
+    ('kaleid', 'GameSir 盖世小鸡'), ('tarantula', 'GameSir 盖世小鸡'), ('tegenaria', 'GameSir 盖世小鸡'),
+    ('super nova', 'GameSir 盖世小鸡'), ('nova lite', 'GameSir 盖世小鸡'), ('t4n', 'GameSir 盖世小鸡'),
+    ('t4 pro', 'GameSir 盖世小鸡'), ('t4w', 'GameSir 盖世小鸡'), ('t3s', 'GameSir 盖世小鸡'),
+    ('g7 se', 'GameSir 盖世小鸡'), ('g7 pro', 'GameSir 盖世小鸡'), ('g7 he', 'GameSir 盖世小鸡'),
+    ('flydigi', 'Flydigi 飞智'), ('vader', 'Flydigi 飞智'), ('apex', 'Flydigi 飞智'),
+    ('direwolf', 'Flydigi 飞智'), ('冰原狼', 'Flydigi 飞智'), ('黑武士', 'Flydigi 飞智'),
+    ('八爪鱼', 'Flydigi 飞智'), ('飞智', 'Flydigi 飞智'),
     ('8bitdo', '8BitDo 八位堂'), ('八位堂', '8BitDo 八位堂'),
-    ('flydigi', 'Flydigi 飞智'), ('vader', 'Flydigi 飞智'), ('apex', 'Flydigi 飞智'), ('飞智', 'Flydigi 飞智'),
     ('beitong', 'Beitong 北通'), ('betop', 'Beitong 北通'), ('北通', 'Beitong 北通'),
-    ('gamesir', 'GameSir 盖世小鸡'), ('盖世小鸡', 'GameSir 盖世小鸡'),
-    ('gulikit', 'GuliKit 谷粒'), ('kingkong', 'GuliKit 谷粒'), ('谷粒', 'GuliKit 谷粒'),
+    ('宙斯', 'Beitong 北通'), ('鲲鹏', 'Beitong 北通'), ('阿修罗', 'Beitong 北通'),
+    ('gulikit', 'GuliKit 谷粒'), ('kingkong', 'GuliKit 谷粒'), ('谷粒', 'GuliKit 谷粒'), ('kk3', 'GuliKit 谷粒'),
     ('machenike', 'Machenike 机械师'), ('机械师', 'Machenike 机械师'),
     ('thunderobot', 'ThundeRobot 雷神'), ('雷神', 'ThundeRobot 雷神'),
+    ('bigbig won', 'BIGBIG WON 墨将'), ('墨将', 'BIGBIG WON 墨将'), ('rainbow 2', 'BIGBIG WON 墨将'),
+    ('easysmx', 'EasySMX 易速马'), ('易速马', 'EasySMX 易速马'),
     ('logitech', 'Logitech 罗技'), ('rumblepad', 'Logitech 罗技'),
     ('hori', 'HORI'), ('qanba', 'Qanba 拳霸'), ('razer', 'Razer 雷蛇'),
     ('stadia', 'Google'), ('dualsense', 'Sony'), ('dualshock', 'Sony'),
@@ -156,7 +233,7 @@ def extract_vid_pid_from_sdl_guid(guid: str) -> tuple[int, int]:
         return 0, 0
     if len(raw) != 16:
         return 0, 0
-    if raw[14] == ord('x') and raw[15] == 1:
+    if raw[:6] == b'xinput':
         return 0, 0
     vendor = int.from_bytes(raw[4:6], 'little')
     product = int.from_bytes(raw[8:10], 'little')
@@ -336,13 +413,13 @@ def partition_dinput_buttons_by_sdl_db(num_buttons: int, sdl_mapping: str = '') 
         for idx, raw_btn in enumerate(unused_buttons)
     }
 
-    # Assign conflict-free canonical slots (>= 15) for unused buttons so mid-range
-    # raw buttons (e.g. b5, b8, b9, b12) never collide with canonical XInput 0..14
-    reserved_canonical = set(range(15)) | {b for b in unused_buttons if b >= 15}
-    next_free_slot = 15
+    # Assign conflict-free canonical slots (>= 16) for unused buttons so mid-range
+    # raw buttons (e.g. b5, b8, b9, b12) never collide with canonical XInput 0..15 (slot 15 is SHARE/CAPTURE)
+    reserved_canonical = set(range(16)) | {b for b in unused_buttons if b >= 16}
+    next_free_slot = 16
     canonical_unused_slots: dict[int, int] = {}
     for raw_btn in unused_buttons:
-        if raw_btn >= 15:
+        if raw_btn >= 16:
             canonical_unused_slots[raw_btn] = raw_btn
         else:
             while next_free_slot in reserved_canonical and next_free_slot < 127:
@@ -418,16 +495,383 @@ def parse_usb_ids(text: str, target_vendor: Optional[int] = None, target_product
     return {'vendors': vendors, 'products': products}
 
 
+_GENERIC_XINPUT_NAMES: frozenset[str] = frozenset({
+    '',
+    'controller',
+    'joystick',
+    'gamepad',
+    'usb gamepad',
+    'usb controller',
+    'wireless controller',
+    'xinput controller',
+    'xinput controller #1',
+    'xinput controller #2',
+    'xinput controller #3',
+    'xinput controller #4',
+    'xbox 360 controller',
+    'xbox 360 controller for windows',
+    'controller (xbox 360 for windows)',
+    'controller (xbox one for windows)',
+    'xbox one controller',
+    'xbox wireless controller',
+})
+
+_THIRD_PARTY_MODEL_KEYWORDS: tuple[tuple[str, tuple[int, int]], ...] = (
+    ('cyclone 2', (0x3537, 0x100B)),
+    ('cyclone pro', (0x3537, 0x1028)),
+    ('t4 kaleid', (0x3537, 0x102A)),
+    ('kaleid flux', (0x3537, 0x1097)),
+    ('kaleid', (0x3537, 0x1071)),
+    ('super nova', (0x3537, 0x1068)),
+    ('nova lite', (0x3537, 0x1042)),
+    ('t4n lite', (0x3537, 0x104F)),
+    ('tarantula pro', (0x3537, 0x107B)),
+    ('tarantula', (0x3537, 0x107B)),
+    ('tegenaria', (0x3537, 0x1094)),
+    ('g7 pro', (0x3537, 0x105A)),
+    ('g7 se', (0x3537, 0x1010)),
+    ('g7 he', (0x3537, 0x1010)),
+    ('gamesir-g7', (0x3537, 0x100E)),
+    ('gamesir g7', (0x3537, 0x100E)),
+    ('t4 pro', (0x20BC, 0x5656)),
+    ('t4w', (0x20BC, 0x5656)),
+    ('t3s', (0x3537, 0x1026)),
+    ('g4 pro', (0x8555, 0x061B)),
+    ('x2 pro', (0x3537, 0x100B)),
+    ('x3 type-c', (0x3537, 0x1013)),
+    ('x4a', (0x3537, 0x1104)),
+    ('x5 lite', (0x3537, 0x1116)),
+    ('vader 4', (0x04B4, 0x2412)),
+    ('vader 3', (0x04B4, 0x2412)),
+    ('vader 2', (0x04B4, 0x2411)),
+    ('apex 4', (0x04B4, 0x2413)),
+    ('apex 3', (0x04B4, 0x2413)),
+    ('direwolf', (0x37D7, 0x2401)),
+    ('冰原狼', (0x37D7, 0x2401)),
+    ('黑武士', (0x04B4, 0x2412)),
+    ('八爪鱼', (0x04B4, 0x2413)),
+    ('ultimate 2c', (0x2DC8, 0x310A)),
+    ('sn30 pro+', (0x2DC8, 0x6002)),
+    ('sn30 pro', (0x2DC8, 0x6001)),
+    ('zeus', (0x20BC, 0x5044)),
+    ('宙斯', (0x20BC, 0x5044)),
+    ('kunpeng', (0x20BC, 0x5501)),
+    ('鲲鹏', (0x20BC, 0x5501)),
+    ('asura', (0x20BC, 0x5500)),
+    ('阿修罗', (0x20BC, 0x5500)),
+)
+
+
+def is_generic_controller_name(name: str) -> bool:
+    low = str(name or '').strip().lower()
+    if low in _GENERIC_XINPUT_NAMES:
+        return True
+    if low.startswith('xinput controller'):
+        return True
+    return False
+
+
+def clean_controller_model_name(raw_name: str, brand: str = '') -> str:
+    """Unwrap Windows 'Controller (GameSir-T4w)' style strings into a clean display model."""
+    text = str(raw_name or '').strip()
+    if not text:
+        return f"{brand.split()[0]} Controller".strip() if brand else 'Controller'
+    for prefix in ('controller (', 'xinput controller (', 'xbox 360 controller ('):
+        if text.lower().startswith(prefix) and text.endswith(')'):
+            inner = text[len(prefix):-1].strip()
+            if inner and inner.lower() not in ('xbox 360 for windows', 'xbox one for windows'):
+                text = inner
+                break
+    text = text.replace('Gamesir-', 'GameSir ').replace('GameSir-', 'GameSir ')
+    if is_generic_controller_name(text) and brand and brand in THIRD_PARTY_BRANDS:
+        return f"{brand.split()[0]} Controller"
+    return text
+
+
+def infer_default_back_paddles(brand: str, model_or_name: str = '') -> int:
+    """Infer physical back paddle count for recognized third-party brands when VID:PID is generic/spoofed."""
+    low = str(model_or_name or '').lower()
+    if 'x5 lite' in low or 'sn30 pro' in low and 'pro+' not in low:
+        return 0
+    if any(k in low for k in ('t4 pro', 't4w', 'tarantula', 'vader', 'apex', '黑武士', '八爪鱼', 'zeus', '宙斯', 'kunpeng', '鲲鹏', 'kk3', 'g5 pro max', 'rainbow 2', 'elite')):
+        return 4
+    if brand == 'Flydigi 飞智':
+        return 2 if ('direwolf' in low or '冰原狼' in low) else 4
+    if brand in (
+        'GameSir 盖世小鸡',
+        '8BitDo 八位堂',
+        'Beitong 北通',
+        'GuliKit 谷粒',
+        'Machenike 机械师',
+        'ThundeRobot 雷神',
+        'BIGBIG WON 墨将',
+        'EasySMX 易速马',
+    ):
+        return 2
+    return 0
+
+
+def detect_third_party_brand_and_model_from_name(name: str) -> Optional[dict[str, Any]]:
+    """Detect third-party controller brand, model, family, and back paddles from a name or path string."""
+    raw = str(name or '').strip()
+    if not raw:
+        return None
+    low = raw.lower().replace('_', ' ')
+    normalized_low = low.replace('-', ' ')
+    for keyword, vid_pid in _THIRD_PARTY_MODEL_KEYWORDS:
+        if keyword in low or keyword in normalized_low:
+            entry = dict(COMMON_CONTROLLER_MODELS.get(vid_pid, {}))
+            if entry:
+                entry.setdefault('vendor', vid_pid[0])
+                entry.setdefault('product', vid_pid[1])
+                return entry
+    for token, brand in BRAND_NAME_TOKENS:
+        if brand not in THIRD_PARTY_BRANDS:
+            continue
+        if token in low or token in normalized_low:
+            cleaned = clean_controller_model_name(raw, brand)
+            paddles = infer_default_back_paddles(brand, cleaned)
+            return {
+                'brand': brand,
+                'model': cleaned,
+                'family': 'generic',
+                'back_paddles': paddles,
+                'dinput_layout': 'type_b',
+            }
+    return None
+
+
+_HOST_USB_CACHE_TS: float = 0.0
+_HOST_USB_CACHE_ITEMS: list[dict[str, Any]] = []
+_MOCK_HOST_USB_CONTROLLERS: Optional[list[dict[str, Any]]] = None
+
+
+def probe_host_usb_controllers(force: bool = False) -> list[dict[str, Any]]:
+    """Inspect connected USB/HID devices on the host OS to recover real third-party VID:PID and iProduct
+    when SDL2 on Windows/macOS reports a spoofed/legacy XInput identity (`045e:028e` or `0000:0000`)."""
+    global _HOST_USB_CACHE_TS, _HOST_USB_CACHE_ITEMS
+    if _MOCK_HOST_USB_CONTROLLERS is not None:
+        return list(_MOCK_HOST_USB_CONTROLLERS)
+    if 'pytest' in sys.modules and not force:
+        return []
+    now = time.monotonic()
+    if not force and (now - _HOST_USB_CACHE_TS) < 2.0:
+        return list(_HOST_USB_CACHE_ITEMS)
+
+    found: list[dict[str, Any]] = []
+    seen_keys: set[tuple[int, int, str]] = set()
+
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            setupapi = ctypes.WinDLL('setupapi', use_last_error=True)
+            DIGCF_PRESENT = 0x00000002
+            DIGCF_ALLCLASSES = 0x00000004
+            SPDRP_DEVICEDESC = 0x00000000
+            SPDRP_HARDWAREID = 0x00000001
+            SPDRP_FRIENDLYNAME = 0x0000000C
+
+            class SP_DEVINFO_DATA(ctypes.Structure):
+                _fields_ = [
+                    ('cbSize', wintypes.DWORD),
+                    ('ClassGuid', ctypes.c_byte * 16),
+                    ('DevInst', wintypes.DWORD),
+                    ('Reserved', ctypes.c_void_p),
+                ]
+
+            class DEVPROPKEY(ctypes.Structure):
+                _fields_ = [
+                    ('fmtid', ctypes.c_byte * 16),
+                    ('pid', wintypes.ULONG),
+                ]
+
+            # DEVPKEY_Device_BusReportedDeviceDesc: {540B947E-8B40-45BC-A8A2-6A0B894CBDA2}, pid 4
+            BUS_REPORTED_KEY = DEVPROPKEY(
+                (ctypes.c_byte * 16).from_buffer_copy(
+                    bytes.fromhex('7e940b54408bbc45a8a26a0b894cbda2')
+                ),
+                4,
+            )
+
+            setupapi.SetupDiGetClassDevsW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR, wintypes.HWND, wintypes.DWORD]
+            setupapi.SetupDiGetClassDevsW.restype = ctypes.c_void_p
+            setupapi.SetupDiEnumDeviceInfo.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(SP_DEVINFO_DATA)]
+            setupapi.SetupDiEnumDeviceInfo.restype = wintypes.BOOL
+            setupapi.SetupDiGetDeviceRegistryPropertyW.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(SP_DEVINFO_DATA), wintypes.DWORD,
+                ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+            ]
+            setupapi.SetupDiGetDeviceRegistryPropertyW.restype = wintypes.BOOL
+            setupapi.SetupDiDestroyDeviceInfoList.argtypes = [ctypes.c_void_p]
+            setupapi.SetupDiDestroyDeviceInfoList.restype = wintypes.BOOL
+
+            get_prop_w = getattr(setupapi, 'SetupDiGetDevicePropertyW', None)
+            if get_prop_w:
+                get_prop_w.argtypes = [
+                    ctypes.c_void_p, ctypes.POINTER(SP_DEVINFO_DATA), ctypes.POINTER(DEVPROPKEY),
+                    ctypes.POINTER(wintypes.ULONG), ctypes.c_void_p, wintypes.DWORD,
+                    ctypes.POINTER(wintypes.DWORD), wintypes.DWORD,
+                ]
+                get_prop_w.restype = wintypes.BOOL
+
+            import re
+            vid_pid_re = re.compile(r'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})')
+
+            oem_names: dict[tuple[int, int], str] = {}
+            try:
+                import winreg
+                for root_hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                    try:
+                        with winreg.OpenKey(
+                            root_hive,
+                            r'System\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM',
+                        ) as oem_root:
+                            idx = 0
+                            while True:
+                                try:
+                                    sub_name = winreg.EnumKey(oem_root, idx)
+                                    idx += 1
+                                except OSError:
+                                    break
+                                m = vid_pid_re.search(sub_name)
+                                if not m:
+                                    continue
+                                v_id, p_id = int(m.group(1), 16), int(m.group(2), 16)
+                                try:
+                                    with winreg.OpenKey(oem_root, sub_name) as sub_k:
+                                        val, _ = winreg.QueryValueEx(sub_k, 'OEMName')
+                                        if isinstance(val, str) and val.strip():
+                                            oem_names[(v_id, p_id)] = val.strip()
+                                except OSError:
+                                    pass
+                    except OSError:
+                        pass
+            except Exception:
+                pass
+
+            for enumerator in ('USB', 'HID'):
+                hdev = setupapi.SetupDiGetClassDevsW(None, enumerator, None, DIGCF_PRESENT | DIGCF_ALLCLASSES)
+                if not hdev or hdev == ctypes.c_void_p(-1).value:
+                    continue
+                try:
+                    dev_idx = 0
+                    info = SP_DEVINFO_DATA()
+                    info.cbSize = ctypes.sizeof(SP_DEVINFO_DATA)
+                    buf = ctypes.create_unicode_buffer(512)
+                    while setupapi.SetupDiEnumDeviceInfo(hdev, dev_idx, ctypes.byref(info)):
+                        dev_idx += 1
+                        reg_type = wintypes.DWORD()
+                        req_size = wintypes.DWORD()
+                        if not setupapi.SetupDiGetDeviceRegistryPropertyW(
+                            hdev, ctypes.byref(info), SPDRP_HARDWAREID,
+                            ctypes.byref(reg_type), buf, ctypes.sizeof(buf), ctypes.byref(req_size)
+                        ):
+                            continue
+                        hw_id = buf.value
+                        m = vid_pid_re.search(hw_id)
+                        if not m:
+                            continue
+                        vid, pid = int(m.group(1), 16), int(m.group(2), 16)
+                        bus_desc = ''
+                        if get_prop_w:
+                            prop_type = wintypes.ULONG()
+                            if get_prop_w(
+                                hdev, ctypes.byref(info), ctypes.byref(BUS_REPORTED_KEY),
+                                ctypes.byref(prop_type), buf, ctypes.sizeof(buf), ctypes.byref(req_size), 0
+                            ):
+                                bus_desc = buf.value.strip()
+                        friendly = ''
+                        if setupapi.SetupDiGetDeviceRegistryPropertyW(
+                            hdev, ctypes.byref(info), SPDRP_FRIENDLYNAME,
+                            ctypes.byref(reg_type), buf, ctypes.sizeof(buf), ctypes.byref(req_size)
+                        ):
+                            friendly = buf.value.strip()
+                        dev_desc = ''
+                        if setupapi.SetupDiGetDeviceRegistryPropertyW(
+                            hdev, ctypes.byref(info), SPDRP_DEVICEDESC,
+                            ctypes.byref(reg_type), buf, ctypes.sizeof(buf), ctypes.byref(req_size)
+                        ):
+                            dev_desc = buf.value.strip()
+
+                        oem_desc = oem_names.get((vid, pid), '')
+                        best_name = bus_desc or oem_desc or friendly or dev_desc
+                        tp_match = (
+                            detect_third_party_brand_and_model_from_name(bus_desc)
+                            or detect_third_party_brand_and_model_from_name(oem_desc)
+                            or detect_third_party_brand_and_model_from_name(friendly)
+                            or detect_third_party_brand_and_model_from_name(dev_desc)
+                        )
+                        brand_by_vid = VENDOR_BRAND_NAMES.get(vid, '')
+                        if brand_by_vid in THIRD_PARTY_BRANDS or tp_match:
+                            key = (vid, pid, best_name)
+                            if key not in seen_keys:
+                                seen_keys.add(key)
+                                found.append({
+                                    'vendor': vid,
+                                    'product': pid,
+                                    'name': best_name,
+                                    'bus_reported_name': bus_desc,
+                                    'tp_match': tp_match,
+                                })
+                finally:
+                    setupapi.SetupDiDestroyDeviceInfoList(hdev)
+        except Exception:
+            pass
+    elif sys.platform == 'darwin':
+        try:
+            import plistlib
+            import subprocess
+            out = subprocess.check_output(
+                ['ioreg', '-a', '-r', '-c', 'IOHIDDevice', '-l'],
+                timeout=0.8,
+                stderr=subprocess.DEVNULL,
+            )
+            items = plistlib.loads(out)
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    vid = int(item.get('VendorID') or 0)
+                    pid = int(item.get('ProductID') or 0)
+                    prod = str(item.get('Product') or '').strip()
+                    tp_match = detect_third_party_brand_and_model_from_name(prod)
+                    brand_by_vid = VENDOR_BRAND_NAMES.get(vid, '')
+                    if brand_by_vid in THIRD_PARTY_BRANDS or tp_match:
+                        key = (vid, pid, prod)
+                        if key not in seen_keys:
+                            seen_keys.add(key)
+                            found.append({
+                                'vendor': vid,
+                                'product': pid,
+                                'name': prod,
+                                'bus_reported_name': prod,
+                                'tp_match': tp_match,
+                            })
+        except Exception:
+            pass
+
+    _HOST_USB_CACHE_TS = now
+    _HOST_USB_CACHE_ITEMS = found
+    return list(found)
+
+
 def lookup_controller_family(vendor: int = 0, product: int = 0, name: str = '') -> str:
     """Single source of truth for inferring controller family from VID:PID or model name."""
     vid = int(vendor or 0)
     pid = int(product or 0)
+    tp_from_name = detect_third_party_brand_and_model_from_name(name)
+    if tp_from_name and tp_from_name.get('brand') in THIRD_PARTY_BRANDS:
+        return tp_from_name.get('family', 'generic')
     known = COMMON_CONTROLLER_MODELS.get((vid, pid))
     if known and known.get('family'):
         return known['family']
     cached = get_controller_database().get_cached_entry(vid, pid, trigger_async=False)
     if cached and cached.get('family'):
         return cached['family']
+    if vid in VENDOR_BRAND_NAMES and VENDOR_BRAND_NAMES[vid] in THIRD_PARTY_BRANDS:
+        return 'generic'
     if vid == 0x054C:
         if pid in (0x0CE6, 0x0DF2):
             return 'dualsense'
@@ -758,8 +1202,11 @@ def identify_controller_hardware(state, trigger_async: bool = True):
     """Return structured device recognition info (brand, model, family, protocol, capabilities, recommended_preset)."""
     if not isinstance(state, dict):
         return {
+            'vendor': 0,
+            'product': 0,
             'brand': 'Unknown',
             'model': 'Disconnected',
+            'display_name': 'Disconnected',
             'family': 'generic',
             'protocol': 'offline',
             'dinput_layout': None,
@@ -778,24 +1225,50 @@ def identify_controller_hardware(state, trigger_async: bool = True):
     if not vendor and not product and len(guid) == 32:
         vendor, product = extract_vid_pid_from_sdl_guid(guid)
 
-    name = str(state.get('name') or 'Controller')
+    name = str(state.get('raw_name') or state.get('name') or 'Controller')
+    device_path = str(state.get('device_path') or '')
+    tp_info = (
+        detect_third_party_brand_and_model_from_name(name)
+        or detect_third_party_brand_and_model_from_name(str(state.get('name') or ''))
+        or detect_third_party_brand_and_model_from_name(device_path)
+    )
+
+    if not tp_info and vendor in (0, 0x045E) and is_generic_controller_name(name):
+        host_usb = probe_host_usb_controllers(force=bool(state.get('_allow_host_probe')))
+        if host_usb:
+            usb_hit = host_usb[0]
+            if usb_hit.get('vendor') and usb_hit['vendor'] not in (0, 0x045E):
+                vendor = int(usb_hit['vendor'])
+                product = int(usb_hit.get('product') or 0)
+            if usb_hit.get('name'):
+                name = str(usb_hit['name'])
+            tp_info = usb_hit.get('tp_match') or detect_third_party_brand_and_model_from_name(name)
+
     lowered = name.lower()
     known = get_controller_database().get_cached_entry(
         vendor, product, guid=guid, name=name, trigger_async=trigger_async
     ) or {}
 
+    if tp_info and (not known or known.get('brand') in ('Microsoft', 'Nintendo', 'Sony', None, '')):
+        merged = dict(known)
+        merged.update({k: v for k, v in tp_info.items() if v not in (None, '')})
+        known = merged
+
     from .controller_catalog import family_for
     family = state.get('family') or known.get('family') or family_for(
         state.get('controller_type', 0), vendor, product, name
     )
-    protocol = state.get('input_protocol') or known.get('protocol') or detect_input_protocol(
+    if tp_info and tp_info.get('brand') in THIRD_PARTY_BRANDS and family == 'xbox':
+        family = tp_info.get('family', 'generic')
+
+    protocol = state.get('input_protocol') or detect_input_protocol(
         guid=guid,
         is_gamecontroller=state.get('is_gamecontroller', True),
         vendor=vendor,
         product=product,
         name=name,
         input_backend=state.get('input_backend', ''),
-    )
+    ) or known.get('protocol')
 
     brand = known.get('brand') or VENDOR_BRAND_NAMES.get(vendor)
     if not brand:
@@ -804,8 +1277,10 @@ def identify_controller_hardware(state, trigger_async: bool = True):
                 brand = label
                 break
     brand = brand or ('DirectInput 外设' if protocol == 'dinput' else '通用外设')
-    model = known.get('model') or name
-    if family == 'flightstick' or vendor == 0:
+    model = known.get('model') or clean_controller_model_name(name, brand)
+    if brand in THIRD_PARTY_BRANDS and is_generic_controller_name(model):
+        model = f"{brand.split()[0]} Controller"
+    if family == 'flightstick' or (vendor == 0 and brand not in THIRD_PARTY_BRANDS):
         dinput_layout = known.get('dinput_layout')
     else:
         dinput_layout = known.get('dinput_layout') or (
@@ -814,6 +1289,8 @@ def identify_controller_hardware(state, trigger_async: bool = True):
             else None
         )
     back_paddles = int(known.get('back_paddles', 0))
+    if not back_paddles and brand in THIRD_PARTY_BRANDS:
+        back_paddles = infer_default_back_paddles(brand, model or name)
     if not back_paddles and any(b in (state.get('available_buttons') or ()) for b in (16, 17, 18, 19)):
         back_paddles = sum(1 for b in (16, 17, 18, 19) if b in (state.get('available_buttons') or ()))
 
@@ -840,8 +1317,11 @@ def identify_controller_hardware(state, trigger_async: bool = True):
         rec_scene = 'sprint_3d'
 
     return {
+        'vendor': vendor,
+        'product': product,
         'brand': brand,
         'model': model,
+        'display_name': model,
         'family': family,
         'protocol': protocol,
         'dinput_layout': dinput_layout,
@@ -854,12 +1334,21 @@ def identify_controller_hardware(state, trigger_async: bool = True):
     }
 
 
-def normalize_dinput_gamepad_state(raw_buttons, raw_axes, hat_mask=0, dinput_layout=None, num_buttons=12, sdl_mapping=''):
+def normalize_dinput_gamepad_state(
+    raw_buttons,
+    raw_axes,
+    hat_mask=0,
+    dinput_layout=None,
+    num_buttons=12,
+    sdl_mapping='',
+    signed_trigger_axes=None,
+):
     """Normalize a DirectInput gamepad into canonical SDL positions without Hat/R3 collision.
 
     - If `sdl_mapping` (`SDL_GameControllerDB` line) is provided, translates `xinput_mapped` raw buttons
       to their exact XInput slots (`0..14`, `LT`, `RT`) and maps `unused_buttons` to conflict-free
-      canonical slots (`>= 15`) via `partition_dinput_buttons_by_sdl_db`.
+      canonical slots (`>= 16`) via `partition_dinput_buttons_by_sdl_db`.
+    - Rescales signed DirectInput trigger axes resting at `-1.0` or `< -0.05` to `[0.0, 1.0]`.
     - Preserves FlightStick / Button-Box / Virtual raw joysticks (`>20` raw buttons or `dinput_layout=None`).
     - Maps DInput Type-A (Logitech/DragonRise: 0=West/X, 1=South/A, 2=East/B, 3=North/Y) or
       Type-B (8BitDo/Flydigi/Beitong/ShanWan: 0=South/A, 1=East/B, 2=West/X, 3=North/Y, 4=LB, 5=RB,
@@ -872,6 +1361,40 @@ def normalize_dinput_gamepad_state(raw_buttons, raw_axes, hat_mask=0, dinput_lay
     if sdl_mapping and sdl_mapping.strip():
         while len(axes) < 6:
             axes.append(0.0)
+        # Parse axis mappings if present in sdl_mapping
+        for token in sdl_mapping.split(','):
+            token = token.strip()
+            if ':' not in token:
+                continue
+            field, source = token.split(':', 1)
+            field = field.strip().lstrip('+-~')
+            source = source.strip()
+            clean_source = source.lstrip('+-~')
+            if clean_source.startswith('a') and clean_source[1:].isdigit():
+                axis_idx = int(clean_source[1:])
+                if axis_idx < len(raw_axes or ()):
+                    val = float(raw_axes[axis_idx])
+                    if source.startswith('~'):
+                        val = -val
+                    if field == 'lefttrigger':
+                        axes[4] = val
+                    elif field == 'righttrigger':
+                        axes[5] = val
+                    elif field == 'leftx':
+                        axes[0] = val
+                    elif field == 'lefty':
+                        axes[1] = val
+                    elif field == 'rightx':
+                        axes[2] = val
+                    elif field == 'righty':
+                        axes[3] = val
+
+        # Rescale signed triggers: [-1.0, 1.0] -> [0.0, 1.0]
+        for idx in (4, 5):
+            if idx < len(axes):
+                if (signed_trigger_axes and idx in signed_trigger_axes) or axes[idx] < -0.05:
+                    axes[idx] = max(0.0, min(1.0, (axes[idx] + 1.0) / 2.0))
+
         total = max(int(num_buttons or 0), max(raw_set, default=-1) + 1)
         part = partition_dinput_buttons_by_sdl_db(total, sdl_mapping)
         normalized = set()
@@ -895,6 +1418,12 @@ def normalize_dinput_gamepad_state(raw_buttons, raw_axes, hat_mask=0, dinput_lay
         if hat_mask & 0x02:
             normalized.add(14)
         return sorted(normalized), axes[:6]
+
+    # Non-SDL mapping branch: rescale signed triggers if present
+    for idx in (4, 5):
+        if idx < len(axes):
+            if (signed_trigger_axes and idx in signed_trigger_axes) or axes[idx] < -0.05:
+                axes[idx] = max(0.0, min(1.0, (axes[idx] + 1.0) / 2.0))
 
     if not dinput_layout or num_buttons > 20:
         if hat_mask & 0x01:

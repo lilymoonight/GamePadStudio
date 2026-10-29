@@ -164,6 +164,9 @@ def input_sources(state=None):
     else:
         buttons = {int(value) for value in state.get('available_buttons', range(15))
                    if isinstance(value, (int, str)) and str(value).isdigit() and 0 <= int(value) < 128}
+        paddles = int(state.get('back_paddles', 0) or 0)
+        if paddles > 0:
+            buttons.update(range(16, 16 + min(4, paddles)))
         if state.get('is_gamecontroller') is False and state.get('num_hats', 0):
             buttons.update(range(11, 15))
         if 'available_axes' in state:
@@ -423,7 +426,14 @@ class InputNormalizer:
             outer_key = f'LS:{d}:outer'
             val = values[f'LS:{d}']
             thresh_key = f'outer_{d}_release' if outer_key in self.active else f'outer_{d}_press'
-            if val >= thresholds[thresh_key]:
+            d_outer_threshold = thresholds[thresh_key]
+            cardinal_active = val >= d_outer_threshold
+            radial_active = (
+                left_magnitude >= d_outer_threshold
+                and (val / max(1e-6, left_magnitude) >= 0.38)
+                and (val >= thresholds['stick_release' if outer_key in self.active else 'stick_press'])
+            )
+            if cardinal_active or radial_active:
                 current.add(outer_key)
         if 'walk_press' in thresholds and current.intersection({'LS:up', 'LS:down', 'LS:left', 'LS:right'}):
             walk_threshold = thresholds['walk_release' if 'LS:inner' in self.active else 'walk_press']
@@ -465,8 +475,11 @@ class GestureEngine:
             action = mapping.get('short', {})
             self._emit(key, 'short', action, True)
             if action.get('action') in HOLD_ACTIONS:
-                # A quick tap still needs a nonzero key-down interval for games (65ms ensures crossing 30/60Hz frame boundaries).
-                self.pending_releases.append((now + .065, key, 'short', action))
+                # A quick tap still needs a nonzero key-down interval for games.
+                # double_tap_hold requires completing its step 1 (t_up at 45ms) and step 2 (t_hold at 90ms)
+                # before releasing at 155ms (65ms hold duration).
+                delay = .155 if action.get('mode') == 'double_tap_hold' else .065
+                self.pending_releases.append((now + delay, key, 'short', action))
 
     def pulse(self, trigger, binding, now, gesture='short'):
         """Dispatch a completed gesture once, with a bounded key/button pulse."""
@@ -474,7 +487,8 @@ class GestureEngine:
             return
         self._emit(trigger, gesture, binding, True)
         if binding.get('action') in HOLD_ACTIONS:
-            self.pending_releases.append((now + .065, trigger, gesture, binding))
+            delay = .155 if binding.get('mode') == 'double_tap_hold' else .065
+            self.pending_releases.append((now + delay, trigger, gesture, binding))
 
     def update(self, buttons, mappings, now=None):
         now = time.monotonic() if now is None else now
@@ -620,17 +634,23 @@ class MappingRuntime:
     def threshold(self, value):
         self.engine.threshold = value
 
-    def _hold(self, binding, down):
+    def _hold(self, binding, down, force=False):
         tokens = output_tokens(binding)
         if self.preview:
             pass
         elif binding['action'] == 'hold':
-            self.actions.hold(binding['value'], down)
+            if hasattr(self.actions, 'hold'):
+                try:
+                    self.actions.hold(binding['value'], down, force=force)
+                except TypeError:
+                    self.actions.hold(binding['value'], down)
+            else:
+                self.actions.hold(binding['value'], down)
         elif binding['action'] in GAMEPAD_ACTIONS:
             self.dispatch(binding, down)
         else:
             token = tokens[0]
-            if (down and self.output_counts[token] == 0) or (not down and self.output_counts[token] == 1):
+            if force or (down and self.output_counts[token] == 0) or (not down and self.output_counts[token] == 1):
                 self.actions.mouse_button(binding['value'], down)
         for token in tokens:
             self.output_counts[token] = max(0, self.output_counts[token] + (1 if down else -1))
@@ -709,10 +729,13 @@ class MappingRuntime:
                             info = v
                             break
                 if info:
-                    if info.get('is_down'):
-                        self._hold(info['binding'], False)
-                        info['is_down'] = False
-                    self.double_tap_bindings.pop(owner, None)
+                    if info['step'] < 2 and self.now < info.get('t_hold', 0):
+                        info['pending_release'] = True
+                    else:
+                        if info.get('is_down'):
+                            self._hold(info['binding'], False)
+                            info['is_down'] = False
+                        self.double_tap_bindings.pop(owner, None)
         elif down and action == 'gamepad_macro':
             raw_steps = binding.get('sequence', [])
             norm_steps = []
@@ -838,30 +861,60 @@ class MappingRuntime:
                 self._hold(binding, False)
                 self.pulses.remove((when, binding))
         regular_mappings = {key: entry for key, entry in mappings.items() if not key.startswith('TP:')}
-        self.engine.update(self.inputs - self.blocked - self.curve_blocked, regular_mappings, self.now)
+
+        # Calculate mouse stick routing & conflict suppression
+        axes_padded = list((state or {}).get('axes', [])) + [0.] * 6
+        mouse_opts = options.get('mouse', {})
+        stick_source = mouse_opts.get('stick_source', 'right')
+        stick_mouse_enabled = options.get('stick_mouse_enabled', options.get('right_stick_mouse', profile_mode(config, config['active_profile']) == 'kbm'))
+        if stick_source == 'left':
+            stick_axes = (axes_padded[0], axes_padded[1])
+            required_sources = {'LS:left', 'LS:up'}
+            blocked_sources = {'LS:up', 'LS:down', 'LS:left', 'LS:right'}
+        else:
+            stick_axes = (axes_padded[2], axes_padded[3])
+            required_sources = {'RS:left', 'RS:up'}
+            blocked_sources = {'RS:up', 'RS:down', 'RS:left', 'RS:right'}
+        move = bool(self.mouse_thread and owns_profile and stick_mouse_enabled
+                    and required_sources <= set(input_sources(state))
+                    and not self.blocked.intersection(blocked_sources))
+
+        active_inputs = self.inputs - self.blocked - self.curve_blocked
+        if stick_source == 'left' and move:
+            # Automatically suppress LS directional key emissions to eliminate WASD runtime contention
+            active_inputs = active_inputs - {'LS:up', 'LS:down', 'LS:left', 'LS:right'}
+
+        self.engine.update(active_inputs, regular_mappings, self.now)
         for owner, info in list(self.turbo_bindings.items()):
-            toggles = 0
-            while self.now >= info['next_toggle'] - 1e-9 and toggles < 20:
+            if self.now >= info['next_toggle'] - 1e-9:
                 info['is_down'] = not info['is_down']
                 self._hold(info['binding'], info['is_down'])
                 if info['is_down']:
                     for token in output_tokens(info['binding']):
                         self.recent[token] = self.now + .18
-                info['next_toggle'] += info['half_period']
-                toggles += 1
-            if toggles >= 20 and self.now >= info['next_toggle'] - 1e-9:
-                info['next_toggle'] = self.now + info['half_period']
+                # Clamp to at most 1 toggle per tick to avoid burst aliasing against the tick loop
+                if self.now >= info['next_toggle'] + info['half_period']:
+                    info['next_toggle'] = self.now + info['half_period']
+                else:
+                    info['next_toggle'] += info['half_period']
         for owner, info in list(self.double_tap_bindings.items()):
             if info['step'] == 0 and self.now >= info['t_up'] - 1e-9:
-                self._hold(info['binding'], False)
+                self._hold(info['binding'], False, force=True)
                 info['is_down'] = False
                 info['step'] = 1
             if info['step'] == 1 and self.now >= info['t_hold'] - 1e-9:
-                self._hold(info['binding'], True)
+                self._hold(info['binding'], True, force=True)
                 info['is_down'] = True
                 info['step'] = 2
                 for token in output_tokens(info['binding']):
                     self.recent[token] = self.now + .18
+                if info.get('pending_release'):
+                    info['t_release'] = self.now + 0.065
+            if info['step'] == 2 and info.get('pending_release') and self.now >= info.get('t_release', float('inf')) - 1e-9:
+                if info.get('is_down'):
+                    self._hold(info['binding'], False)
+                    info['is_down'] = False
+                self.double_tap_bindings.pop(owner, None)
         for runner in list(self.macro_runners):
             steps = runner['steps']
             loops = 0
@@ -922,20 +975,6 @@ class MappingRuntime:
                 self.actions.move_mouse(dx, dy)
         self.last_touch = state.get('touch')
         if self.mouse_thread:
-            axes = list(state.get('axes', [])) + [0.] * 6
-            mouse_opts = options.get('mouse', {})
-            stick_source = mouse_opts.get('stick_source', 'right')
-            if stick_source == 'left':
-                stick_axes = (axes[0], axes[1])
-                required_sources = {'LS:left', 'LS:up'}
-                blocked_sources = {'LS:up', 'LS:down', 'LS:left', 'LS:right'}
-            else:
-                stick_axes = (axes[2], axes[3])
-                required_sources = {'RS:left', 'RS:up'}
-                blocked_sources = {'RS:up', 'RS:down', 'RS:left', 'RS:right'}
-            move = (owns_profile and options.get('right_stick_mouse', profile_mode(config, config['active_profile']) == 'kbm')
-                    and required_sources <= set(input_sources(state))
-                    and not self.blocked.intersection(blocked_sources))
             desktop = mouse_opts.get('mode', 'game') == 'desktop' or (hasattr(self.actions, 'is_nikki_game_focused') and not self.actions.is_nikki_game_focused())
             self.mouse_thread.update_stick(stick_axes[0] if move else 0., stick_axes[1] if move else 0., is_desktop=desktop)
             self.mouse_thread.set_click_lock(any(n for k, n in self.output_counts.items() if k.startswith('mouse:')))
@@ -981,6 +1020,11 @@ class MappingRuntime:
         snap['emitted_buttons'] = sorted(emitted)
         snap['intercepted_buttons'] = sorted(intercepted & self.inputs)
         self.virtual_xinput_state = snap
+        if hasattr(self.actions, 'sync_virtual_gamepad'):
+            try:
+                self.actions.sync_virtual_gamepad(buttons=combined, axes=(state or {}).get('axes', ()))
+            except Exception:
+                pass
 
     def feedback(self):
         return {'preview': self.preview, 'inputs': sorted(self.inputs), 'active': list(self.engine.pressed),
@@ -1010,19 +1054,17 @@ class MappingRuntime:
                 if info.get('is_down'):
                     self._hold(info['binding'], False)
                     info['is_down'] = False
+                self.turbo_bindings.pop(owner, None)
             except Exception as exc:
                 errors.append(exc)
-            else:
-                del self.turbo_bindings[owner]
         for owner, info in list(self.double_tap_bindings.items()):
             try:
                 if info.get('is_down'):
                     self._hold(info['binding'], False)
                     info['is_down'] = False
+                self.double_tap_bindings.pop(owner, None)
             except Exception as exc:
                 errors.append(exc)
-            else:
-                del self.double_tap_bindings[owner]
         for runner in list(self.macro_runners):
             try:
                 if runner.get('is_down') and runner.get('active_binding'):

@@ -138,11 +138,10 @@ class TestArchitectureAndNewFeatures(unittest.TestCase):
             try:
                 w.close()
                 w.deleteLater()
+                if app is not None:
+                    app.sendPostedEvents(w, QEvent.DeferredDelete)
             except Exception:
                 pass
-        if app is not None:
-            app.sendPostedEvents(None, QEvent.DeferredDelete)
-            app.processEvents()
 
     def test_schema_registry_constants(self):
         self.assertIn('double_tap_hold', HOLD_MODES)
@@ -378,7 +377,7 @@ class TestArchitectureAndNewFeatures(unittest.TestCase):
 
                 page.apply_scene_template('sprint_3d')
                 mappings = owner.config['profiles'][scheme]
-                self.assertEqual(mappings['LS:up:outer']['short'], {'action': 'hold', 'value': 'W', 'mode': 'double_tap_hold'})
+                self.assertEqual(mappings['LS:outer']['short'], {'action': 'hold', 'value': 'Shift'})
 
                 page.apply_scene_template('fps_gyro')
                 opts = owner.config['profile_options'][scheme]
@@ -386,9 +385,10 @@ class TestArchitectureAndNewFeatures(unittest.TestCase):
                 self.assertTrue(opts['mouse']['gyro_enabled'])
                 self.assertEqual(opts['mouse']['gyro_trigger'], 'LT')
 
-                page.apply_scene_template('left_stick_mouse')
+                page.apply_scene_template('desktop_nav')
                 opts = owner.config['profile_options'][scheme]
                 self.assertEqual(opts['mouse']['stick_source'], 'left')
+                self.assertEqual(opts['mouse']['mode'], 'desktop')
                 page.close()
             finally:
                 owner.close()
@@ -502,8 +502,8 @@ class TestArchitectureAndNewFeatures(unittest.TestCase):
             self.assertEqual(part['extended_hints'][15], 'Paddle P1')
             self.assertEqual(part['allocated_sequences'][5], {'action': 'gamepad_chord', 'value': '9+0'})
             self.assertEqual(part['allocated_sequences'][15], {'action': 'gamepad_chord', 'value': '9+11'})
-            # Conflict-free canonical slots (>= 15) for mid-range holes b5, b8, b9, b12:
-            self.assertEqual(part['canonical_unused_slots'], {5: 17, 8: 18, 9: 19, 12: 20, 15: 15, 16: 16})
+            # Conflict-free canonical slots (>= 16) for mid-range holes b5, b8, b9, b12, b15:
+            self.assertEqual(part['canonical_unused_slots'], {5: 17, 8: 18, 9: 19, 12: 20, 15: 21, 16: 16})
 
             # Normalize raw DInput buttons using SDL_GameControllerDB mapping line:
             norm_b, norm_a = normalize_dinput_gamepad_state(
@@ -513,8 +513,8 @@ class TestArchitectureAndNewFeatures(unittest.TestCase):
                 num_buttons=17,
                 sdl_mapping=pro2_sdl_line,
             )
-            # b1 -> 0(A), b5(unused) -> 17, b6 -> 9(LB), b15(unused) -> 15, hat 0x01 -> 11(Up)
-            self.assertEqual(norm_b, [0, 9, 11, 15, 17])
+            # b1 -> 0(A), b5(unused) -> 17, b6 -> 9(LB), b15(unused) -> 21, hat 0x01 -> 11(Up)
+            self.assertEqual(norm_b, [0, 9, 11, 17, 21])
 
     def test_virtual_xinput_emitter_and_l1_l2_stream_synthesis(self):
         import tempfile
@@ -705,6 +705,128 @@ class TestArchitectureAndNewFeatures(unittest.TestCase):
         self.assertIn('platform:Mac OS X,', sdl_cfg)
         # Slot '0' (a -> physical b1) remapped to '1' (b) means logical 'b' now binds to 'b1'
         self.assertIn('b:b1', sdl_cfg)
+
+    def test_10_gamesir_and_third_party_xinput_dinput_recognition_and_back_paddles(self):
+        import gamepadstudio.device_quirks as dq
+        from gamepadstudio.controller_catalog import button_labels, family_for
+        from gamepadstudio.controller_gallery import ControllerGallery
+        from gamepadstudio.mapping_engine import input_sources
+        from gamepadstudio.studio import Studio
+        import tempfile
+
+        # 1. Modern SDL2 XInput GUID (ending in '7801') must preserve embedded VID:PID (0x3537:0x100B GameSir Cyclone 2)
+        cyclone2_xinput_guid = '03000000373500000b10000000007801'
+        vid, pid = dq.extract_vid_pid_from_sdl_guid(cyclone2_xinput_guid)
+        self.assertEqual((vid, pid), (0x3537, 0x100B))
+
+        # 2. family_for must not let SDL controller_type=1 (Xbox 360) force 'xbox' for GameSir / third-party controllers
+        self.assertEqual(family_for(1, vendor=0x3537, product=0x100B, name='Xbox 360 Controller'), 'generic')
+        self.assertEqual(family_for(1, vendor=0x045E, product=0x028E, name='Controller (GameSir-T4 Kaleid)'), 'generic')
+        self.assertEqual(family_for(1, vendor=0x045E, product=0x028E, name='Xbox 360 Controller'), 'xbox')
+
+        # 3. Spoofed 045E:028E with USB/OEM name "Controller (GameSir-T4 Kaleid)" resolves GameSir model & back paddles
+        hw_kaleid = dq.identify_controller_hardware({
+            'vendor': 0x045E,
+            'product': 0x028E,
+            'name': 'Controller (GameSir-T4 Kaleid)',
+            'controller_type': 1,
+            'input_backend': 'xinput',
+        })
+        self.assertEqual(hw_kaleid['brand'], 'GameSir 盖世小鸡')
+        self.assertEqual(hw_kaleid['model'], 'GameSir T4 Kaleid')
+        self.assertEqual(hw_kaleid['family'], 'generic')
+        self.assertEqual(hw_kaleid['back_paddles'], 2)
+
+        # 4. Legacy/spoofed XInput with generic name recovers real hardware via host USB probe
+        old_mock = dq._MOCK_HOST_USB_CONTROLLERS
+        try:
+            dq._MOCK_HOST_USB_CONTROLLERS = [{
+                'vendor': 0x3537,
+                'product': 0x1042,
+                'name': 'GameSir-Nova Lite',
+                'bus_reported_name': 'GameSir-Nova Lite',
+                'tp_match': dq.detect_third_party_brand_and_model_from_name('GameSir-Nova Lite'),
+            }]
+            hw_probed = dq.identify_controller_hardware({
+                'vendor': 0,
+                'product': 0,
+                'name': 'XInput Controller #1',
+                'controller_type': 1,
+                'input_backend': 'xinput',
+            })
+            self.assertEqual(hw_probed['vendor'], 0x3537)
+            self.assertEqual(hw_probed['product'], 0x1042)
+            self.assertEqual(hw_probed['brand'], 'GameSir 盖世小鸡')
+            self.assertEqual(hw_probed['model'], 'GameSir Nova Lite')
+            self.assertEqual(hw_probed['back_paddles'], 2)
+        finally:
+            dq._MOCK_HOST_USB_CONTROLLERS = old_mock
+
+        # 5. Sequential back paddle labels (16=P1, 17=P2, 18=P3, 19=P4) and input_sources exposure
+        zh_labels = button_labels('generic', lang='zh')
+        self.assertEqual(
+            [zh_labels[16], zh_labels[17], zh_labels[18], zh_labels[19]],
+            ['背键 P1', '背键 P2', '背键 P3', '背键 P4'],
+        )
+        cyclone_state = {
+            'connected': True,
+            'instance_id': 1,
+            'vendor': 0x3537,
+            'product': 0x100B,
+            'name': 'GameSir Cyclone 2',
+            'brand': 'GameSir 盖世小鸡',
+            'model': 'GameSir Cyclone 2',
+            'family': 'generic',
+            'controller_type': 1,
+            'input_protocol': 'xinput',
+            'back_paddles': 2,
+            'available_buttons': list(range(15)) + [16, 17],
+            'available_axes': list(range(6)),
+            'buttons': [],
+            'axes': [0.0] * 6,
+            'profile_key': f'generic:3537:100b:{cyclone2_xinput_guid}',
+        }
+        sources = input_sources(cyclone_state)
+        self.assertIn('16', sources)
+        self.assertIn('17', sources)
+
+        # 6. UI verification in Studio & ControllerGallery
+        from PySide6.QtCore import QEvent
+        app = _ensure_app()
+        with tempfile.TemporaryDirectory() as tmp, patch('gamepadstudio.studio.request', return_value={'ok': True}):
+            win = Studio(Path(tmp))
+            win.timer.stop()
+            win.scan_timer.stop()
+            win.gallery_timer.stop()
+            win.enabled = False
+            try:
+                win.update_controller_ui(cyclone_state)
+                self.assertEqual(win.controller_heading.text(), 'GameSir Cyclone 2')
+                self.assertEqual(win.mapping_model.text(), 'GameSir Cyclone 2')
+                self.assertIn('GAMESIR 盖世小鸡', win.controller_eyebrow.text())
+                self.assertIn('2 背键', win.controller_eyebrow.text())
+                self.assertNotIn('MICROSOFT', win.controller_eyebrow.text())
+                self.assertFalse(win.mapping_boxes[16][0].isHidden())
+                self.assertFalse(win.mapping_boxes[17][0].isHidden())
+                self.assertIn(win.mapping_boxes[16][1].text(), ('背键 P1', 'Paddle P1'))
+                self.assertIn(win.mapping_boxes[17][1].text(), ('背键 P2', 'Paddle P2'))
+
+                gallery = ControllerGallery(lambda *_: None, lambda *_: None, lambda: None, lambda: None)
+                try:
+                    gallery.set_devices([cyclone_state], 1, cyclone_state)
+                    g_info = gallery.device_info()
+                    self.assertEqual(g_info['brand'], 'GAMESIR 盖世小鸡')
+                    self.assertEqual(g_info['name'], 'GameSir Cyclone 2')
+                    self.assertTrue('2 个背键' in g_info['subtitle'] or '2 back paddles' in g_info['subtitle'])
+                finally:
+                    gallery.hide()
+                    gallery.deleteLater()
+                    app.sendPostedEvents(gallery, QEvent.DeferredDelete)
+            finally:
+                win.cleanup()
+                win.hide()
+                win.deleteLater()
+                app.sendPostedEvents(win, QEvent.DeferredDelete)
 
 
 if __name__ == '__main__':

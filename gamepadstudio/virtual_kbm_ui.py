@@ -742,10 +742,11 @@ class KbmFeelDialog(QDialog):
         self.mode.setCurrentIndex(max(0, self.mode.findData(self.mouse.get('mode', 'game'))))
         pointer_form.addRow(tr('用途'), self.mode)
         self.stick_source = QComboBox()
-        self.stick_source.addItem(tr('右摇杆 (默认)'), 'right')
-        self.stick_source.addItem(tr('左摇杆'), 'left')
+        self.stick_source.addItem(tr('右摇杆 (默认/视角控制)'), 'right')
+        self.stick_source.addItem(tr('左摇杆 (单摇杆外设/辅助指针模式)'), 'left')
         self.stick_source.setCurrentIndex(1 if self.mouse.get('stick_source') == 'left' else 0)
         self.stick_source.setAccessibleName(tr('控制摇杆'))
+        self.stick_source.setToolTip(tr('若选择左摇杆控制指针，请确保未在左摇杆上绑定 WASD 移动，以免产生操作冲突'))
         pointer_form.addRow(tr('控制摇杆'), self.stick_source)
         self.invert_y = QComboBox()
         self.invert_y.addItem(tr('常规'), False)
@@ -797,9 +798,14 @@ class KbmFeelDialog(QDialog):
         self.gyro_trigger.addItem(tr('按住 R2/RT 激活'), 'RT')
         self.gyro_trigger.addItem(tr('按住 L1/LB 激活'), '9')
         self.gyro_trigger.addItem(tr('按住 R1/RB 激活'), '10')
+        self.gyro_trigger.addItem(tr('按住 L3/LS 激活'), '7')
+        self.gyro_trigger.addItem(tr('按住 R3/RS 激活'), '8')
         self.gyro_trigger.addItem(tr('常驻开启'), 'always')
         current_trigger = self.mouse.get('gyro_trigger', 'LT')
         idx_t = self.gyro_trigger.findData(current_trigger)
+        if idx_t < 0:
+            alias_map = {'LB': '9', 'RB': '10', 'L3': '7', 'R3': '8', 'L1': '9', 'R1': '10', 'L2': 'LT', 'R2': 'RT'}
+            idx_t = self.gyro_trigger.findData(alias_map.get(current_trigger, 'LT'))
         self.gyro_trigger.setCurrentIndex(max(0, idx_t))
         gyro_form.addRow(tr('激活方式'), self.gyro_trigger)
 
@@ -967,12 +973,21 @@ class KbmFeelDialog(QDialog):
                 self.error.setText(tr(title) + '：' + tr('松开位置必须低于开始响应。'))
                 self.error.show()
                 return
+        if 'outer_press' in values and 'stick_press' in values:
+            if values['outer_press'] <= values['stick_press']:
+                self.error.setText(tr('外圈推满') + '：' + tr('外圈推满位置应大于摇杆开始响应位置。'))
+                self.error.show()
+                return
         if hasattr(self, 'directional_outer_toggle') and self.directional_outer_toggle.isChecked():
             for d, d_title in (('up', '上推满'), ('down', '下推满'), ('left', '左推满'), ('right', '右推满')):
                 p_key, r_key = f'outer_{d}_press', f'outer_{d}_release'
                 if p_key in values and r_key in values:
                     if values[r_key] >= values[p_key]:
                         self.error.setText(tr(d_title) + '：' + tr('松开位置必须低于开始响应。'))
+                        self.error.show()
+                        return
+                    if 'stick_press' in values and values[p_key] <= values['stick_press']:
+                        self.error.setText(tr(d_title) + '：' + tr('外圈推满位置应大于摇杆开始响应位置。'))
                         self.error.show()
                         return
         if self.has_walk and self.walk_toggle.isChecked():
@@ -1240,9 +1255,9 @@ class VirtualKbmPage(QWidget):
         self.scene_template_actions = {}
         for tpl_id, tpl_title in (
             ('dnf_dash', '横版动作：摇杆推底双击奔跑 (DNF)'),
-            ('sprint_3d', '3D 动作：左摇杆推底双击 W 冲刺'),
+            ('sprint_3d', '3D 动作：左摇杆推底 Shift 冲刺'),
             ('fps_gyro', '射击体感：按住左扳机开启陀螺仪瞄准'),
-            ('left_stick_mouse', '左手鼠标：切换左摇杆控制鼠标指针'),
+            ('desktop_nav', '桌面指针：摇杆控制光标（自动清空移动按键冲突）'),
         ):
             act = self.scene_templates_menu.addAction(tr(tpl_title))
             act.triggered.connect(lambda checked=False, tid=tpl_id: self.apply_scene_template(tid))
@@ -1281,7 +1296,8 @@ class VirtualKbmPage(QWidget):
         options.addWidget(option_label)
         self.mouse_toggle = Toggle(tr('右摇杆控制鼠标'))
         self.mouse_toggle.setFixedHeight(36)
-        self.mouse_toggle.toggled.connect(lambda enabled: owner.mapping_change({'op': 'options', 'profile': self.current_scheme(), 'options': {'right_stick_mouse': enabled}}))
+        self.mouse_toggle.setToolTip(tr('将手柄摇杆模拟为鼠标移动，用于游戏视角或桌面光标控制'))
+        self.mouse_toggle.toggled.connect(lambda enabled: owner.mapping_change({'op': 'options', 'profile': self.current_scheme(), 'options': {'right_stick_mouse': enabled, 'stick_mouse_enabled': enabled}}))
         options.addWidget(self.mouse_toggle)
         self.mouse_settings_btn = button(tr('操作手感'), self.mouse_settings)
         options.addWidget(self.mouse_settings_btn)
@@ -1633,16 +1649,15 @@ class VirtualKbmPage(QWidget):
                 'LS:down': {'short': {'action': 'hold', 'value': 'S'}, 'long': {'action': 'none'}},
                 'LS:left': {'short': {'action': 'hold', 'value': 'A'}, 'long': {'action': 'none'}},
                 'LS:right': {'short': {'action': 'hold', 'value': 'D'}, 'long': {'action': 'none'}},
-                'LS:up:outer': {
-                    'short': {'action': 'hold', 'value': 'W', 'mode': 'double_tap_hold'},
-                    'long': {'action': 'none'},
-                },
+                'LS:outer': {'short': {'action': 'hold', 'value': 'Shift'}, 'long': {'action': 'none'}},
             }
+            if 'LS:up:outer' in available:
+                self.owner.mapping_change({'op': 'unbind', 'profile': profile, 'trigger': 'LS:up:outer'})
             for trig, mapping in bindings.items():
                 if trig in available:
                     self.owner.mapping_change({'op': 'binding', 'profile': profile, 'trigger': trig, 'mapping': mapping})
             if hasattr(self.owner, 'notify'):
-                self.owner.notify(tr('已套用「3D 动作：左摇杆推底双击 W 冲刺」模板'))
+                self.owner.notify(tr('已套用「3D 动作：左摇杆推底 Shift 冲刺」模板'))
         elif template_id == 'fps_gyro':
             existing_mouse = copy.deepcopy(
                 (self.owner.config.get('profile_options', {}).get(profile, {}) or {}).get('mouse') or {}
@@ -1655,22 +1670,30 @@ class VirtualKbmPage(QWidget):
             self.owner.mapping_change({
                 'op': 'options',
                 'profile': profile,
-                'options': {'right_stick_mouse': True, 'mouse': existing_mouse},
+                'options': {'right_stick_mouse': True, 'stick_mouse_enabled': True, 'mouse': existing_mouse},
             })
             if hasattr(self.owner, 'notify'):
                 self.owner.notify(tr('已套用「射击体感：按住左扳机开启陀螺仪瞄准」模板'))
-        elif template_id == 'left_stick_mouse':
+        elif template_id == 'desktop_nav':
             existing_mouse = copy.deepcopy(
                 (self.owner.config.get('profile_options', {}).get(profile, {}) or {}).get('mouse') or {}
             )
+            existing_mouse['mode'] = 'desktop'
             existing_mouse['stick_source'] = 'left'
             self.owner.mapping_change({
                 'op': 'options',
                 'profile': profile,
-                'options': {'right_stick_mouse': True, 'mouse': existing_mouse},
+                'options': {'right_stick_mouse': True, 'stick_mouse_enabled': True, 'mouse': existing_mouse},
             })
+            for trig in ('LS:up', 'LS:down', 'LS:left', 'LS:right'):
+                if trig in available:
+                    self.owner.mapping_change({'op': 'unbind', 'profile': profile, 'trigger': trig})
+            if 'LT' in available:
+                self.owner.mapping_change({'op': 'binding', 'profile': profile, 'trigger': 'LT', 'mapping': {'short': {'action': 'mouse_click', 'value': 'right'}, 'long': {'action': 'none'}}})
+            if 'RT' in available:
+                self.owner.mapping_change({'op': 'binding', 'profile': profile, 'trigger': 'RT', 'mapping': {'short': {'action': 'mouse_click', 'value': 'left'}, 'long': {'action': 'none'}}})
             if hasattr(self.owner, 'notify'):
-                self.owner.notify(tr('已切换为「左摇杆控制鼠标指针」'))
+                self.owner.notify(tr('已套用「桌面指针：摇杆控制光标（自动清空移动按键冲突）」模板'))
         self.refresh_display()
 
     @staticmethod
@@ -1746,7 +1769,7 @@ class VirtualKbmPage(QWidget):
         from .mapping_swap_ui import can_swap_bindings
         self.swap_bindings_action.setEnabled(can_swap_bindings(self.owner, selected))
         self.mouse_toggle.blockSignals(True)
-        self.mouse_toggle.setChecked(profile_opts.get('right_stick_mouse', False))
+        self.mouse_toggle.setChecked(bool(profile_opts.get('stick_mouse_enabled', profile_opts.get('right_stick_mouse', False))))
         self.mouse_toggle.blockSignals(False)
         from .studio_core import is_nikki_profile
         self.layout_btn.setEnabled(is_nikki_profile(config, selected))

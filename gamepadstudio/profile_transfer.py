@@ -93,12 +93,18 @@ def _source(value):
 
 
 def _options(value):
-    _fields(value, {'right_stick_mouse', 'input', 'mouse'}, error='预设操作手感格式错误')
+    _fields(value, {'right_stick_mouse', 'stick_mouse_enabled', 'input', 'mouse'}, error='预设操作手感格式错误')
     result = {}
     if 'right_stick_mouse' in value:
         if not isinstance(value['right_stick_mouse'], bool):
             raise ValueError('右摇杆鼠标设置应为开启或关闭')
         result['right_stick_mouse'] = value['right_stick_mouse']
+    if 'stick_mouse_enabled' in value:
+        if not isinstance(value['stick_mouse_enabled'], bool):
+            raise ValueError('摇杆鼠标设置应为开启或关闭')
+        result['stick_mouse_enabled'] = value['stick_mouse_enabled']
+        if 'right_stick_mouse' not in result:
+            result['right_stick_mouse'] = value['stick_mouse_enabled']
     if 'input' in value:
         settings = value['input']
         _fields(settings, _INPUT_FIELDS, error='预设按键响应设置格式错误')
@@ -119,6 +125,14 @@ def _options(value):
                          else normalized[release] < normalized[press])
                 if not valid:
                     raise ValueError('按键响应与松开位置的顺序不正确')
+        stick_press = normalized.get('stick_press')
+        if stick_press is not None:
+            if 'outer_press' in normalized and normalized['outer_press'] <= stick_press:
+                raise ValueError('外圈推满位置应大于摇杆开始响应位置')
+            for d in ('up', 'down', 'left', 'right'):
+                outer_d = f'outer_{d}_press'
+                if outer_d in normalized and normalized[outer_d] <= stick_press:
+                    raise ValueError('外圈推满位置应大于摇杆开始响应位置')
         result['input'] = normalized
     if 'mouse' in value:
         mouse = value['mouse']

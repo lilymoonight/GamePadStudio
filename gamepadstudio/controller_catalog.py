@@ -49,10 +49,18 @@ def get_catalog_entry(family, lang=None):
 
 
 def family_for(controller_type=0, vendor=0, product=0, name=''):
-    # Prefer SDL's actual type. VID/PID and name delegate to unified device_quirks lookup.
+    # Recognize third-party controllers (GameSir, Flydigi, 8BitDo, Beitong, etc.) before SDL's generic XInput type=1/2.
+    from .device_quirks import (
+        THIRD_PARTY_BRANDS,
+        VENDOR_BRAND_NAMES,
+        detect_third_party_brand_and_model_from_name,
+        lookup_controller_family,
+    )
+    vid = int(vendor or 0)
+    if (vid in VENDOR_BRAND_NAMES and VENDOR_BRAND_NAMES[vid] in THIRD_PARTY_BRANDS) or detect_third_party_brand_and_model_from_name(name):
+        return lookup_controller_family(vendor, product, name)
     known={1:'xbox',2:'xbox',4:'dualshock4',5:'switch',6:'flightstick',7:'dualsense'}
     if controller_type in known:return known[controller_type]
-    from .device_quirks import lookup_controller_family
     return lookup_controller_family(vendor, product, name)
 
 
@@ -62,7 +70,7 @@ def button_labels(family='generic', controller_type=0, lang=None):
     if is_en:
         labels={0:'A',1:'B',2:'X',3:'Y',4:'Back',5:'Guide',6:'Start',7:'Left Stick Click',8:'Right Stick Click',
                 9:'LB',10:'RB',11:'D-Pad ↑',12:'D-Pad ↓',13:'D-Pad ←',14:'D-Pad →',
-                15:'Auxiliary',16:'Paddle P1',17:'Paddle P3',18:'Paddle P2',19:'Paddle P4',20:'Touchpad'}
+                15:'Auxiliary',16:'Paddle P1',17:'Paddle P2',18:'Paddle P3',19:'Paddle P4',20:'Touchpad'}
         for i in range(21, 128):
             labels[i] = f'Button {i+1}'
         if family == 'flightstick':
@@ -86,7 +94,7 @@ def button_labels(family='generic', controller_type=0, lang=None):
 
     labels={0:'A',1:'B',2:'X',3:'Y',4:'Back',5:'Guide',6:'Start',7:'左摇杆按下',8:'右摇杆按下',
             9:'LB',10:'RB',11:'方向键 ↑',12:'方向键 ↓',13:'方向键 ←',14:'方向键 →',
-            15:'辅助键',16:'背键 P1',17:'背键 P3',18:'背键 P2',19:'背键 P4',20:'触摸板'}
+            15:'辅助键',16:'背键 P1',17:'背键 P2',18:'背键 P3',19:'背键 P4',20:'触摸板'}
     for i in range(21, 128):
         labels[i] = f'按键 {i+1}'
     if family == 'flightstick':

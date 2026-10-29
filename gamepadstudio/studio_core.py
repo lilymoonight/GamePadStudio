@@ -141,7 +141,7 @@ NIKKI_PROFILE_OPTIONS = {'right_stick_mouse': True,
 BUTTONS = {0: '×  交叉', 1: '○  圆圈', 2: '□  方块', 3: '△  三角',
            4: 'Create', 5: 'PS', 6: 'Options', 7: 'L3', 8: 'R3',
            9: 'L1', 10: 'R1', 11: '方向键 ↑', 12: '方向键 ↓',
-           13: '方向键 ←', 14: '方向键 →', 15: '麦克风', 16:'背键 P1',17:'背键 P3',18:'背键 P2',19:'背键 P4',20: '触摸板'}
+           13: '方向键 ←', 14: '方向键 →', 15: '麦克风', 16:'背键 P1',17:'背键 P2',18:'背键 P3',19:'背键 P4',20: '触摸板'}
 ACTION_NAMES = {'none': '保留原始输入', 'capture': '保存截图', 'gallery': '打开截图资料库',
                 'home': '打开控制中心', 'shortcut': '键盘快捷键', 'hold': '按住键盘按键',
                 'launch': '启动应用 / 命令', 'volume_mute': '系统声音静音',
@@ -188,7 +188,7 @@ def profile_mode(config, name):
     options = options if isinstance(options, dict) else {}
     profile_options = options.get(name)
     profile_options = profile_options if isinstance(profile_options, dict) else {}
-    if name in (NIKKI_PROFILE_NAME, '桌面导航') or '键鼠' in name or profile_options.get('right_stick_mouse'):
+    if name in (NIKKI_PROFILE_NAME, '桌面导航') or '键鼠' in name or profile_options.get('right_stick_mouse') or profile_options.get('stick_mouse_enabled'):
         return 'kbm'
     profile = config.get('profiles', {}).get(name, {})
     for entry in profile.values():
@@ -208,7 +208,7 @@ def get_buttons(lang=None):
                 4: 'Create', 5: 'PS', 6: 'Options', 7: 'L3', 8: 'R3',
                 9: 'L1', 10: 'R1', 11: 'D-Pad ↑', 12: 'D-Pad ↓',
                 13: 'D-Pad ←', 14: 'D-Pad →', 15: 'Mic / Mute',
-                16: 'Paddle P1', 17: 'Paddle P3', 18: 'Paddle P2', 19: 'Paddle P4', 20: 'Touchpad'}
+                16: 'Paddle P1', 17: 'Paddle P2', 18: 'Paddle P3', 19: 'Paddle P4', 20: 'Touchpad'}
     return BUTTONS
 
 
@@ -1158,7 +1158,7 @@ class ConfigStore:
             self.data.setdefault('profile_modes', {})[name] = mode
             self.remember_profile(state, name)
         elif op == 'options':
-            allowed = {'right_stick_mouse', 'mouse', 'input'}
+            allowed = {'right_stick_mouse', 'stick_mouse_enabled', 'mouse', 'input'}
             if set(change['options']) - allowed:
                 raise ValueError('未知预设选项')
             if 'input' in change['options'] and not isinstance(change['options']['input'], dict):
@@ -1176,7 +1176,12 @@ class ConfigStore:
                 if 'stick_source' in mouse and (
                         type(mouse['stick_source']) is not str or mouse['stick_source'] not in ('right', 'left')):
                     raise ValueError('鼠标控制摇杆应为右摇杆或左摇杆')
-            self.data['profile_options'].setdefault(name, {}).update(copy.deepcopy(change['options']))
+            opts = copy.deepcopy(change['options'])
+            if 'stick_mouse_enabled' in opts and 'right_stick_mouse' not in opts:
+                opts['right_stick_mouse'] = opts['stick_mouse_enabled']
+            elif 'right_stick_mouse' in opts and 'stick_mouse_enabled' not in opts:
+                opts['stick_mouse_enabled'] = opts['right_stick_mouse']
+            self.data['profile_options'].setdefault(name, {}).update(opts)
         elif op == 'delete':
             if self.delete_profile(name, state) is None:
                 raise ValueError('至少保留一个预设')

@@ -14,6 +14,8 @@ import ctypes as C
 import os
 import socket
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -308,12 +310,24 @@ def export_sdl_gamecontroller_config(
     return f'{safe_guid},{safe_name},{body},platform:{plat},'
 
 
+_VIGEM_CACHE: dict[str, Any] = {
+    'found_path': None,
+    'failed_until': 0.0,
+}
+
+
 def _find_vigem_dll() -> Optional[str]:
     if sys.platform != 'win32':
         return None
     env_path = os.environ.get('VIGEM_CLIENT_DLL', '').strip()
     if env_path and Path(env_path).is_file():
         return env_path
+    if _VIGEM_CACHE['found_path'] and Path(_VIGEM_CACHE['found_path']).is_file():
+        return _VIGEM_CACHE['found_path']
+    now = time.monotonic()
+    if now < _VIGEM_CACHE['failed_until']:
+        return None
+
     candidates = [
         Path(__file__).resolve().parent / 'bin' / 'ViGEmClient.dll',
         Path(__file__).resolve().parent / 'ViGEmClient.dll',
@@ -328,8 +342,18 @@ def _find_vigem_dll() -> Optional[str]:
         pass
     for c in candidates:
         if c.is_file():
+            _VIGEM_CACHE['found_path'] = str(c)
             return str(c)
-    return 'ViGEmClient.dll'
+
+    # Test if default ViGEmClient.dll is accessible in standard system PATH
+    try:
+        C.CDLL('ViGEmClient.dll')
+        _VIGEM_CACHE['found_path'] = 'ViGEmClient.dll'
+        return 'ViGEmClient.dll'
+    except Exception:
+        # Negative caching with 5-second cooldown to avoid 60Hz recursive filesystem scanning
+        _VIGEM_CACHE['failed_until'] = now + 5.0
+        return None
 
 
 def virtual_gamepad_backend_available() -> bool:
@@ -370,6 +394,7 @@ class VirtualXInputPad:
         on_share: Optional[Callable[[], None]] = None,
         socket_path: Optional[str] = None,
     ):
+        self._lock = threading.RLock()
         self._lib = lib
         self.on_share = on_share
         self._socket_path = socket_path or os.environ.get('GPS_MAC_VIRTUAL_PAD_SOCKET', '').strip() or None
@@ -425,48 +450,49 @@ class VirtualXInputPad:
         return bool(self._connected and ((self._client and self._target) or self._sock is not None))
 
     def connect(self) -> bool:
-        if self.is_connected:
-            return True
-        if self._lib is None and self._socket_path and Path(self._socket_path).exists():
+        with self._lock:
+            if self.is_connected:
+                return True
+            if self._lib is None and self._socket_path and Path(self._socket_path).exists():
+                try:
+                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+                    sock.connect(self._socket_path)
+                    self._sock = sock
+                    self._connected = True
+                    return True
+                except Exception:
+                    self._sock = None
+            lib = self._load_library()
+            if lib is None:
+                return False
             try:
-                sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-                sock.connect(self._socket_path)
-                self._sock = sock
+                client = lib.vigem_alloc()
+                if not client:
+                    return False
+                err = lib.vigem_connect(client)
+                if err != VIGEM_ERROR_NONE:
+                    lib.vigem_free(client)
+                    return False
+                target = lib.vigem_target_x360_alloc()
+                if not target:
+                    lib.vigem_disconnect(client)
+                    lib.vigem_free(client)
+                    return False
+                err = lib.vigem_target_add(client, target)
+                if err != VIGEM_ERROR_NONE:
+                    lib.vigem_target_free(target)
+                    lib.vigem_disconnect(client)
+                    lib.vigem_free(client)
+                    return False
+                self._client = client
+                self._target = target
                 self._connected = True
+                if self._rumble_callback is not None:
+                    self._bind_notification()
                 return True
             except Exception:
-                self._sock = None
-        lib = self._load_library()
-        if lib is None:
-            return False
-        try:
-            client = lib.vigem_alloc()
-            if not client:
+                self._connected = False
                 return False
-            err = lib.vigem_connect(client)
-            if err != VIGEM_ERROR_NONE:
-                lib.vigem_free(client)
-                return False
-            target = lib.vigem_target_x360_alloc()
-            if not target:
-                lib.vigem_disconnect(client)
-                lib.vigem_free(client)
-                return False
-            err = lib.vigem_target_add(client, target)
-            if err != VIGEM_ERROR_NONE:
-                lib.vigem_target_free(target)
-                lib.vigem_disconnect(client)
-                lib.vigem_free(client)
-                return False
-            self._client = client
-            self._target = target
-            self._connected = True
-            if self._rumble_callback is not None:
-                self._bind_notification()
-            return True
-        except Exception:
-            self._connected = False
-            return False
 
     def _bind_notification(self) -> bool:
         if not self.is_connected or not hasattr(self._lib, 'vigem_target_x360_register_notification'):
@@ -508,79 +534,83 @@ class VirtualXInputPad:
         trigger_overrides: Optional[dict[str, float]] = None,
     ) -> dict[str, Any]:
         """Compose and transmit an `XUSB_REPORT` + `HID_GAMEPAD_REPORT` frame to the virtual controller."""
-        report, snapshot = compose_xusb_report(buttons, axes, trigger_overrides)
-        hid_report, hid_snapshot = compose_hid_gamepad_report(buttons, axes, trigger_overrides)
-        self.last_report = snapshot
-        self.last_hid_report = hid_snapshot
+        with self._lock:
+            button_list = list(buttons) if buttons else ()
+            report, snapshot = compose_xusb_report(button_list, axes, trigger_overrides)
+            hid_report, hid_snapshot = compose_hid_gamepad_report(button_list, axes, trigger_overrides)
+            self.last_report = snapshot
+            self.last_hid_report = hid_snapshot
 
-        # Bridge Share ('15') rising edge to capture callback since XUSB_REPORT has no bit 15
-        share_now = bool(snapshot.get('share_pressed'))
-        if share_now and not self._last_share_down and callable(self.on_share):
-            try:
-                self.on_share()
-            except Exception:
-                pass
-        self._last_share_down = share_now
+            # Bridge Share ('15') rising edge to capture callback since XUSB_REPORT has no bit 15
+            share_now = bool(snapshot.get('share_pressed'))
+            if share_now and not self._last_share_down and callable(self.on_share):
+                try:
+                    self.on_share()
+                except Exception:
+                    pass
+            self._last_share_down = share_now
 
-        for cb in list(self._frame_callbacks):
-            try:
-                cb(snapshot, hid_snapshot)
-            except Exception:
-                pass
+            for cb in list(self._frame_callbacks):
+                try:
+                    cb(snapshot, hid_snapshot)
+                except Exception:
+                    pass
 
-        if not self.is_connected:
-            self.connect()
-        if self._sock is not None:
-            try:
-                self._sock.send(bytes(hid_report))
-            except Exception:
-                pass
-        if self.is_connected and self._lib is not None:
-            try:
-                self._lib.vigem_target_x360_update(self._client, self._target, report)
-            except Exception:
-                pass
-        return snapshot
+            if not self.is_connected:
+                self.connect()
+            if self._sock is not None:
+                try:
+                    self._sock.send(bytes(hid_report))
+                except Exception:
+                    pass
+            if self.is_connected and self._lib is not None:
+                try:
+                    self._lib.vigem_target_x360_update(self._client, self._target, report)
+                except Exception:
+                    pass
+            return snapshot
 
     def reset(self) -> dict[str, Any]:
-        self._last_share_down = False
-        return self.emit_frame(buttons=(), axes=())
+        with self._lock:
+            self._last_share_down = False
+            return self.emit_frame(buttons=(), axes=())
 
     def close(self) -> None:
-        try:
-            if self.is_connected:
-                self.reset()
-        except Exception:
-            pass
-        if self._lib is not None and self._client and self._target:
+        with self._lock:
             try:
-                if hasattr(self._lib, 'vigem_target_x360_unregister_notification') and self._c_notification_cb:
-                    self._lib.vigem_target_x360_unregister_notification(self._target)
+                if self.is_connected:
+                    self.reset()
             except Exception:
                 pass
-            try:
-                self._lib.vigem_target_remove(self._client, self._target)
-            except Exception:
-                pass
-            try:
-                self._lib.vigem_target_free(self._target)
-            except Exception:
-                pass
-            try:
-                self._lib.vigem_disconnect(self._client)
-            except Exception:
-                pass
-            try:
-                self._lib.vigem_free(self._client)
-            except Exception:
-                pass
-        if self._sock is not None:
-            try:
-                self._sock.close()
-            except Exception:
-                pass
-            self._sock = None
-        self._target = None
-        self._client = None
-        self._connected = False
-        self._c_notification_cb = None
+            if self._lib is not None and self._client and self._target:
+                try:
+                    if hasattr(self._lib, 'vigem_target_x360_unregister_notification') and self._c_notification_cb:
+                        self._lib.vigem_target_x360_unregister_notification(self._target)
+                except Exception:
+                    pass
+                try:
+                    self._lib.vigem_target_remove(self._client, self._target)
+                except Exception:
+                    pass
+                try:
+                    self._lib.vigem_target_free(self._target)
+                except Exception:
+                    pass
+                try:
+                    self._lib.vigem_disconnect(self._client)
+                except Exception:
+                    pass
+                try:
+                    self._lib.vigem_free(self._client)
+                except Exception:
+                    pass
+            if self._sock is not None:
+                try:
+                    self._sock.close()
+                except Exception:
+                    pass
+                self._sock = None
+            self._target = None
+            self._client = None
+            self._connected = False
+            self._c_notification_cb = None

@@ -249,11 +249,21 @@ class ControllerGallery(QWidget):
                                   'Connect a controller to display its model and reported inputs.'))
         device = self.active_state
         info = get_catalog_entry(family)
-        info['name'] = device.get('name') or info['name']
+        from .device_quirks import THIRD_PARTY_BRANDS, identify_controller_hardware
+        hw_info = identify_controller_hardware(device, trigger_async=False)
+        tp_brand = device.get('brand') or hw_info.get('brand', '')
+        if tp_brand in THIRD_PARTY_BRANDS:
+            info['brand'] = str(tp_brand).upper()
+            info['name'] = device.get('model') or hw_info.get('display_name') or device.get('name') or info['name']
+        else:
+            info['name'] = device.get('name') or info['name']
         capabilities = []
         if 'available_buttons' in device:
             count = len(set(device['available_buttons']))
             capabilities.append(copy(f'{count} 个按键', f'{count} buttons'))
+        paddles = int(device.get('back_paddles') or hw_info.get('back_paddles') or 0)
+        if paddles > 0:
+            capabilities.append(copy(f'{paddles} 个背键', f'{paddles} back paddles'))
         if 'available_axes' in device or 'num_axes' in device:
             count = len(set(device['available_axes'])) if 'available_axes' in device else device['num_axes']
             capabilities.append(copy(f'{count} 个轴', f'{count} axes'))

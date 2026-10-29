@@ -151,6 +151,7 @@ class Device:
             ('SDL_JoystickGetSerial', [C.c_void_p], C.c_char_p),
             ('SDL_GameControllerGetSerial', [C.c_void_p], C.c_char_p),
             ('SDL_JoystickPathForIndex', [C.c_int], C.c_char_p),
+            ('SDL_GameControllerNameForIndex', [C.c_int], C.c_char_p),
             ('SDL_GameControllerHasSensor', [C.c_void_p, C.c_int], C.c_bool),
             ('SDL_GameControllerSetSensorEnabled', [C.c_void_p, C.c_int, C.c_bool], C.c_int),
             ('SDL_GameControllerGetSensorData', [C.c_void_p, C.c_int, C.POINTER(C.c_float), C.c_int], C.c_int),
@@ -162,18 +163,18 @@ class Device:
                      b'SDL_JOYSTICK_HIDAPI_PS4_RUMBLE', b'SDL_JOYSTICK_HIDAPI_PS5',
                      b'SDL_JOYSTICK_HIDAPI_PS5_RUMBLE']:
             self.lib.SDL_SetHint(name, b'1')
-        # Set RAWINPUT to 0 so HIDAPI / DirectInput operates under HidHide application whitelist.
-        # This completely hides physical hardware from games while allowing GamePad Studio exclusive access.
-        self.lib.SDL_SetHint(b'SDL_JOYSTICK_RAWINPUT', b'0')
         self.lib.SDL_SetHintWithPriority(b'SDL_GAMECONTROLLER_USE_BUTTON_LABELS', b'0', 2)
         # Active HidHide filtering must allow this executable before SDL creates
         # its first device list, including a newly built packaged application.
+        rawinput_hint = b'1'
         if sys.platform == 'win32':
             from .hidhide import ensure_current_app_input_access
             access_ok, access_message = ensure_current_app_input_access()
             if not access_ok:
                 self.access_warning = access_message
                 self.error = access_message
+                rawinput_hint = b'0'
+        self.lib.SDL_SetHint(b'SDL_JOYSTICK_RAWINPUT', rawinput_hint)
         if self.lib.SDL_Init(0x2200) != 0:
             raise RuntimeError(self.lib.SDL_GetError().decode())
         self.event = C.create_string_buffer(128)
@@ -197,21 +198,31 @@ class Device:
         except Exception:
             pass
         self.lib.SDL_PumpEvents()
-        from .device_quirks import detect_input_protocol, identify_controller_hardware
+        from .device_quirks import detect_input_protocol, identify_controller_hardware, is_generic_controller_name
         rows=[]
         for i in range(self.lib.SDL_NumJoysticks()):
             instance=self.lib.SDL_JoystickGetDeviceInstanceID(i)
             if instance<0:continue
             is_gamecontroller=bool(self.lib.SDL_IsGameController(i))
             vendor=self.lib.SDL_JoystickGetDeviceVendor(i);product=self.lib.SDL_JoystickGetDeviceProduct(i)
-            name=(self.lib.SDL_JoystickNameForIndex(i) or b'Controller').decode('utf-8','replace')
+            joy_name=(self.lib.SDL_JoystickNameForIndex(i) or b'Controller').decode('utf-8','replace')
+            gc_name=''
+            if is_gamecontroller and getattr(self.lib, 'SDL_GameControllerNameForIndex', None):
+                gc_name=(self.lib.SDL_GameControllerNameForIndex(i) or b'').decode('utf-8','replace')
+            name = joy_name if (not gc_name or is_generic_controller_name(gc_name)) else gc_name
+            path_api=getattr(self.lib, 'SDL_JoystickPathForIndex', None)
+            path=path_api(i) if path_api else None
+            path_str=path.decode('utf-8', 'replace') if path else ''
             guid=bytes(self.lib.SDL_JoystickGetDeviceGUID(i).data).hex()
             backend=input_backend_for_guid(guid) if is_gamecontroller else ''
             protocol=detect_input_protocol(guid=guid, is_gamecontroller=is_gamecontroller,
                                            vendor=vendor, product=product, name=name, input_backend=backend)
             hw_info=identify_controller_hardware(dict(vendor=vendor, product=product, guid=guid, name=name,
+                                                      raw_name=joy_name, device_path=path_str,
                                                       controller_type=0, is_gamecontroller=is_gamecontroller,
                                                       input_backend=backend, input_protocol=protocol))
+            vendor = int(hw_info.get('vendor') or vendor or 0)
+            product = int(hw_info.get('product') or product or 0)
             if not is_gamecontroller and hw_info.get('sdl_mapping'):
                 try:
                     self.lib.SDL_GameControllerAddMapping(hw_info['sdl_mapping'].encode('utf-8'))
@@ -219,25 +230,26 @@ class Device:
                 except Exception:
                     pass
             controller_type=self.lib.SDL_GameControllerTypeForIndex(i) if is_gamecontroller else 0
-            family=family_for(controller_type,vendor,product,name)
+            display_name = hw_info.get('display_name') or hw_info.get('model') or name
+            family=family_for(controller_type,vendor,product,display_name)
             model_key=f'{family}:{vendor:04x}:{product:04x}:{guid}'
-            path_api=getattr(self.lib, 'SDL_JoystickPathForIndex', None)
-            path=path_api(i) if path_api else None
             device_key=self._device_key(model_key, instance, path=path)
             if instance == self.instance_id and self.metadata.get('device_key'):
                 device_key=self.metadata['device_key']
-            rows.append(dict(instance_id=instance,index=i,name=name,vendor=vendor,product=product,
+            rows.append(dict(instance_id=instance,index=i,name=display_name,raw_name=joy_name,
+                             vendor=vendor,product=product,
                              controller_type=controller_type,family=family,supported=True,
                              is_gamecontroller=is_gamecontroller,
                              input_backend=backend,
-                             input_protocol=protocol,
+                             input_protocol=hw_info.get('protocol') or protocol,
                              brand=hw_info['brand'],
                              model=hw_info['model'],
+                             back_paddles=int(hw_info.get('back_paddles', 0)),
                              dinput_layout=hw_info['dinput_layout'],
                              sdl_mapping=hw_info.get('sdl_mapping', ''),
                              recommended_preset=hw_info['recommended_preset'],
                              profile_key=model_key,model_key=model_key,device_key=device_key,
-                             device_path=path.decode('utf-8', 'replace') if path else ''))
+                             device_path=path_str))
         self.available=rows
         return rows
 
@@ -273,15 +285,27 @@ class Device:
             self.close_handle()
             self.handle=handle;self.index=row['index'];self.instance_id=instance_id;self.is_raw_joystick=False
             self.metadata={k:v for k,v in row.items() if k!='index'}
-            avail_btns = [i for i in range(21) if self.lib.SDL_GameControllerHasButton(handle, i)]
+            avail_set = {i for i in range(21) if self.lib.SDL_GameControllerHasButton(handle, i)}
+            paddles = int(row.get('back_paddles', 0) or 0)
+            if paddles > 0:
+                avail_set.update(range(16, 16 + min(4, paddles)))
             try:
                 joy_handle = self.lib.SDL_GameControllerGetJoystick(handle)
                 if joy_handle:
                     raw_total = self.lib.SDL_JoystickNumButtons(joy_handle)
                     if isinstance(raw_total, int) and raw_total > 21:
-                        avail_btns.extend(range(21, min(128, raw_total)))
+                        avail_set.update(range(21, min(128, raw_total)))
+                    sdl_map = str(row.get('sdl_mapping') or '')
+                    if isinstance(raw_total, int) and raw_total > 0 and sdl_map:
+                        from .device_quirks import partition_dinput_buttons_by_sdl_db
+                        part = partition_dinput_buttons_by_sdl_db(raw_total, sdl_map)
+                        self.metadata['button_partition'] = part
+                        for raw_btn, canon_slot in part.get('canonical_unused_slots', {}).items():
+                            if raw_btn not in part.get('extended_hints', {}):
+                                avail_set.add(canon_slot)
             except Exception:
                 pass
+            avail_btns = sorted(avail_set)
             self.metadata.update(available_buttons=avail_btns,
                                  touchpad=self.lib.SDL_GameControllerGetNumTouchpads(handle)>0,
                                  led=bool(self.lib.SDL_GameControllerHasLED(handle)),
@@ -331,16 +355,30 @@ class Device:
             available_buttons=set(range(min(128, num_buttons)))
             if num_hats:
                 available_buttons.update(range(11, 15))
+            paddles = int(row.get('back_paddles', 0) or 0)
+            if paddles > 0:
+                available_buttons.update(range(16, 16 + min(4, paddles)))
+            from .device_quirks import normalize_dinput_gamepad_state, partition_dinput_buttons_by_sdl_db
+            part = partition_dinput_buttons_by_sdl_db(
+                num_buttons, self.metadata.get('sdl_mapping', '')
+            )
+            self.metadata['button_partition'] = part
+            if self.metadata.get('dinput_layout') or self.metadata.get('sdl_mapping'):
+                norm_btns, _ = normalize_dinput_gamepad_state(
+                    range(min(128, num_buttons)),
+                    [],
+                    hat_mask=0x0F if num_hats else 0,
+                    dinput_layout=self.metadata.get('dinput_layout'),
+                    num_buttons=num_buttons,
+                    sdl_mapping=self.metadata.get('sdl_mapping', ''),
+                )
+                available_buttons.update(norm_btns)
             rumble_api=getattr(self.lib, 'SDL_JoystickHasRumble', None)
             self.metadata.update(available_buttons=sorted(available_buttons),available_axes=list(range(min(6, num_axes))),
                                  num_axes=num_axes, num_hats=num_hats,
                                  touchpad=False, led=False, rumble=bool(rumble_api(handle)) if rumble_api else False)
             self.metadata.update(analog_trigger_axes=[], trigger_rumble=False)
             self.metadata.update(touchpad_count=0, touch_finger_counts=[], touchpad_fingers=0, gyro=False)
-            from .device_quirks import partition_dinput_buttons_by_sdl_db
-            self.metadata['button_partition'] = partition_dinput_buttons_by_sdl_db(
-                num_buttons, self.metadata.get('sdl_mapping', '')
-            )
             serial_api=getattr(self.lib, 'SDL_JoystickGetSerial', None)
             serial=serial_api(handle) if serial_api else None
             if serial:
@@ -397,6 +435,10 @@ class Device:
             raw_buttons = [i for i in range(min(128, num_buttons)) if self.lib.SDL_JoystickGetButton(h, i)]
             raw_axes = [self.lib.SDL_JoystickGetAxis(h, i) / 32768.0 for i in range(num_axes)]
             hat_val = self.lib.SDL_JoystickGetHat(h, 0) if num_hats > 0 else 0
+            signed_triggers = self.metadata.setdefault('_signed_trigger_axes', set())
+            for i in (4, 5):
+                if i < len(raw_axes) and raw_axes[i] < -0.2:
+                    signed_triggers.add(i)
             from .device_quirks import normalize_dinput_gamepad_state
             buttons, axes = normalize_dinput_gamepad_state(
                 raw_buttons,
@@ -404,8 +446,11 @@ class Device:
                 hat_mask=hat_val,
                 dinput_layout=self.metadata.get('dinput_layout'),
                 num_buttons=num_buttons,
+                sdl_mapping=self.metadata.get('sdl_mapping', ''),
+                signed_trigger_axes=signed_triggers,
             )
-            name = (self.lib.SDL_JoystickName(h) or b'Joystick').decode('utf-8', 'replace')
+            raw_joy_name = (self.lib.SDL_JoystickName(h) or b'Joystick').decode('utf-8', 'replace')
+            name = self.metadata.get('name') or raw_joy_name
             return {**self.metadata, 'name': name, 'buttons': buttons,
                     'axes': axes, 'power': self.lib.SDL_JoystickCurrentPowerLevel(h),
                     'vendor': self.metadata.get('vendor', 0), 'product': self.metadata.get('product', 0),
@@ -421,20 +466,32 @@ class Device:
         gyro_data = self._read_gyro(h) if self.metadata.get('gyro') else []
         pressed_buttons = [i for i in range(21) if self.lib.SDL_GameControllerGetButton(h, i)]
         avail = self.metadata.get('available_buttons', ())
-        if avail and max(avail, default=0) >= 21:
+        part = self.metadata.get('button_partition') or {}
+        unused_slots = part.get('canonical_unused_slots') or {}
+        ext_hints = part.get('extended_hints') or {}
+        if (avail and max(avail, default=0) >= 21) or unused_slots:
             try:
                 joy_h = self.lib.SDL_GameControllerGetJoystick(h)
                 if joy_h:
+                    for raw_btn, canon_slot in unused_slots.items():
+                        if raw_btn not in ext_hints and self.lib.SDL_JoystickGetButton(joy_h, int(raw_btn)):
+                            if canon_slot not in pressed_buttons:
+                                pressed_buttons.append(canon_slot)
                     for i in avail:
                         if i >= 21 and self.lib.SDL_JoystickGetButton(joy_h, i):
-                            pressed_buttons.append(i)
+                            if i not in pressed_buttons:
+                                pressed_buttons.append(i)
             except Exception:
                 pass
-        return {**self.metadata,'name': (self.lib.SDL_GameControllerName(h) or b'Controller').decode('utf-8', 'replace'),
+        gc_name = (self.lib.SDL_GameControllerName(h) or b'Controller').decode('utf-8', 'replace')
+        display_name = self.metadata.get('name') or gc_name
+        vendor_val = self.metadata.get('vendor') or self.lib.SDL_GameControllerGetVendor(h)
+        product_val = self.metadata.get('product') or self.lib.SDL_GameControllerGetProduct(h)
+        return {**self.metadata,'name': display_name,
                 'buttons': pressed_buttons,
                 'axes': [self.lib.SDL_GameControllerGetAxis(h, i) / 32768 for i in range(6)],
                 'power': self.lib.SDL_JoystickCurrentPowerLevel(self.lib.SDL_GameControllerGetJoystick(h)),
-                'vendor': self.lib.SDL_GameControllerGetVendor(h), 'product': self.lib.SDL_GameControllerGetProduct(h),
+                'vendor': vendor_val, 'product': product_val,
                 'led': bool(self.lib.SDL_GameControllerHasLED(h)), 'rumble': bool(self.lib.SDL_GameControllerHasRumble(h)),
                 'touch': fingers, 'touch_fingers': touch_fingers, 'touch_read_error': touch_error,
                 'touch_valid': not touch_error,

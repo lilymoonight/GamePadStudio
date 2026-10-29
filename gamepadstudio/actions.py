@@ -3,6 +3,7 @@ from ctypes import wintypes as W
 import shlex
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -115,8 +116,19 @@ class INPUT(C.Structure):
 
 
 class WindowsActions:
+    @property
+    def _lock(self):
+        if '_inst_lock' not in self.__dict__:
+            self.__dict__['_inst_lock'] = threading.RLock()
+        return self.__dict__['_inst_lock']
+
+    @_lock.setter
+    def _lock(self, val):
+        self.__dict__['_inst_lock'] = val
+
     def __init__(self):
         attach_to_default_desktop()
+        self._lock = threading.RLock()
         self.held = {}
         self.held_mouse = set()
         self.held_gamepad_buttons = set()
@@ -132,62 +144,68 @@ class WindowsActions:
         return self.virtual_pad
 
     def sync_virtual_gamepad(self, buttons=None, axes=(), trigger_overrides=None):
-        pad = self._ensure_virtual_pad()
-        active_buttons = self.held_gamepad_buttons if buttons is None else buttons
-        self._last_virtual_axes = tuple(axes or ())
-        return pad.emit_frame(buttons=active_buttons, axes=self._last_virtual_axes, trigger_overrides=trigger_overrides)
+        with self._lock:
+            pad = self._ensure_virtual_pad()
+            active_buttons = set(self.held_gamepad_buttons) if buttons is None else set(buttons)
+            self._last_virtual_axes = tuple(axes or ())
+            return pad.emit_frame(buttons=active_buttons, axes=self._last_virtual_axes, trigger_overrides=trigger_overrides)
 
     def gamepad_button(self, button, down):
-        b = str(button).strip()
-        if down:
-            self.held_gamepad_buttons.add(b)
-        else:
-            self.held_gamepad_buttons.discard(b)
-        self._ensure_virtual_pad().emit_frame(
-            buttons=self.held_gamepad_buttons,
-            axes=getattr(self, '_last_virtual_axes', ()),
-        )
+        with self._lock:
+            b = str(button).strip()
+            if down:
+                self.held_gamepad_buttons.add(b)
+            else:
+                self.held_gamepad_buttons.discard(b)
+            self._ensure_virtual_pad().emit_frame(
+                buttons=set(self.held_gamepad_buttons),
+                axes=getattr(self, '_last_virtual_axes', ()),
+            )
 
     def gamepad_chord(self, buttons, down):
-        parts = buttons.split('+') if isinstance(buttons, str) else list(buttons)
-        for b in parts:
-            tok = str(b).strip()
-            if not tok:
-                continue
-            if down:
-                self.held_gamepad_buttons.add(tok)
-            else:
-                self.held_gamepad_buttons.discard(tok)
-        self._ensure_virtual_pad().emit_frame(
-            buttons=self.held_gamepad_buttons,
-            axes=getattr(self, '_last_virtual_axes', ()),
-        )
+        with self._lock:
+            parts = buttons.split('+') if isinstance(buttons, str) else list(buttons)
+            for b in parts:
+                tok = str(b).strip()
+                if not tok:
+                    continue
+                if down:
+                    self.held_gamepad_buttons.add(tok)
+                else:
+                    self.held_gamepad_buttons.discard(tok)
+            self._ensure_virtual_pad().emit_frame(
+                buttons=set(self.held_gamepad_buttons),
+                axes=getattr(self, '_last_virtual_axes', ()),
+            )
 
     def gamepad_turbo(self, button, down, rate_hz=15):
-        if down:
-            self.held_turbo[button] = rate_hz
-        else:
-            self.held_turbo.pop(button, None)
-            self.gamepad_button(button, False)
+        with self._lock:
+            if down:
+                self.held_turbo[button] = rate_hz
+            else:
+                self.held_turbo.pop(button, None)
+                self.gamepad_button(button, False)
+
 
     def _send(self, keys, down):
         if not keys:
             return
-        extended = {33, 34, 35, 36, 37, 38, 39, 40, 45, 46, 91, 0x6F, 0xAD, 0xAE, 0xAF, 0xB7}
-        events = []
-        for k in keys:
-            scan = self.user32.MapVirtualKeyW(k, 0)
-            flag = (0x0008 if scan else 0) | (0 if down else 0x0002) | (0x0001 if k in extended else 0)
-            events.append(INPUT(1, UNION(ki=KEYBDINPUT(k, scan, flag, 0, 0))))
-        event_array = (INPUT * len(events))(*events)
-        sent = self.user32.SendInput(len(event_array), event_array, C.sizeof(INPUT))
-        if sent != len(event_array):
-            err = C.get_last_error()
-            if sent == 0 and err == 5:
-                attach_to_default_desktop()
-                sent = self.user32.SendInput(len(event_array), event_array, C.sizeof(INPUT))
+        with self._lock:
+            extended = {33, 34, 35, 36, 37, 38, 39, 40, 45, 46, 91, 0x6F, 0xAD, 0xAE, 0xAF, 0xB7}
+            events = []
+            for k in keys:
+                scan = self.user32.MapVirtualKeyW(k, 0)
+                flag = (0x0008 if scan else 0) | (0 if down else 0x0002) | (0x0001 if k in extended else 0)
+                events.append(INPUT(1, UNION(ki=KEYBDINPUT(k, scan, flag, 0, 0))))
+            event_array = (INPUT * len(events))(*events)
+            sent = self.user32.SendInput(len(event_array), event_array, C.sizeof(INPUT))
             if sent != len(event_array):
-                raise OSError('Windows 拒绝了按键输入；目标应用可能以管理员身份运行')
+                err = C.get_last_error()
+                if sent == 0 and err == 5:
+                    attach_to_default_desktop()
+                    sent = self.user32.SendInput(len(event_array), event_array, C.sizeof(INPUT))
+                if sent != len(event_array):
+                    raise OSError('Windows 拒绝了按键输入；目标应用可能以管理员身份运行')
 
     def shortcut(self, value):
         try:
@@ -196,33 +214,37 @@ class WindowsActions:
         finally:
             self.hold(value, False)
 
-    def hold(self, value, down):
-        self._hold_keys(parse_keys(value), down)
+    def hold(self, value, down, force=False):
+        try:
+            self._hold_keys(parse_keys(value), down, force=force)
+        except TypeError:
+            self._hold_keys(parse_keys(value), down)
 
-    def _hold_keys(self, keys, down):
+    def _hold_keys(self, keys, down, force=False):
         keys = list(dict.fromkeys(keys))
-        if down:
-            fresh = [key for key in keys if self.held.get(key, 0) == 0]
-            # Record ownership BEFORE SendInput. A partial batch can already
-            # have pressed a modifier even though the API reports failure.
-            for key in keys:
-                self.held[key] = self.held.get(key, 0) + 1
-            try:
-                self._send(fresh, True)
-            except Exception:
+        with self._lock:
+            if down:
+                fresh = keys if force else [key for key in keys if self.held.get(key, 0) == 0]
+                # Record ownership BEFORE SendInput. A partial batch can already
+                # have pressed a modifier even though the API reports failure.
+                for key in keys:
+                    self.held[key] = self.held.get(key, 0) + 1
                 try:
-                    self.release_all()
+                    self._send(fresh, True)
                 except Exception:
-                    pass  # Failed releases remain tracked for the next retry.
-                raise
-        else:
-            releases = [key for key in reversed(keys) if self.held.get(key) == 1]
-            self._send(releases, False)
-            for key in keys:
-                if key in self.held:
-                    self.held[key] -= 1
-                    if not self.held[key]:
-                        del self.held[key]
+                    try:
+                        self.release_all()
+                    except Exception:
+                        pass  # Failed releases remain tracked for the next retry.
+                    raise
+            else:
+                releases = keys if force else [key for key in reversed(keys) if self.held.get(key) == 1]
+                self._send(releases, False)
+                for key in keys:
+                    if key in self.held:
+                        self.held[key] -= 1
+                        if not self.held[key]:
+                            del self.held[key]
 
     def media(self, action):
         code = {'volume_mute': 0xad, 'volume_up': 0xaf, 'volume_down': 0xae, 'media': 0xb3}[action]
@@ -236,49 +258,51 @@ class WindowsActions:
         idx, idy = int(dx), int(dy)
         if idx == 0 and idy == 0:
             return
-        # 优先使用 SendInput (符合现代 Windows 规范与 DirectInput/RawInput 游戏视角采集)
-        sent = False
-        try:
-            event = INPUT(0, UNION(mi=MOUSEINPUT(idx, idy, 0, 0x0001, 0, 0)))
-            sent = (self.user32.SendInput(1, C.byref(event), C.sizeof(INPUT)) == 1)
-        except Exception:
+        with self._lock:
+            # 优先使用 SendInput (符合现代 Windows 规范与 DirectInput/RawInput 游戏视角采集)
             sent = False
-        # 若 SendInput 失败（如权限受阻或特定老游戏引擎），底层硬件级回退至 mouse_event
-        if not sent:
             try:
-                self.user32.mouse_event(0x0001, idx, idy, 0, 0)
+                event = INPUT(0, UNION(mi=MOUSEINPUT(idx, idy, 0, 0x0001, 0, 0)))
+                sent = (self.user32.SendInput(1, C.byref(event), C.sizeof(INPUT)) == 1)
             except Exception:
-                pass
+                sent = False
+            # 若 SendInput 失败（如权限受阻或特定老游戏引擎），底层硬件级回退至 mouse_event
+            if not sent:
+                try:
+                    self.user32.mouse_event(0x0001, idx, idy, 0, 0)
+                except Exception:
+                    pass
 
     def get_foreground_process_name(self) -> str:
         """获取当前 Windows 交互前台活动窗口的进程映像名称（带 500ms 缓存，杜绝高频 OpenProcess 冲击内核与反作弊）"""
-        now = time.monotonic()
-        if hasattr(self, '_cached_pname_time') and (now - self._cached_pname_time < 0.5):
-            return getattr(self, '_cached_pname', '')
+        with self._lock:
+            now = time.monotonic()
+            if hasattr(self, '_cached_pname_time') and (now - self._cached_pname_time < 0.5):
+                return getattr(self, '_cached_pname', '')
 
-        pname = ''
-        try:
-            hwnd = self.user32.GetForegroundWindow()
-            if hwnd:
-                pid = W.DWORD()
-                self.user32.GetWindowThreadProcessId(hwnd, C.byref(pid))
-                if pid.value:
-                    hproc = C.windll.kernel32.OpenProcess(0x1000, False, pid.value)
-                    if hproc:
-                        try:
-                            buf = C.create_unicode_buffer(260)
-                            size = W.DWORD(260)
-                            if C.windll.kernel32.QueryFullProcessImageNameW(hproc, 0, buf, C.byref(size)):
-                                from pathlib import Path
-                                pname = Path(buf.value).name.lower()
-                        finally:
-                            C.windll.kernel32.CloseHandle(hproc)
-        except Exception:
-            pass
+            pname = ''
+            try:
+                hwnd = self.user32.GetForegroundWindow()
+                if hwnd:
+                    pid = W.DWORD()
+                    self.user32.GetWindowThreadProcessId(hwnd, C.byref(pid))
+                    if pid.value:
+                        hproc = C.windll.kernel32.OpenProcess(0x1000, False, pid.value)
+                        if hproc:
+                            try:
+                                buf = C.create_unicode_buffer(260)
+                                size = W.DWORD(260)
+                                if C.windll.kernel32.QueryFullProcessImageNameW(hproc, 0, buf, C.byref(size)):
+                                    from pathlib import Path
+                                    pname = Path(buf.value).name.lower()
+                            finally:
+                                C.windll.kernel32.CloseHandle(hproc)
+            except Exception:
+                pass
 
-        self._cached_pname = pname
-        self._cached_pname_time = now
-        return pname
+            self._cached_pname = pname
+            self._cached_pname_time = now
+            return pname
 
     def is_nikki_game_focused(self) -> bool:
         """
@@ -353,55 +377,58 @@ class WindowsActions:
             self.user32.SetCursorPos(cx, cy)
 
     def mouse_button(self, button='left', down=True):
-        flags = {
-            'left': (0x0002 if down else 0x0004),
-            'right': (0x0008 if down else 0x0010),
-            'middle': (0x0020 if down else 0x0040),
-        }.get(button, 0x0002 if down else 0x0004)
-        if down:
-            self.held_mouse.add(button)
-        event = INPUT(0, UNION(mi=MOUSEINPUT(0, 0, 0, flags, 0, 0)))
-        if self.user32.SendInput(1, C.byref(event), C.sizeof(INPUT)) != 1:
-            err = C.get_last_error()
-            if err == 5:
-                attach_to_default_desktop()
-                if self.user32.SendInput(1, C.byref(event), C.sizeof(INPUT)) == 1:
-                    if not down:self.held_mouse.discard(button)
-                    return
-            self.user32.mouse_event(flags, 0, 0, 0, 0)
-        if not down:self.held_mouse.discard(button)
+        with self._lock:
+            flags = {
+                'left': (0x0002 if down else 0x0004),
+                'right': (0x0008 if down else 0x0010),
+                'middle': (0x0020 if down else 0x0040),
+            }.get(button, 0x0002 if down else 0x0004)
+            if down:
+                self.held_mouse.add(button)
+            event = INPUT(0, UNION(mi=MOUSEINPUT(0, 0, 0, flags, 0, 0)))
+            if self.user32.SendInput(1, C.byref(event), C.sizeof(INPUT)) != 1:
+                err = C.get_last_error()
+                if err == 5:
+                    attach_to_default_desktop()
+                    if self.user32.SendInput(1, C.byref(event), C.sizeof(INPUT)) == 1:
+                        if not down:self.held_mouse.discard(button)
+                        return
+                self.user32.mouse_event(flags, 0, 0, 0, 0)
+            if not down:self.held_mouse.discard(button)
 
     def release_all(self):
-        errors = []
-        # One refused key-up must not prevent other keys or mouse buttons from
-        # being released. Keep failed keys so later cleanup can retry them.
-        for key in list(reversed(self.held)):
-            try:
-                self._send([key], False)
-                self.held.pop(key, None)
-            except Exception as exc:
-                errors.append(exc)
-        for b in list(self.held_mouse):
-            try:
-                self.mouse_button(b, False)
-            except Exception as exc:
-                errors.append(exc)
-        if hasattr(self, 'held_gamepad_buttons'):
-            self.held_gamepad_buttons.clear()
-        if hasattr(self, 'held_turbo'):
-            self.held_turbo.clear()
-        if getattr(self, 'virtual_pad', None) is not None:
-            try:
-                self.virtual_pad.reset()
-            except Exception:
-                pass
-        if errors:
-            raise OSError('部分键鼠按键未能释放；映射保持暂停，可再次尝试释放') from errors[0]
+        with self._lock:
+            errors = []
+            # One refused key-up must not prevent other keys or mouse buttons from
+            # being released. Keep failed keys so later cleanup can retry them.
+            for key in list(reversed(self.held)):
+                try:
+                    self._send([key], False)
+                    self.held.pop(key, None)
+                except Exception as exc:
+                    errors.append(exc)
+            for b in list(self.held_mouse):
+                try:
+                    self.mouse_button(b, False)
+                except Exception as exc:
+                    errors.append(exc)
+            if hasattr(self, 'held_gamepad_buttons'):
+                self.held_gamepad_buttons.clear()
+            if hasattr(self, 'held_turbo'):
+                self.held_turbo.clear()
+            if getattr(self, 'virtual_pad', None) is not None:
+                try:
+                    self.virtual_pad.reset()
+                except Exception:
+                    pass
+            if errors:
+                raise OSError('部分键鼠按键未能释放；映射保持暂停，可再次尝试释放') from errors[0]
 
     def scroll(self, steps):
-        event = INPUT(0, UNION(mi=MOUSEINPUT(0, 0, (int(steps) * 120) & 0xffffffff, 0x0800, 0, 0)))
-        if self.user32.SendInput(1, C.byref(event), C.sizeof(INPUT)) != 1:
-            raise OSError('Windows 拒绝了滚轮输入')
+        with self._lock:
+            event = INPUT(0, UNION(mi=MOUSEINPUT(0, 0, (int(steps) * 120) & 0xffffffff, 0x0800, 0, 0)))
+            if self.user32.SendInput(1, C.byref(event), C.sizeof(INPUT)) != 1:
+                raise OSError('Windows 拒绝了滚轮输入')
 
 
 def create_actions():

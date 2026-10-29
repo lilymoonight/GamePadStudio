@@ -263,10 +263,9 @@ def test_normalizer_diagonal_deflection_activates_both_directional_outers():
     assert 'LS:outer' in inputs
 
     # Relax X below release while holding Y
-    asym_state = frame(axes=[0.70, -0.90, 0, 0, 0, 0])
+    asym_state = frame(axes=[0.20, -0.90, 0, 0, 0, 0])
     inputs = normalizer.update(asym_state)
     assert 'LS:right:outer' not in inputs
-    assert 'LS:right' in inputs
     assert 'LS:up:outer' in inputs
 
 
@@ -275,12 +274,19 @@ def test_normalizer_coexistence_with_radial_outer_and_inner_walk():
     normalizer = InputNormalizer()
     settings = {'stick_press': 0.24, 'stick_release': 0.17, 'walk_press': 0.62, 'walk_release': 0.72}
 
-    # Case A: Diagonal where magnitude >= 0.85 but individual components < 0.85
+    # Case A: Diagonal where magnitude >= 0.85 activates 2D radial LS:outer and directional outers
     # hypot(0.65, 0.65) = 0.9192 >= 0.85
     inputs = normalizer.update(frame(axes=[0.65, 0.65, 0, 0, 0, 0]), settings)
     assert 'LS:outer' in inputs
-    assert 'LS:right:outer' not in inputs
-    assert 'LS:down:outer' not in inputs
+    assert 'LS:right:outer' in inputs
+    assert 'LS:down:outer' in inputs
+
+    # Sub-outer diagonal: hypot(0.50, 0.50) = 0.7071 < 0.85 -> directional outers inactive
+    normalizer.reset()
+    sub_outer = normalizer.update(frame(axes=[0.50, 0.50, 0, 0, 0, 0]), settings)
+    assert 'LS:outer' not in sub_outer
+    assert 'LS:right:outer' not in sub_outer
+    assert 'LS:down:outer' not in sub_outer
 
     # Case B: Walking band
     normalizer.reset()

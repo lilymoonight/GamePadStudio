@@ -242,7 +242,7 @@ class MacActions(WindowsActions):
         if not self.native.CGPreflightPostEventAccess():
             raise PermissionError(PERMISSION_REASON)
 
-    def _hold_keys(self, keys, down):
+    def _hold_keys(self, keys, down, force=False):
         keys = list(keys)
         # Validate the complete chord before recording ownership or posting its
         # first modifier, so an unsupported final key cannot stick Ctrl down.
@@ -251,7 +251,7 @@ class MacActions(WindowsActions):
             raise ValueError('macOS: ' + UNSUPPORTED_KEY_REASONS.get(key, '此按键暂不支持输出。'))
         if down and keys:
             self._require_permission()
-        super()._hold_keys(keys, down)
+        super()._hold_keys(keys, down, force=force)
 
     def _flags(self, key=None, down=None):
         posted = self._posted_keys.copy()
