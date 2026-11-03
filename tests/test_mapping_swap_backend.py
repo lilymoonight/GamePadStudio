@@ -445,3 +445,63 @@ def test_swapping_live_mapping_releases_old_key_and_requires_fresh_press(battery
     agent.engine.update(state, agent.config, enabled=True, now=3.2)
     assert context.actions.keys[ord('Q')] == 1
     assert context.actions.keys.get(ord('E'), 0) == 0
+
+
+def test_gamepad_mode_default_ab_swap_and_live_xinput_output(swap_store):
+    from gamepadstudio.virtual_xinput import compose_xusb_report
+    store, state, _ = swap_store
+    gp_profile = store.profiles_for(state, 'gamepad')[0]
+    store.data['active_profile'] = gp_profile
+    store.data['profiles'][gp_profile].pop('0', None)
+    store.data['profiles'][gp_profile].pop('1', None)
+    store.save()
+
+    payload = swap_change(store, state, gp_profile, first='0', second='1')
+    store.apply_mapping_change(payload, state)
+    assert store.data['profiles'][gp_profile]['0']['short'] == {'action': 'gamepad_button', 'value': '1'}
+    assert store.data['profiles'][gp_profile]['1']['short'] == {'action': 'gamepad_button', 'value': '0'}
+
+    actions = Actions()
+    held_gamepad = set()
+    synced = {}
+
+    def on_sync(buttons=None, axes=None):
+        synced['buttons'] = set(buttons or ())
+        synced['axes'] = list(axes or ())
+
+    def on_dispatch(binding, down=True):
+        if binding.get('action') == 'gamepad_button':
+            val = str(binding.get('value', '0'))
+            if down:
+                held_gamepad.add(val)
+            else:
+                held_gamepad.discard(val)
+
+    actions.sync_virtual_gamepad = on_sync
+    runtime = MappingRuntime(actions, on_dispatch, start_mouse=False)
+    state_press_a = dict(state, buttons=[0], axes=[0.0] * 6)
+    runtime.update(state_press_a, store.data, enabled=True, now=1.0)
+    # Physical button '0' (A) is suppressed from pass-through and triggers '1' (B)
+    assert '1' in held_gamepad
+    assert '0' not in synced['buttons']
+    _, summary_a = compose_xusb_report(buttons=synced['buttons'] | held_gamepad)
+    assert summary_a['wButtons'] == 0x2000  # B (East), not 0x1000 (A)
+
+
+def test_vigembus_status_summary_and_env_overrides(monkeypatch, tmp_path):
+    from gamepadstudio.virtual_xinput import (
+        _VIGEM_CACHE, is_vigembus_driver_installed,
+        vigembus_status_summary, virtual_gamepad_backend_available,
+    )
+    _VIGEM_CACHE['found_path'] = None
+    _VIGEM_CACHE['failed_until'] = 0.0
+    fake_dll = tmp_path / 'ViGEmClient.dll'
+    fake_dll.write_bytes(b'MZ')
+    monkeypatch.setenv('VIGEM_CLIENT_DLL', str(fake_dll))
+    monkeypatch.setenv('GPS_VIGEMBUS_INSTALLED', '1')
+    assert is_vigembus_driver_installed() is True
+    assert virtual_gamepad_backend_available() is True
+    summary = vigembus_status_summary()
+    assert summary['dll_available'] is True
+    assert summary['ready'] is True
+    assert 'ViGEmBus' in summary['release_url']

@@ -238,7 +238,10 @@ class BindingDialog(QDialog):
                 mode = profile_mode(owner.config, self.profile)
         self.base_mode = mode
         self.mode = 'kbm' if self.touch_gesture else mode
-        self.available_inputs = input_sources(owner.snapshot)
+        self.available_inputs = list(input_sources(owner.snapshot))
+        for part in self.original_trigger.split('+'):
+            if part in ('16', '17', '18', '19') and part not in self.available_inputs:
+                self.available_inputs.append(part)
 
         from .i18n import tr
         title = tr('编辑触摸板手势') if self.touch_gesture else tr('编辑手柄输出配置' if self.mode == 'gamepad' else '编辑虚拟键鼠映射')

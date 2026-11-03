@@ -32,7 +32,7 @@ USB_IDS_URLS = (
 COMMON_CONTROLLER_MODELS: dict[tuple[int, int], dict[str, Any]] = {
     # Sony PlayStation (HID / DInput)
     (0x054C, 0x0CE6): {'brand': 'Sony', 'model': 'DualSense Wireless Controller', 'family': 'dualsense', 'protocol': 'hidapi', 'gyro': True, 'touchpad': True},
-    (0x054C, 0x0DF2): {'brand': 'Sony', 'model': 'DualSense Edge Wireless Controller', 'family': 'dualsense', 'protocol': 'hidapi', 'gyro': True, 'touchpad': True, 'back_paddles': 2},
+    (0x054C, 0x0DF2): {'brand': 'Sony', 'model': 'DualSense Edge Wireless Controller', 'family': 'dualsense', 'protocol': 'hidapi', 'gyro': True, 'touchpad': True, 'back_paddles': 4},
     (0x054C, 0x05C4): {'brand': 'Sony', 'model': 'DualShock 4 (CUH-ZCT1)', 'family': 'dualshock4', 'protocol': 'hidapi', 'gyro': True, 'touchpad': True},
     (0x054C, 0x09CC): {'brand': 'Sony', 'model': 'DualShock 4 (CUH-ZCT2)', 'family': 'dualshock4', 'protocol': 'hidapi', 'gyro': True, 'touchpad': True},
     (0x054C, 0x0BA0): {'brand': 'Sony', 'model': 'DualShock 4 USB Wireless Adaptor', 'family': 'dualshock4', 'protocol': 'hidapi', 'gyro': True, 'touchpad': True},

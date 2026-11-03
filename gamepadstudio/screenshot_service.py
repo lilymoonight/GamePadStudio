@@ -20,6 +20,69 @@ def sanitize_filename(name: str) -> str:
     return clean[:36] if clean else 'Desktop'
 
 
+def resolve_capture_game_label(hwnd=None, title: str = '', pname: str = '') -> str:
+    """解析截图文件名中的游戏名称标签：结合窗口标题与进程名，确保截图文件名带有游戏名称"""
+    raw_title = (title or '').strip()
+    if not pname and hwnd:
+        try:
+            pname = get_window_process_name(hwnd)
+        except Exception:
+            pname = ''
+    proc_stem = ''
+    if pname and not is_software_or_system_window(hwnd, raw_title, pname):
+        stem = Path(pname).stem
+        stem = re.sub(r'(-Win64-Shipping|-WinGDK-Shipping|_x64|_dx12|_dx11)$', '', stem, flags=re.IGNORECASE).strip('_- ')
+        if stem and stem.lower() not in ('applicationframehost', ' game', 'launcher'):
+            proc_stem = stem
+    if not raw_title or raw_title in ('桌面', 'Desktop'):
+        return proc_stem or raw_title or '桌面'
+    if proc_stem and proc_stem.lower() not in raw_title.lower():
+        return f'{proc_stem}_{raw_title}'
+    return raw_title
+
+
+def _sidecar_paths(media_path: Path) -> tuple[Path, Path]:
+    """返回 (.metadata 子目录伴生 JSON 路径, 根目录兼容伴生 JSON 路径)"""
+    meta_sidecar = media_path.parent / '.metadata' / f'{media_path.stem}.json'
+    legacy_sidecar = media_path.with_suffix('.json')
+    return meta_sidecar, legacy_sidecar
+
+
+def organize_capture_sidecars(folder) -> int:
+    """将截图目录根下散落的伴生 .json 文件收纳至隐藏的 .metadata/ 子文件夹（PNG 自动内嵌元数据）"""
+    folder_path = Path(folder)
+    if not folder_path.exists():
+        return 0
+    moved = 0
+    meta_dir = folder_path / '.metadata'
+    for sidecar in list(folder_path.glob('*.json')):
+        if sidecar.name.startswith('.'):
+            continue
+        png_peer = sidecar.with_suffix('.png')
+        try:
+            data = json.loads(sidecar.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            data = {}
+        if png_peer.is_file() and isinstance(data, dict) and data:
+            existing = extract_png_metadata(png_peer)
+            merged = {**data, **existing}
+            embed_png_metadata(png_peer, merged)
+            try:
+                sidecar.unlink()
+                moved += 1
+                continue
+            except OSError:
+                pass
+        try:
+            meta_dir.mkdir(parents=True, exist_ok=True)
+            target = meta_dir / sidecar.name
+            sidecar.replace(target)
+            moved += 1
+        except OSError:
+            pass
+    return moved
+
+
 def embed_png_metadata(png_path: Path, metadata: dict):
     """将元数据以标准 tEXt chunk 原生嵌入 PNG 文件中（零伴生文件，开箱自包含）"""
     try:
@@ -392,7 +455,8 @@ def take_screenshot(save_dir, toast_duration_ms=0, mode='game'):
     folder.mkdir(parents=True, exist_ok=True)
     _ensure_dpi_awareness()
     hwnd, title = smart_foreground_info()
-    clean_title = sanitize_filename(title)
+    file_label = resolve_capture_game_label(hwnd, title)
+    clean_title = sanitize_filename(file_label)
     now = datetime.now()
     path = folder / f'DS_{clean_title}_{now:%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:4]}.png'
     with mss.mss() as capture:
@@ -438,8 +502,9 @@ def list_captures(folder):
     candidates = [path for path in (*folder_path.glob('*.png'), *folder_path.glob('*.mp4'))
                   if not path.name.startswith('.') and not path.name.lower().endswith('.partial.mp4')]
     for path in sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True):
+        meta_sidecar, legacy_sidecar = _sidecar_paths(path)
         if path.suffix.lower() == '.mp4':
-            sidecar = path.with_suffix('.json')
+            sidecar = legacy_sidecar if legacy_sidecar.exists() else meta_sidecar
             data = {}
             if sidecar.exists():
                 try:
@@ -447,6 +512,10 @@ def list_captures(folder):
                 except (OSError, ValueError):
                     data = {}
             thumb = path.with_suffix('.jpg')
+            if not thumb.is_file():
+                alt_thumb = path.parent / '.metadata' / f'{path.stem}.jpg'
+                if alt_thumb.is_file():
+                    thumb = alt_thumb
             raw_title = data.get('raw_title') or data.get('title') or path.stem.replace("DS_", "").replace("_replay", "")
             resolution = re.fullmatch(r'(\d+)\s*[xX×]\s*(\d+)', str(data.get('resolution') or '').strip())
             fallback_width, fallback_height = (int(resolution[1]), int(resolution[2])) if resolution else (None, None)
@@ -475,7 +544,7 @@ def list_captures(folder):
         else:
             data = extract_png_metadata(path)
             if not data:
-                sidecar = path.with_suffix('.json')
+                sidecar = legacy_sidecar if legacy_sidecar.exists() else meta_sidecar
                 try:
                     data = json.loads(sidecar.read_text(encoding='utf-8'))
                 except (OSError, ValueError):
@@ -493,8 +562,9 @@ def list_captures(folder):
 
 def set_favorite(path, favorite):
     p = Path(path)
+    meta_sidecar, legacy_sidecar = _sidecar_paths(p)
     if p.suffix.lower() == '.mp4':
-        sidecar = p.with_suffix('.json')
+        sidecar = meta_sidecar if (meta_sidecar.exists() and not legacy_sidecar.exists()) else legacy_sidecar
         data = {}
         if sidecar.exists():
             try:
@@ -502,6 +572,7 @@ def set_favorite(path, favorite):
             except (OSError, ValueError):
                 data = {}
         data['favorite'] = favorite
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
         return
 
@@ -509,20 +580,22 @@ def set_favorite(path, favorite):
     if meta:
         meta['favorite'] = favorite
         update_png_metadata(p, meta)
-    sidecar = p.with_suffix('.json')
+    sidecar = meta_sidecar if (meta_sidecar.exists() and not legacy_sidecar.exists()) else legacy_sidecar
     if sidecar.exists() or not meta:
         try:
             data = json.loads(sidecar.read_text(encoding='utf-8'))
         except (OSError, ValueError):
             data = {}
         data['favorite'] = favorite
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
 def delete_capture(path):
     p = Path(path)
-    sidecar = p.with_suffix('.json')
+    meta_sidecar, legacy_sidecar = _sidecar_paths(p)
     thumb = p.with_suffix('.jpg')
+    alt_thumb = p.parent / '.metadata' / f'{p.stem}.jpg'
     deleted = False
     try:
         if p.exists():
@@ -530,14 +603,10 @@ def delete_capture(path):
             deleted = True
     except OSError:
         pass
-    try:
-        if sidecar.exists():
-            sidecar.unlink()
-    except OSError:
-        pass
-    try:
-        if thumb.exists():
-            thumb.unlink()
-    except OSError:
-        pass
+    for sc in (legacy_sidecar, meta_sidecar, thumb, alt_thumb):
+        try:
+            if sc.exists():
+                sc.unlink()
+        except OSError:
+            pass
     return deleted

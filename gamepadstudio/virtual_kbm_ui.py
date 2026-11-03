@@ -762,6 +762,7 @@ class KbmFeelDialog(QDialog):
         for key, title, low, high, default in (
             ('sensitivity', '转向速度', 1, 100, 28),
             ('deadzone', '居中容错', 1, 50, 6),
+            ('anti_deadzone', '反死区补偿', 0, 25, 0),
             ('y_ratio', '垂直速度比例', .1, 2, .7),
             ('edge_boost', '推满加速', 1, 3, 1.7),
         ):
@@ -769,10 +770,13 @@ class KbmFeelDialog(QDialog):
             field.setRange(low, high)
             field.setSingleStep(.05 if high <= 3 else 1)
             field.setDecimals(2 if high <= 3 else 0)
-            value = self.mouse.get(key, default / 100 if key == 'deadzone' else default)
-            field.setValue(value * 100 if key == 'deadzone' else value)
-            if key == 'deadzone':
+            is_pct = key in ('deadzone', 'anti_deadzone')
+            value = self.mouse.get(key, default / 100 if is_pct else default)
+            field.setValue(value * 100 if is_pct else value)
+            if is_pct:
                 field.setSuffix(' %')
+            if key == 'anti_deadzone':
+                field.setToolTip(tr('补偿游戏内置过大死区，让摇杆微推即刻响应（0% 为关闭）'))
             pointer_form.addRow(tr(title), field)
             self.mouse_fields[key] = field
         pointer_layout.addLayout(pointer_form)
@@ -804,17 +808,49 @@ class KbmFeelDialog(QDialog):
         current_trigger = self.mouse.get('gyro_trigger', 'LT')
         idx_t = self.gyro_trigger.findData(current_trigger)
         if idx_t < 0:
-            alias_map = {'LB': '9', 'RB': '10', 'L3': '7', 'R3': '8', 'L1': '9', 'R1': '10', 'L2': 'LT', 'R2': 'RT'}
+            alias_map = {'LB': '9', 'RB': '10', 'L3': '7', 'R3': '8', 'L1': '9', 'L1': '9', 'R1': '10', 'L2': 'LT', 'R2': 'RT'}
             idx_t = self.gyro_trigger.findData(alias_map.get(current_trigger, 'LT'))
         self.gyro_trigger.setCurrentIndex(max(0, idx_t))
         gyro_form.addRow(tr('激活方式'), self.gyro_trigger)
+
+        self.gyro_output_mode = QComboBox()
+        self.gyro_output_mode.addItem(tr('模拟鼠标微调 (默认)'), 'mouse')
+        self.gyro_output_mode.addItem(tr('模拟虚拟右摇杆 (防UI图标闪烁)'), 'right_stick')
+        cur_gyro_mode = self.mouse.get('gyro_output_mode', 'mouse')
+        self.gyro_output_mode.setCurrentIndex(max(0, self.gyro_output_mode.findData(cur_gyro_mode)))
+        self.gyro_output_mode.setToolTip(tr('部分不支持键鼠与手柄混输的游戏在触发鼠标移动时会闪烁 UI 图标，可切换为模拟虚拟右摇杆输出。'))
+        gyro_form.addRow(tr('体感输出模式'), self.gyro_output_mode)
+
+        init_gx = float(self.mouse.get('gyro_sensitivity', 18.0))
+        init_gy = float(self.mouse.get('gyro_sensitivity_y', init_gx))
+        self._gyro_y_custom = abs(init_gy - init_gx) > 1e-4
 
         self.gyro_sensitivity = QDoubleSpinBox()
         self.gyro_sensitivity.setRange(1.0, 100.0)
         self.gyro_sensitivity.setSingleStep(1.0)
         self.gyro_sensitivity.setDecimals(1)
-        self.gyro_sensitivity.setValue(float(self.mouse.get('gyro_sensitivity', 18.0)))
+        self.gyro_sensitivity.setValue(init_gx)
         gyro_form.addRow(tr('体感灵敏度'), self.gyro_sensitivity)
+
+        self.gyro_sensitivity_y = QDoubleSpinBox()
+        self.gyro_sensitivity_y.setRange(1.0, 100.0)
+        self.gyro_sensitivity_y.setSingleStep(1.0)
+        self.gyro_sensitivity_y.setDecimals(1)
+        self.gyro_sensitivity_y.setValue(init_gy)
+        self.gyro_sensitivity_y.setToolTip(tr('独立调节体感上下俯仰 (Pitch) 灵敏度，解决部分手柄纵向体感过快或过慢问题。'))
+        gyro_form.addRow(tr('垂直灵敏度 (Y)'), self.gyro_sensitivity_y)
+
+        def _on_gx_changed(val):
+            if not self._gyro_y_custom:
+                self.gyro_sensitivity_y.blockSignals(True)
+                self.gyro_sensitivity_y.setValue(val)
+                self.gyro_sensitivity_y.blockSignals(False)
+
+        def _on_gy_changed(_val):
+            self._gyro_y_custom = abs(self.gyro_sensitivity_y.value() - self.gyro_sensitivity.value()) > 1e-4
+
+        self.gyro_sensitivity.valueChanged.connect(_on_gx_changed)
+        self.gyro_sensitivity_y.valueChanged.connect(_on_gy_changed)
 
         self.gyro_invert_y = QComboBox()
         self.gyro_invert_y.addItem(tr('常规'), False)
@@ -1001,8 +1037,15 @@ class KbmFeelDialog(QDialog):
     def options(self):
         mouse = copy.deepcopy(self.mouse)
         if self.has_pointer:
-            mouse.update({key: field.value() / 100 if key == 'deadzone' else field.value()
-                          for key, field in self.mouse_fields.items()})
+            for key, field in self.mouse_fields.items():
+                if key == 'deadzone':
+                    mouse[key] = field.value() / 100
+                elif key == 'anti_deadzone':
+                    val = round(field.value() / 100, 4)
+                    if val > 0 or 'anti_deadzone' in self.mouse:
+                        mouse['anti_deadzone'] = val
+                else:
+                    mouse[key] = field.value()
             mouse['mode'] = self.mode.currentData()
             mouse['invert_y'] = self.invert_y.currentData() is True
             if self.stick_source.currentData() == 'left':
@@ -1012,7 +1055,14 @@ class KbmFeelDialog(QDialog):
         if self.has_gyro:
             mouse['gyro_enabled'] = self.gyro_enabled_toggle.isChecked()
             mouse['gyro_trigger'] = self.gyro_trigger.currentData()
-            mouse['gyro_sensitivity'] = round(float(self.gyro_sensitivity.value()), 2)
+            gx = round(float(self.gyro_sensitivity.value()), 2)
+            gy = round(float(self.gyro_sensitivity_y.value()), 2)
+            mouse['gyro_sensitivity'] = gx
+            if abs(gy - gx) > 1e-4 or 'gyro_sensitivity_y' in self.mouse:
+                mouse['gyro_sensitivity_y'] = gy
+            g_mode = self.gyro_output_mode.currentData() or 'mouse'
+            if g_mode != 'mouse' or 'gyro_output_mode' in self.mouse:
+                mouse['gyro_output_mode'] = g_mode
             mouse['gyro_invert_y'] = self.gyro_invert_y.currentData() is True
         inputs = copy.deepcopy(self.input_settings)
         inputs.update({key: self.input_fields[key].value() / 100
@@ -1272,6 +1322,8 @@ class VirtualKbmPage(QWidget):
         if hasattr(owner, 'reset_profile'):
             more_menu.addSeparator()
             more_menu.addAction(tr('恢复默认'), owner.reset_profile)
+        self.clear_all_bindings_action = more_menu.addAction(tr('清空全部绑定'), self.clear_all_bindings)
+        self.delete_scheme_action = more_menu.addAction(tr('删除此预设'), self.delete_scheme)
         more.setMenu(more_menu)
         actions.addWidget(more)
         self.toolbar_grid = QGridLayout()
@@ -1434,6 +1486,33 @@ class VirtualKbmPage(QWidget):
             output_group.addLayout(output_keys)
             outputs.addLayout(output_group)
         group_layout.addLayout(outputs)
+
+        # 手柄背键与扩展键直绑区 (P1–P4)：解决精英/八位堂/飞智/墨将背键在虚拟键鼠下找不到绑定入口的问题
+        self.back_paddles_bar = QWidget()
+        paddles_layout = QVBoxLayout(self.back_paddles_bar)
+        paddles_layout.setContentsMargins(0, 0, 0, 0)
+        paddles_layout.setSpacing(6)
+        paddles_head = QHBoxLayout()
+        paddles_head.setContentsMargins(0, 0, 0, 0)
+        paddles_head.setSpacing(8)
+        paddles_head.addWidget(label(tr('手柄背键直绑 (P1–P4)'), 'caption'))
+        paddles_head.addWidget(label(tr('点击背键直接绑定键盘快捷键（如 Alt+Tab）、鼠标动作或组合键'), 'caption', True), 1)
+        paddles_layout.addLayout(paddles_head)
+        paddles_row = QHBoxLayout()
+        paddles_row.setContentsMargins(0, 0, 0, 0)
+        paddles_row.setSpacing(8)
+        self.paddle_buttons = {}
+        for trig, p_name in (('16', 'P1'), ('17', 'P2'), ('18', 'P3'), ('19', 'P4')):
+            p_btn = QPushButton(f"{p_name} · {tr('未绑定')}")
+            p_btn.setCursor(Qt.PointingHandCursor)
+            p_btn.setMinimumHeight(32)
+            p_btn.setToolTip(tr('点击直接为该背键配置键盘按键、组合快捷键（如 Alt+Tab）或鼠标动作'))
+            p_btn.clicked.connect(lambda checked=False, t=trig: self.edit_paddle_binding(t))
+            paddles_row.addWidget(p_btn, 1)
+            self.paddle_buttons[trig] = p_btn
+        paddles_layout.addLayout(paddles_row)
+        group_layout.addWidget(self.back_paddles_bar)
+
         canvas_layout.addWidget(self.key_group, 0, Qt.AlignHCenter)
         keyboard_layout.addWidget(self.canvas)
         content_layout.addWidget(keyboard_card)
@@ -1507,6 +1586,66 @@ class VirtualKbmPage(QWidget):
         scheme = self.current_scheme()
         if scheme:
             self.owner.change_profile(scheme)
+
+    def clear_all_bindings(self, confirm=True):
+        """清空当前键鼠预设中的全部按键与摇杆映射"""
+        scheme = self.current_scheme()
+        if not scheme:
+            return False
+        if confirm:
+            from PySide6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self,
+                tr('清空全部绑定'),
+                tr('确定要清空预设「{name}」的全部按键映射吗？').format(name=scheme),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return False
+        ok = self.owner.mapping_change({'op': 'clear_all', 'profile': scheme})
+        if ok and hasattr(self.owner, 'notify'):
+            self.owner.notify(tr('已清空当前预设的全部绑定'))
+        self.refresh_display()
+        return bool(ok)
+
+    def delete_scheme(self, confirm=True):
+        """删除当前选中的键鼠预设（至少保留一个预设）"""
+        scheme = self.current_scheme()
+        if not scheme:
+            return False
+        kbm_items = self.store.profiles_for(self.owner.snapshot, mode='kbm')
+        if len(kbm_items) <= 1 and len(self.store.profiles_for(self.owner.snapshot)) <= 1:
+            if hasattr(self.owner, 'notify'):
+                self.owner.notify(tr('至少保留一个预设，如需重置可使用「清空全部绑定」或「恢复默认」'))
+            return False
+        if confirm:
+            from PySide6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self,
+                tr('删除此预设'),
+                tr('确定要删除键鼠预设「{name}」吗？此操作不可撤销。').format(name=scheme),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return False
+        ok = self.owner.mapping_change({'op': 'delete', 'profile': scheme})
+        if ok and hasattr(self.owner, 'notify'):
+            self.owner.notify(tr('已删除预设：') + scheme)
+        self.refresh_display()
+        return bool(ok)
+
+    def edit_paddle_binding(self, trigger='16'):
+        """直接打开背键 (P1–P4 / 16–19) 的虚拟键鼠绑定编辑器"""
+        scheme = self.current_scheme()
+        if not scheme:
+            return
+        snap = self.owner.snapshot
+        if isinstance(snap, dict):
+            snap['back_paddles'] = max(int(snap.get('back_paddles', 0) or 0), 4)
+        self.owner.edit_mapping(str(trigger), profile=scheme, mode='kbm')
+        self.refresh_display()
 
     def toggle_bindings_list(self):
         """展开或折叠详细绑定表格"""
@@ -1792,6 +1931,36 @@ class VirtualKbmPage(QWidget):
 
         for key, cap in self.keycaps.items():
             cap.set_mapping_info(badges.get(self.key_token(key), []), False)
+        if hasattr(self, 'paddle_buttons'):
+            from .mapping_engine import binding_label
+            raw_profile = config.get('profiles', {}).get(selected, {})
+            eff_profile = effective_mappings(config, self.owner.snapshot, selected)
+            for trig, p_btn in self.paddle_buttons.items():
+                p_label = trigger_label(trig, family)
+                entry = eff_profile.get(trig) or raw_profile.get(trig) or {}
+                short_b = entry.get('short', {})
+                long_b = entry.get('long', {})
+                parts_txt = []
+                if short_b.get('action', 'none') not in ('none', 'suppress'):
+                    parts_txt.append(binding_label(short_b, family))
+                if long_b.get('action', 'none') not in ('none', 'suppress'):
+                    parts_txt.append(tr('长按:') + binding_label(long_b, family))
+                if parts_txt:
+                    p_btn.setText(f"{p_label} → {' / '.join(parts_txt)}")
+                    p_btn.setStyleSheet(
+                        f"background: rgba(56, 189, 248, 0.14); color: {TOKENS['ink']}; "
+                        f"border: 1px solid rgba(56, 189, 248, 0.45); border-radius: 6px; padding: 4px 10px; font-weight: 700;"
+                    )
+                else:
+                    p_btn.setText(f"{p_label} · {tr('未绑定')}")
+                    p_btn.setStyleSheet(
+                        f"background: {TOKENS['surface']}; color: {TOKENS['ink_2']}; "
+                        f"border: 1px solid {TOKENS['border']}; border-radius: 6px; padding: 4px 10px; font-weight: 600;"
+                    )
+        if hasattr(self, 'delete_scheme_action'):
+            self.delete_scheme_action.setEnabled(bool(selected) and len(self.store.profiles_for(self.owner.snapshot)) > 1)
+        if hasattr(self, 'clear_all_bindings_action'):
+            self.clear_all_bindings_action.setEnabled(bool(selected))
         if hasattr(self, 'bindings'):
             self.bindings.refresh()
 

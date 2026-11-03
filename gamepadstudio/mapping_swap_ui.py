@@ -8,7 +8,10 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout
 from .controller_glyphs import display_parts, make_token_label
 from .i18n import tr, tr_profile
 from .mapping_engine import canonical_trigger, binding_label, input_sources, trigger_label
-from .studio_core import device_config, mapping_input_signature, profile_mode, profile_scope, swap_binding_entry
+from .studio_core import (
+    device_config, mapping_input_signature, profile_mode, profile_scope,
+    resolve_swapped_entry, swap_binding_entry,
+)
 
 _SCROLL_GATE = '请先在触摸板设置中开启手势绑定，再交换滚动手势'
 
@@ -91,6 +94,7 @@ class MappingSwapDialog(QDialog):
     def __init__(self, owner, profile, first):
         super().__init__(owner)
         self.owner, self.profile = owner, profile
+        self.mode = profile_mode(owner.config, profile)
         state = owner.snapshot
         self.input_signature = mapping_input_signature(state)
         self.identity = (profile_scope(state), state['instance_id'])
@@ -128,8 +132,13 @@ class MappingSwapDialog(QDialog):
         layout.addWidget(caption(tr('交换绑定'), 'heading'))
         layout.addWidget(caption(tr_profile(profile), 'section'))
         layout.addWidget(caption(tr('交换两处完整的短按、长按与时长设置。')))
-        if profile_mode(owner.config, profile) == 'gamepad':
-            layout.addWidget(caption(tr('手柄输出配置；当前未接入系统虚拟手柄后端。')))
+        if self.mode == 'gamepad':
+            from .virtual_xinput import virtual_gamepad_backend_available
+            layout.addWidget(caption(
+                tr('手柄输出配置；已接入虚拟手柄后端，实时输出重映射。')
+                if virtual_gamepad_backend_available() else
+                tr('手柄输出配置；当前未接入系统虚拟手柄后端。')
+            ))
         self.first_combo, self.second_combo = QComboBox(), QComboBox()
         for combo, title in ((self.first_combo, '第一个输入'), (self.second_combo, '第二个输入')):
             combo.setAccessibleName(tr(title))
@@ -214,10 +223,15 @@ class MappingSwapDialog(QDialog):
             self._invalidate()
         compatible = bool(first and second and first != second
                           and first.startswith('TP:') == second.startswith('TP:'))
-        different = bool(first in self.entries and second in self.entries
-                         and self.entries[first] != self.entries[second])
-        has_action = any(self.entries[key][gesture].get('action', 'none') != 'none'
-                         for key in (first, second) for gesture in ('short', 'long') if key in self.entries)
+        after_first = (self._after_entry(first, second, self.entries[second])
+                       if (first in self.entries and second in self.entries) else None)
+        after_second = (self._after_entry(second, first, self.entries[first])
+                        if (first in self.entries and second in self.entries) else None)
+        different = bool(after_first is not None and after_second is not None
+                         and (after_first != self.entries[first] or after_second != self.entries[second]))
+        has_action = any(entry[gesture].get('action', 'none') != 'none'
+                         for entry in (self.entries.get(first), self.entries.get(second), after_first, after_second)
+                         if isinstance(entry, dict) for gesture in ('short', 'long'))
         settings = device_config(self.owner.config, state)
         scroll_blocked = (any(key in ('TP:scroll_up', 'TP:scroll_down') for key in (first, second))
                           and settings.get('touch_scroll') and not settings.get('touch_gestures_enabled'))
@@ -232,25 +246,27 @@ class MappingSwapDialog(QDialog):
             self.message.clear()
         return self.swap_button.isEnabled()
 
-    @staticmethod
-    def _after_entry(trigger, entry):
-        result = copy.deepcopy(entry)
-        if trigger in ('TP:scroll_up', 'TP:scroll_down') and result['short'].get('action') == 'none':
-            result['short']['action'] = 'suppress'
-        return result
+    def _after_entry(self, trigger, source_trigger, entry):
+        return resolve_swapped_entry(trigger, source_trigger, entry, mode=self.mode)
 
     def refresh_preview(self, *_):
         first, second = self.first_combo.currentData(), self.second_combo.currentData()
+        after_first = after_second = None
         if first in self.entries and second in self.entries:
-            self.first_preview.show_exchange(first, self.entries[first], self._after_entry(first, self.entries[second]), self.family)
-            self.second_preview.show_exchange(second, self.entries[second], self._after_entry(second, self.entries[first]), self.family)
+            after_first = self._after_entry(first, second, self.entries[second])
+            after_second = self._after_entry(second, first, self.entries[first])
+            self.first_preview.show_exchange(first, self.entries[first], after_first, self.family)
+            self.second_preview.show_exchange(second, self.entries[second], after_second, self.family)
+        has_action = any(entry[gesture].get('action', 'none') != 'none'
+                         for entry in (self.entries.get(first), self.entries.get(second), after_first, after_second)
+                         if isinstance(entry, dict) for gesture in ('short', 'long'))
+        different = bool(after_first is not None and after_second is not None
+                         and (after_first != self.entries[first] or after_second != self.entries[second]))
         if first == second:
             self.message.setText(tr('请选择两个不同的输入。'))
         elif first.startswith('TP:') != second.startswith('TP:'):
             self.message.setText(tr('触摸手势只能与触摸手势交换。'))
-        elif (self.entries[first] == self.entries[second]
-              or all(self.entries[key][gesture].get('action', 'none') == 'none'
-                     for key in (first, second) for gesture in ('short', 'long'))):
+        elif not different or not has_action:
             self.message.setText(tr('两处配置相同，无需交换。'))
         else:
             self.message.clear()

@@ -725,3 +725,51 @@ def test_compact_swap_entries_fit_localized_full_workspace(hotkey_workspace, wid
     assert position.x() >= 0 and position.x() + swap.width() <= row.width()
     assert row.list.horizontalScrollBar().maximum() == 0
     screenshot(window, f'keyboard-list-{get_language()}-{width}.png')
+
+
+def test_gamepad_mode_default_ab_swap_and_restore_in_dialog(swap_owner):
+    owner, _, open_dialog = swap_owner
+    gp_profile = owner.store.profiles_for(owner.snapshot, 'gamepad')[0]
+    owner.config['profiles'][gp_profile].pop('0', None)
+    owner.config['profiles'][gp_profile].pop('1', None)
+    owner.store.save()
+
+    dialog = open_dialog('0', profile=gp_profile)
+    choose(dialog, '0', '1')
+    assert dialog.swap_button.isEnabled()
+    assert dialog.message.text() == ''
+    dialog.save()
+    assert dialog.result() == QDialog.Accepted
+    assert owner.config['profiles'][gp_profile]['0']['short'] == {'action': 'gamepad_button', 'value': '1'}
+    assert owner.config['profiles'][gp_profile]['1']['short'] == {'action': 'gamepad_button', 'value': '0'}
+
+    dialog2 = open_dialog('0', profile=gp_profile)
+    choose(dialog2, '0', '1')
+    assert dialog2.swap_button.isEnabled()
+    dialog2.save()
+    assert dialog2.result() == QDialog.Accepted
+    assert owner.config['profiles'][gp_profile]['0']['short'] == {'action': 'none'}
+    assert owner.config['profiles'][gp_profile]['1']['short'] == {'action': 'none'}
+
+
+def test_quick_ab_xy_layout_swap_and_vigembus_settings_row(hotkey_workspace):
+    window, app, fake_device, _ = hotkey_workspace
+    state = device(21)
+    select_state(window, app, fake_device, state)
+    gp_profile = window.current_gamepad_profile()
+    assert window.swap_ab_xy_layout(gp_profile) is True
+    assert window.config['profiles'][gp_profile]['0']['short'] == {'action': 'gamepad_button', 'value': '1'}
+    assert window.config['profiles'][gp_profile]['1']['short'] == {'action': 'gamepad_button', 'value': '0'}
+    assert window.config['profiles'][gp_profile]['2']['short'] == {'action': 'gamepad_button', 'value': '3'}
+    assert window.config['profiles'][gp_profile]['3']['short'] == {'action': 'gamepad_button', 'value': '2'}
+
+    assert window.swap_ab_xy_layout(gp_profile) is True
+    assert window.config['profiles'][gp_profile]['0']['short'] == {'action': 'none'}
+    assert window.config['profiles'][gp_profile]['1']['short'] == {'action': 'none'}
+    assert window.config['profiles'][gp_profile]['2']['short'] == {'action': 'none'}
+    assert window.config['profiles'][gp_profile]['3']['short'] == {'action': 'none'}
+
+    assert hasattr(window, 'vigembus_row')
+    assert hasattr(window, 'vigembus_button')
+    window.refresh_vigembus_status(force=True)
+    assert window.vigembus_row.subtitle_label.text() != ''

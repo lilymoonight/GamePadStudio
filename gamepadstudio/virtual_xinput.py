@@ -310,36 +310,89 @@ def export_sdl_gamecontroller_config(
     return f'{safe_guid},{safe_name},{body},platform:{plat},'
 
 
+VIGEMBUS_RELEASE_URL = 'https://github.com/nefarius/ViGEmBus/releases/latest'
+
 _VIGEM_CACHE: dict[str, Any] = {
     'found_path': None,
     'failed_until': 0.0,
 }
 
 
-def _find_vigem_dll() -> Optional[str]:
+def is_vigembus_driver_installed() -> bool:
+    """Return True if the Nefarius ViGEmBus kernel driver is installed on Windows."""
+    override = os.environ.get('GPS_VIGEMBUS_INSTALLED', '').strip().lower()
+    if override in ('1', 'true', 'yes'):
+        return True
+    if override in ('0', 'false', 'no'):
+        return False
     if sys.platform != 'win32':
-        return None
+        return False
+    vigem_bus_sys = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'drivers' / 'ViGEmBus.sys'
+    if vigem_bus_sys.is_file():
+        return True
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r'SYSTEM\CurrentControlSet\Services\ViGEmBus',
+        ):
+            return True
+    except Exception:
+        return False
+
+
+def _find_vigem_dll() -> Optional[str]:
     env_path = os.environ.get('VIGEM_CLIENT_DLL', '').strip()
     if env_path and Path(env_path).is_file():
         return env_path
+    if sys.platform != 'win32':
+        return None
     if _VIGEM_CACHE['found_path'] and Path(_VIGEM_CACHE['found_path']).is_file():
         return _VIGEM_CACHE['found_path']
     now = time.monotonic()
     if now < _VIGEM_CACHE['failed_until']:
         return None
 
+    pkg_dir = Path(__file__).resolve().parent
     candidates = [
-        Path(__file__).resolve().parent / 'bin' / 'ViGEmClient.dll',
-        Path(__file__).resolve().parent / 'ViGEmClient.dll',
-        Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Nefarius Software Solutions' / 'ViGEm Bus Driver' / 'ViGEmClient.dll',
+        pkg_dir / 'bin' / 'ViGEmClient.dll',
+        pkg_dir / 'ViGEmClient.dll',
     ]
+    meipass = getattr(sys, '_MEIPASS', None)
+    if meipass:
+        mp = Path(meipass)
+        candidates.extend([
+            mp / 'gamepadstudio' / 'bin' / 'ViGEmClient.dll',
+            mp / 'bin' / 'ViGEmClient.dll',
+            mp / 'ViGEmClient.dll',
+        ])
     try:
-        import vgamepad  # type: ignore
-        vg_root = Path(vgamepad.__file__).resolve().parent
-        for dll in vg_root.rglob('ViGEmClient.dll'):
-            candidates.insert(0, dll)
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.extend([
+            exe_dir / '_internal' / 'gamepadstudio' / 'bin' / 'ViGEmClient.dll',
+            exe_dir / '_internal' / 'bin' / 'ViGEmClient.dll',
+            exe_dir / 'bin' / 'ViGEmClient.dll',
+            exe_dir / 'ViGEmClient.dll',
+        ])
     except Exception:
         pass
+    try:
+        import struct
+        import vgamepad  # type: ignore
+        vg_root = Path(vgamepad.__file__).resolve().parent
+        arch_dir = 'x64' if struct.calcsize('P') * 8 == 64 else 'x86'
+        arch_dll = vg_root / 'win' / 'vigem' / 'client' / arch_dir / 'ViGEmClient.dll'
+        if arch_dll.is_file():
+            candidates.insert(0, arch_dll)
+        for dll in vg_root.rglob('ViGEmClient.dll'):
+            if dll not in candidates:
+                candidates.append(dll)
+    except Exception:
+        pass
+    candidates.append(
+        Path(os.environ.get('ProgramFiles', r'C:\Program Files'))
+        / 'Nefarius Software Solutions' / 'ViGEm Bus Driver' / 'ViGEmClient.dll'
+    )
     for c in candidates:
         if c.is_file():
             _VIGEM_CACHE['found_path'] = str(c)
@@ -357,21 +410,36 @@ def _find_vigem_dll() -> Optional[str]:
 
 
 def virtual_gamepad_backend_available() -> bool:
-    """Return True if a system virtual gamepad backend (ViGEmBus on Windows or VirtualHID socket on macOS) is present."""
+    """Return True if a system virtual gamepad backend (ViGEmBus + ViGEmClient.dll on Windows or VirtualHID socket on macOS) is present."""
     sock_path = os.environ.get('GPS_MAC_VIRTUAL_PAD_SOCKET', '').strip()
     if sock_path and Path(sock_path).exists():
         return True
+    env_path = os.environ.get('VIGEM_CLIENT_DLL', '').strip()
+    if env_path and Path(env_path).is_file():
+        return True
     if sys.platform == 'win32':
-        env_path = os.environ.get('VIGEM_CLIENT_DLL', '').strip()
-        if env_path and Path(env_path).is_file():
-            return True
-        vigem_bus_sys = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'drivers' / 'ViGEmBus.sys'
-        if vigem_bus_sys.is_file():
-            return True
         dll_candidate = _find_vigem_dll()
-        if dll_candidate and dll_candidate != 'ViGEmClient.dll' and Path(dll_candidate).is_file():
-            return True
+        has_dll = bool(dll_candidate and (dll_candidate == 'ViGEmClient.dll' or Path(dll_candidate).is_file()))
+        return bool(is_vigembus_driver_installed() and has_dll)
     return False
+
+
+def vigembus_status_summary() -> dict[str, Any]:
+    """Return structured diagnostic status for the virtual gamepad backend."""
+    sock_path = os.environ.get('GPS_MAC_VIRTUAL_PAD_SOCKET', '').strip()
+    mac_socket_ready = bool(sock_path and Path(sock_path).exists())
+    dll_path = _find_vigem_dll()
+    dll_available = bool(dll_path and (dll_path == 'ViGEmClient.dll' or Path(dll_path).is_file()))
+    driver_installed = is_vigembus_driver_installed() if sys.platform == 'win32' else mac_socket_ready
+    ready = virtual_gamepad_backend_available()
+    return {
+        'platform': sys.platform,
+        'driver_installed': driver_installed,
+        'dll_available': dll_available,
+        'dll_path': dll_path,
+        'ready': ready,
+        'release_url': VIGEMBUS_RELEASE_URL,
+    }
 
 
 _NOTIFICATION_CB_TYPE = C.CFUNCTYPE(

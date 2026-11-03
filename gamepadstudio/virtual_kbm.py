@@ -230,13 +230,16 @@ class VirtualMouseThread(threading.Thread):
         
         # 物理动力学参数
         self.deadzone = 0.06
+        self.anti_deadzone = 0.0
         self.sensitivity = 28.0
         self.y_ratio = 0.70
         self.edge_boost = 1.70
         self.invert_y = False
         self.gyro_enabled = False
         self.gyro_sensitivity = 18.0
+        self.gyro_sensitivity_y = 18.0
         self.gyro_invert_y = False
+        self.gyro_output_mode = "mouse"
         
         # 亚像素积分累加器
         self.acc_x = 0.0
@@ -248,17 +251,30 @@ class VirtualMouseThread(threading.Thread):
     def configure(self, settings: Dict[str, Any]):
         settings = settings if isinstance(settings, dict) else {}
         with self._lock:
-            values = (settings.get("deadzone", 0.06), settings.get("sensitivity", 28.0),
+            try:
+                anti_dz = max(0.0, min(0.25, float(settings.get("anti_deadzone", 0.0))))
+            except (TypeError, ValueError):
+                anti_dz = 0.0
+            values = (settings.get("deadzone", 0.06), anti_dz, settings.get("sensitivity", 28.0),
                       settings.get("y_ratio", 0.70), settings.get("edge_boost", 1.70),
                       settings.get("invert_y") is True)
-            previous = (self.deadzone, self.sensitivity, self.y_ratio, self.edge_boost, self.invert_y)
-            self.deadzone, self.sensitivity, self.y_ratio, self.edge_boost, self.invert_y = values
+            previous = (self.deadzone, self.anti_deadzone, self.sensitivity, self.y_ratio, self.edge_boost, self.invert_y)
+            self.deadzone, self.anti_deadzone, self.sensitivity, self.y_ratio, self.edge_boost, self.invert_y = values
             self.gyro_enabled = bool(settings.get("gyro_enabled", False))
             try:
                 self.gyro_sensitivity = max(1.0, min(100.0, float(settings.get("gyro_sensitivity", 18.0))))
             except (TypeError, ValueError):
                 self.gyro_sensitivity = 18.0
+            try:
+                raw_sens_y = settings.get("gyro_sensitivity_y", self.gyro_sensitivity)
+                self.gyro_sensitivity_y = max(1.0, min(100.0, float(
+                    self.gyro_sensitivity if raw_sens_y is None else raw_sens_y
+                )))
+            except (TypeError, ValueError):
+                self.gyro_sensitivity_y = self.gyro_sensitivity
             self.gyro_invert_y = bool(settings.get("gyro_invert_y", False))
+            mode = settings.get("gyro_output_mode", "mouse")
+            self.gyro_output_mode = mode if mode in ("mouse", "right_stick") else "mouse"
             if values != previous:
                 self._reset_motion()
 
@@ -339,6 +355,8 @@ class VirtualMouseThread(threading.Thread):
 
                     if mag > self.deadzone:
                         norm = min(1.0, (mag - self.deadzone) / (1.0 - self.deadzone))
+                        if self.anti_deadzone > 0.0:
+                            norm = min(1.0, self.anti_deadzone + (1.0 - self.anti_deadzone) * norm)
                         if norm >= 0.88:
                             self.outer_hold_time = min(0.30, self.outer_hold_time + dt)
                         else:
@@ -357,9 +375,9 @@ class VirtualMouseThread(threading.Thread):
                         stick_vx = 0.0
                         stick_vy = 0.0
 
-                    if self.gyro_enabled:
+                    if self.gyro_enabled and self.gyro_output_mode != "right_stick":
                         gyro_vx = (-self.gyro_yaw - self.gyro_roll) * (self.gyro_sensitivity * 60.0)
-                        gyro_vy = (1.0 if self.gyro_invert_y else -1.0) * self.gyro_pitch * (self.gyro_sensitivity * 60.0)
+                        gyro_vy = (1.0 if self.gyro_invert_y else -1.0) * self.gyro_pitch * (self.gyro_sensitivity_y * 60.0)
                     else:
                         gyro_vx = 0.0
                         gyro_vy = 0.0

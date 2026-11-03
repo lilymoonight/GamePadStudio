@@ -556,6 +556,11 @@ class Studio(GlassWindow):
         profile_actions.addWidget(button(tr('恢复默认'), self.reset_profile, icon='refresh'))
         self.mapping_more_button = button(tr('更多设置'), lambda: None)
         mapping_more = QMenu(self.mapping_more_button)
+        self.swap_ab_xy_action = mapping_more.addAction(
+            tr('Switch / Xbox 布局互换 (A↔B, X↔Y)'),
+            self.swap_ab_xy_layout,
+        )
+        mapping_more.addSeparator()
         self.application_profiles_action = mapping_more.addAction(tr('应用关联'), self.open_application_profiles)
         mapping_more.addAction(tr('设为手动预设'), lambda: self.change_profile(self.current_gamepad_profile()))
         mapping_more.addSeparator()
@@ -706,9 +711,14 @@ class Studio(GlassWindow):
         self.clean_captures_btn.setObjectName('icon_danger')
         self.clean_captures_btn.setStyleSheet(f'background: {TOKENS["elevated"]}; border: 1px solid {TOKENS["border_hi"]}; border-radius: {TOKENS["r_sm"]}px;')
 
+        self.organize_sidecars_btn = button(tr('收纳伴生 JSON'), self.organize_capture_sidecars_action)
+        self.organize_sidecars_btn.setFixedHeight(32)
+        self.organize_sidecars_btn.setToolTip(tr('将散落的 .json 伴生文件自动内嵌至 PNG 或收纳到隐藏的 .metadata 文件夹中'))
+
         bar.addWidget(self.only_favorites)
         bar.addWidget(folder_btn)
         bar.addWidget(self.clean_captures_btn)
+        bar.addWidget(self.organize_sidecars_btn)
         bar.addStretch()
 
         self.gallery_info = label('', 'muted')
@@ -809,6 +819,28 @@ class Studio(GlassWindow):
         finally:
             if self.remote:
                 self.client.send('suspend', seconds=2 if QApplication.activeModalWidget() is not None else 0)
+
+    def swap_ab_xy_layout(self, profile=None):
+        if not self.snapshot:
+            self.notify(tr('请先连接手柄'))
+            return False
+        target = profile or self.current_gamepad_profile()
+        if target not in self.store.profiles_for(self.snapshot):
+            self.notify(tr('输入设备已变化，请重新打开映射编辑。'))
+            return False
+        if self.remote and not self.client.connected:
+            self.notify(tr('后台未连接，修改尚未保存'))
+            return False
+        self.end_learning()
+        ok = self.mapping_change({'op': 'swap_ab_xy', 'profile': target})
+        if ok:
+            entries = effective_mappings(self.config, self.snapshot, target)
+            a_short = entries.get('0', {}).get('short', {})
+            if a_short.get('action') == 'gamepad_button' and a_short.get('value') == '1':
+                self.notify(tr('已切换为 A↔B / X↔Y 互换布局'))
+            else:
+                self.notify(tr('已恢复 A/B/X/Y 默认原始布局'))
+        return ok
 
     def build_settings(self):
         page = QWidget()
@@ -1197,6 +1229,13 @@ class Studio(GlassWindow):
             'shield', (TOKENS['amber'], TOKENS['orange']), tr('紧急暂停'),
             tr('使用物理键盘暂停当前映射') if emergency_hotkey_supported() else tr('当前平台不支持全局紧急快捷键，请使用窗口中的暂停按钮'), self.emergency_hotkey_button)
         background.add_row(self.emergency_hotkey_row)
+
+        self.vigembus_button = button(tr('下载驱动'), self.open_vigembus_download, pill=True)
+        self.vigembus_row = AppleRow(
+            'controller', (TOKENS['cyan'], TOKENS['accent_lo']), tr('虚拟手柄驱动 (ViGEmBus)'),
+            tr('手柄按键互换、手柄连发与重映射所需的系统虚拟手柄驱动'), self.vigembus_button)
+        background.add_row(self.vigembus_row)
+        self.refresh_vigembus_status(force=True)
 
         if sys.platform == 'darwin' and not WINDOWS_FEATURES:
             self.input_permission_button = button(tr('授权辅助功能'), self.authorize_input, pill=True)
@@ -1677,10 +1716,10 @@ class Studio(GlassWindow):
         hw_info = identify_controller_hardware(state, trigger_async=False) if state else {}
         tp_brand = (state.get('brand') if state else '') or hw_info.get('brand', '')
         is_third_party = bool(state and tp_brand in THIRD_PARTY_BRANDS)
-        if is_third_party:
-            paddles_count = int(state.get('back_paddles') or hw_info.get('back_paddles') or 0)
-            if paddles_count > 0 and not state.get('back_paddles'):
-                state = dict(state, back_paddles=paddles_count)
+        paddles_count = int((state.get('back_paddles') if state else 0) or hw_info.get('back_paddles') or 0)
+        if state and paddles_count > 0 and not state.get('back_paddles'):
+            state = dict(state, back_paddles=paddles_count)
+        if is_third_party or (state and int(state.get('product') or 0) in (0x0DF2, 0x02E3, 0x0B00, 0x0B05, 0x0B22)):
             title = state.get('model') or hw_info.get('display_name') or state.get('name') or CATALOG[family]['name']
         else:
             title = (state.get('name') or CATALOG[family]['name']) if state else tr('通用 XInput')
@@ -2175,6 +2214,7 @@ class Studio(GlassWindow):
             self.refresh_screenshot_hotkey_status()
             self.refresh_controller_isolation()
             self.refresh_input_permission_status()
+            self.refresh_vigembus_status()
             if connected != self.previous_connected:
                 self.engine.reset(); self.actions.release_all(); self.last_touch=None
                 self.previous_connected=connected
@@ -2271,7 +2311,21 @@ class Studio(GlassWindow):
                 self.engine.reset()
                 self.last_touch=None
             if new:
-                self.notify(tr('按下 ') + ' / '.join(self.button_names.get(k,str(k)) for k in sorted(new)))
+                active_entries = effective_mappings(self.config, state)
+                fam = (state or {}).get('family', 'generic')
+                parts = []
+                for k in sorted(new):
+                    btn_name = self.button_names.get(k, str(k))
+                    short_spec = active_entries.get(str(k), {}).get('short', {})
+                    if short_spec.get('action', 'none') not in ('none', 'suppress'):
+                        parts.append(f"{btn_name} → {self.compact_binding(short_spec, fam)}")
+                    else:
+                        parts.append(btn_name)
+                summary = tr('按下 ') + ' / '.join(parts)
+                self.notify(summary)
+                if not events:
+                    self.mapping_feedback.setText(summary)
+                    self.home_input_feedback.setText(summary)
         except Exception as exc:
             self.enabled=False
             try: self.engine.reset(); self.actions.release_all()
@@ -2479,6 +2533,40 @@ class Studio(GlassWindow):
         self.screen_permission_row.subtitle_label.setToolTip(screen.get('reason', ''))
         self.screen_permission_button.setText(tr('打开系统设置') if screen_granted else tr('授权屏幕录制'))
         self.screen_permission_button.setToolTip(tr('权限变更后可能需要重新启动后台服务'))
+
+    def refresh_vigembus_status(self, force=False):
+        if not hasattr(self, 'vigembus_row'):
+            return
+        now = time.monotonic()
+        if not force and now - getattr(self, '_last_vigembus_check', -float('inf')) < 2.0:
+            return
+        self._last_vigembus_check = now
+        from .virtual_xinput import vigembus_status_summary
+        status = vigembus_status_summary()
+        if status['ready']:
+            self.vigembus_row.subtitle_label.setText(
+                tr('已就绪 · 支持手柄按键互换 (A↔B/X↔Y)、手柄连发与虚拟 XInput 重映射'))
+            self.vigembus_button.setText(tr('已就绪'))
+            self.vigembus_button.setToolTip(tr('虚拟手柄后端已就绪，点击可查看状态说明'))
+        elif sys.platform == 'win32' or WINDOWS_FEATURES:
+            self.vigembus_row.subtitle_label.setText(
+                tr('未检测到 ViGEmBus 驱动 · 手柄按键互换与手柄连发需先安装此驱动'))
+            self.vigembus_button.setText(tr('下载驱动'))
+            self.vigembus_button.setToolTip(status['release_url'])
+        else:
+            self.vigembus_row.subtitle_label.setText(
+                tr('手柄按键互换与手柄连发需系统虚拟手柄驱动支持（Windows 需安装 ViGEmBus）'))
+            self.vigembus_button.setText(tr('驱动说明'))
+            self.vigembus_button.setToolTip(status['release_url'])
+
+    def open_vigembus_download(self):
+        from .virtual_xinput import VIGEMBUS_RELEASE_URL, vigembus_status_summary
+        status = vigembus_status_summary()
+        if status['ready']:
+            self.notify(tr('虚拟手柄驱动 (ViGEmBus) 已就绪，手柄按键互换与连发功能已自动激活'))
+            return
+        QDesktopServices.openUrl(QUrl(VIGEMBUS_RELEASE_URL))
+        self.notify(tr('已在浏览器打开 ViGEmBus 官方驱动下载页，安装后重启软件即可生效'))
 
     def authorize_input(self):
         self.request_macos_permission(request_input_permission, ACCESSIBILITY_SETTINGS_URL)
@@ -2873,7 +2961,7 @@ class Studio(GlassWindow):
         try:
             if self.remote:
                 context = {'device_scope': profile_scope(self.snapshot)}
-                if change.get('op') in ('import_profile', 'pointer_deadzone', 'swap_bindings'):
+                if change.get('op') in ('import_profile', 'pointer_deadzone', 'swap_bindings', 'swap_ab_xy'):
                     context['instance_id'] = (self.snapshot or {}).get('instance_id')
                 result = request(self.store.root, 'mapping_change', change=change, **context)
                 if not result or not result.get('ok', True) or 'config' not in result:
@@ -2925,13 +3013,17 @@ class Studio(GlassWindow):
         if capture:
             dialog.start_capture()
         if dialog.exec() == QDialog.Accepted:
-            self.mapping_change({
+            trig = dialog.trigger()
+            change_payload = {
                 'op': 'binding',
                 'profile': dialog.profile,
-                'trigger': dialog.trigger(),
+                'trigger': trig,
                 'previous_trigger': None if new else str(key),
-                'mapping': dialog.value()
-            })
+                'mapping': dialog.value(),
+            }
+            if str(key) in ('16', '17', '18', '19') or any(p in ('16', '17', '18', '19') for p in str(trig).split('+')):
+                change_payload['allow_back_paddles'] = True
+            self.mapping_change(change_payload)
         dialog.deleteLater()
         if self.remote:
             self.client.send('suspend', seconds=2 if QApplication.activeModalWidget() is not None else 0)
@@ -3162,7 +3254,22 @@ class Studio(GlassWindow):
             self.notify(tr('已清理 {count} 张未收藏截图', count=count))
 
     def open_capture_folder(self):
-        folder=Path(self.config['save_dir']); folder.mkdir(parents=True,exist_ok=True); QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        from .screenshot_service import organize_capture_sidecars
+        folder=Path(self.config['save_dir']); folder.mkdir(parents=True,exist_ok=True)
+        organize_capture_sidecars(folder)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def organize_capture_sidecars_action(self):
+        from .screenshot_service import organize_capture_sidecars
+        folder = Path(self.config['save_dir'])
+        folder.mkdir(parents=True, exist_ok=True)
+        moved = organize_capture_sidecars(folder)
+        self.gallery_signature = None
+        self.refresh_gallery()
+        if moved > 0:
+            self.notify(tr('已自动收纳或内嵌 {count} 个伴生 JSON 文件').format(count=moved))
+        else:
+            self.notify(tr('当前截图目录已保持整洁，无散落伴生 JSON 文件'))
 
     def choose_folder(self):
         path=QFileDialog.getExistingDirectory(self,tr('截图保存位置'),self.config['save_dir'])

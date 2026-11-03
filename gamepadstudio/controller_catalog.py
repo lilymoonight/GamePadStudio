@@ -49,16 +49,24 @@ def get_catalog_entry(family, lang=None):
 
 
 def family_for(controller_type=0, vendor=0, product=0, name=''):
-    # Recognize third-party controllers (GameSir, Flydigi, 8BitDo, Beitong, etc.) before SDL's generic XInput type=1/2.
+    # Recognize third-party controllers and known Sony/Nintendo/Google hardware before SDL's generic XInput type=1/2.
     from .device_quirks import (
+        COMMON_CONTROLLER_MODELS,
         THIRD_PARTY_BRANDS,
         VENDOR_BRAND_NAMES,
         detect_third_party_brand_and_model_from_name,
         lookup_controller_family,
     )
     vid = int(vendor or 0)
+    pid = int(product or 0)
+    if (vid, pid) in COMMON_CONTROLLER_MODELS and COMMON_CONTROLLER_MODELS[(vid, pid)].get('family') != 'xbox':
+        return COMMON_CONTROLLER_MODELS[(vid, pid)]['family']
     if (vid in VENDOR_BRAND_NAMES and VENDOR_BRAND_NAMES[vid] in THIRD_PARTY_BRANDS) or detect_third_party_brand_and_model_from_name(name):
         return lookup_controller_family(vendor, product, name)
+    if vid in (0x054C, 0x057E, 0x18D1) and (pid or name):
+        resolved = lookup_controller_family(vendor, product, name)
+        if resolved != 'generic':
+            return resolved
     known={1:'xbox',2:'xbox',4:'dualshock4',5:'switch',6:'flightstick',7:'dualsense'}
     if controller_type in known:return known[controller_type]
     return lookup_controller_family(vendor, product, name)

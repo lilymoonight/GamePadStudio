@@ -428,7 +428,7 @@ class Agent(QObject):
                        message['change'].get('op') == 'pointer_deadzone')
         swapping = (command == 'mapping_change' and
                     isinstance(message.get('change'), dict) and
-                    message['change'].get('op') == 'swap_bindings')
+                    message['change'].get('op') in ('swap_bindings', 'swap_ab_xy'))
         if swapping:
             if (not self.state or self.state.get('connected') is False
                     or type(self.state.get('instance_id')) is not int or self.state['instance_id'] < 0):

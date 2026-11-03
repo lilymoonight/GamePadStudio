@@ -11,6 +11,7 @@ import tempfile
 from .controller_catalog import CATALOG
 from .mapping_engine import GAMEPAD_TARGETS, canonical_trigger, input_sources, validate_mappings
 from .schema_registry import (
+    GYRO_OUTPUT_MODES,
     GYRO_TRIGGERS,
     HOLD_MODES,
     INPUT_OPTION_FIELDS,
@@ -158,6 +159,10 @@ def _options(value):
             if type(mouse['gyro_trigger']) is not str or mouse['gyro_trigger'] not in GYRO_TRIGGERS:
                 raise ValueError('陀螺仪激活条件不受支持')
             normalized['gyro_trigger'] = mouse['gyro_trigger']
+        if 'gyro_output_mode' in mouse:
+            if type(mouse['gyro_output_mode']) is not str or mouse['gyro_output_mode'] not in GYRO_OUTPUT_MODES:
+                raise ValueError('陀螺仪输出模式应为鼠标或虚拟右摇杆')
+            normalized['gyro_output_mode'] = mouse['gyro_output_mode']
         for key, (low, high) in MOUSE_NUMERIC_RANGES.items():
             if key in mouse:
                 normalized[key] = _number(mouse[key], low, high)

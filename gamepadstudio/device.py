@@ -231,6 +231,8 @@ class Device:
                     pass
             controller_type=self.lib.SDL_GameControllerTypeForIndex(i) if is_gamecontroller else 0
             display_name = hw_info.get('display_name') or hw_info.get('model') or name
+            if vendor == 0x054C and product == 0x0DF2 and 'edge' not in display_name.lower():
+                display_name = 'DualSense Edge Wireless Controller'
             family=family_for(controller_type,vendor,product,display_name)
             model_key=f'{family}:{vendor:04x}:{product:04x}:{guid}'
             device_key=self._device_key(model_key, instance, path=path)
@@ -265,7 +267,17 @@ class Device:
         if self.handle and not is_attached:
             self.close_handle()
         if not self.handle:
-            for row in sorted(self.available,key=lambda r:self.preferred_key not in (r['profile_key'], r.get('device_key'))):
+            has_non_x360 = any(
+                r.get('supported', True) and (r.get('vendor'), r.get('product')) != (0x045E, 0x028E)
+                for r in self.available
+            )
+            for row in sorted(
+                self.available,
+                key=lambda r: (
+                    self.preferred_key not in (r['profile_key'], r.get('device_key')),
+                    has_non_x360 and (r.get('vendor'), r.get('product')) == (0x045E, 0x028E),
+                ),
+            ):
                 if row.get('supported', True):
                     try:self.select(row['instance_id']);break
                     except RuntimeError as exc:self.error=str(exc)
@@ -487,6 +499,10 @@ class Device:
         display_name = self.metadata.get('name') or gc_name
         vendor_val = self.metadata.get('vendor') or self.lib.SDL_GameControllerGetVendor(h)
         product_val = self.metadata.get('product') or self.lib.SDL_GameControllerGetProduct(h)
+        if vendor_val == 0x054C and product_val == 0x0DF2:
+            if 'edge' not in display_name.lower():
+                display_name = 'DualSense Edge Wireless Controller'
+            pressed_buttons = [19 if b == 16 else (16 if b == 19 else b) for b in pressed_buttons]
         return {**self.metadata,'name': display_name,
                 'buttons': pressed_buttons,
                 'axes': [self.lib.SDL_GameControllerGetAxis(h, i) / 32768 for i in range(6)],

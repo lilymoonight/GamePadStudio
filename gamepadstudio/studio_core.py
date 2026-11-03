@@ -104,6 +104,23 @@ def swap_binding_entry(config, state, profile, trigger):
     return result
 
 
+def resolve_swapped_entry(target_trigger, source_trigger, source_entry, mode='kbm'):
+    """Resolve one side of a binding swap, materializing implicit gamepad pass-through in gamepad mode."""
+    from .mapping_engine import GAMEPAD_TARGETS
+    result = copy.deepcopy(source_entry)
+    if target_trigger in ('TP:scroll_up', 'TP:scroll_down') and result['short'].get('action') == 'none':
+        result['short']['action'] = 'suppress'
+        return result
+    if (mode == 'gamepad' and target_trigger in GAMEPAD_TARGETS
+            and source_trigger in GAMEPAD_TARGETS and target_trigger != source_trigger):
+        short_action = result['short'].get('action', 'none')
+        if short_action == 'none':
+            result['short'] = {'action': 'gamepad_button', 'value': source_trigger}
+        elif short_action == 'gamepad_button' and result['short'].get('value') == target_trigger:
+            result['short'] = {'action': 'none'}
+    return result
+
+
 def device_config(config, state):
     """Resolve hardware preferences without borrowing another controller's values."""
     resolved = dict(config)
@@ -1071,12 +1088,48 @@ class ConfigStore:
             raise ValueError('绑定或长按设置已变化，请重新打开交换绑定')
         # Explicitly save both sides, including empty entries, so a device's
         # implicit default cannot reappear after it has been moved elsewhere.
-        swapped = validate_mappings({first: before_second, second: before_first})
+        mode = profile_mode(staged, name)
+        after_first = resolve_swapped_entry(first, second, before_second, mode=mode)
+        after_second = resolve_swapped_entry(second, first, before_first, mode=mode)
+        swapped = validate_mappings({first: after_first, second: after_second})
         for key, entry in swapped.items():
             if key in ('TP:scroll_up', 'TP:scroll_down') and entry['short'].get('action') == 'none':
                 # Scroll's runtime default deliberately falls back for "none";
                 # an explicit empty side of this exchange must suppress it.
                 entry['short']['action'] = 'suppress'
+        staged['profiles'][name].update(swapped)
+        staged['mapping_revision'] = staged.get('mapping_revision', 0) + 1
+        before, baseline = copy.deepcopy(self.data), copy.deepcopy(getattr(self, '_baseline', None))
+        self.data.clear(); self.data.update(staged)
+        try:
+            self.save(merge=False)
+        except Exception:
+            self.data.clear(); self.data.update(before)
+            if baseline is not None:
+                self._baseline = baseline
+            raise
+        return copy.deepcopy(self.data)
+
+    def _swap_ab_xy(self, change, state):
+        """Atomically exchange A↔B ('0'↔'1') and X↔Y ('2'↔'3') in a gamepad profile."""
+        from .mapping_engine import validate_mappings
+        mapping_input_signature(state)
+        staged = copy.deepcopy(self.data)
+        if self.path.exists():
+            staged = json.loads(self.path.read_text(encoding='utf-8'))
+            if not isinstance(staged, dict) or not isinstance(staged.get('profiles'), dict):
+                raise ValueError('当前配置无法读取，请重新打开软件')
+        name = change.get('profile')
+        if not isinstance(name, str) or name not in staged['profiles']:
+            raise ValueError('请选择当前手柄的预设')
+        mode = profile_mode(staged, name)
+        updates = {}
+        for first, second in (('0', '1'), ('2', '3')):
+            before_first = swap_binding_entry(staged, state, name, first)
+            before_second = swap_binding_entry(staged, state, name, second)
+            updates[first] = resolve_swapped_entry(first, second, before_second, mode=mode)
+            updates[second] = resolve_swapped_entry(second, first, before_first, mode=mode)
+        swapped = validate_mappings(updates)
         staged['profiles'][name].update(swapped)
         staged['mapping_revision'] = staged.get('mapping_revision', 0) + 1
         before, baseline = copy.deepcopy(self.data), copy.deepcopy(getattr(self, '_baseline', None))
@@ -1099,6 +1152,8 @@ class ConfigStore:
             return self._apply_pointer_deadzone(change, state)
         if op == 'swap_bindings':
             return self._swap_bindings(change, state)
+        if op == 'swap_ab_xy':
+            return self._swap_ab_xy(change, state)
         if op == 'application_profiles':
             if not state:
                 raise ValueError('请先连接手柄，再设置应用关联')
@@ -1116,7 +1171,10 @@ class ConfigStore:
             raise ValueError('该预设不属于当前输入设备')
         if op == 'binding':
             key = canonical_trigger(change['trigger'])
-            if not set(key.split('+')) <= set(input_sources(state)):
+            allowed_inputs = set(input_sources(state))
+            if change.get('allow_back_paddles'):
+                allowed_inputs |= {'16', '17', '18', '19'}
+            if not set(key.split('+')) <= allowed_inputs:
                 raise ValueError('请选择当前手柄支持的输入按键')
             mapping = validate_mappings({key: change['mapping']})[key]
             previous = change.get('previous_trigger')
@@ -1176,12 +1234,25 @@ class ConfigStore:
                 if 'stick_source' in mouse and (
                         type(mouse['stick_source']) is not str or mouse['stick_source'] not in ('right', 'left')):
                     raise ValueError('鼠标控制摇杆应为右摇杆或左摇杆')
+                if 'gyro_output_mode' in mouse and (
+                        type(mouse['gyro_output_mode']) is not str
+                        or mouse['gyro_output_mode'] not in ('mouse', 'right_stick')):
+                    raise ValueError('陀螺仪输出模式应为鼠标或虚拟右摇杆')
             opts = copy.deepcopy(change['options'])
             if 'stick_mouse_enabled' in opts and 'right_stick_mouse' not in opts:
                 opts['right_stick_mouse'] = opts['stick_mouse_enabled']
             elif 'right_stick_mouse' in opts and 'stick_mouse_enabled' not in opts:
                 opts['stick_mouse_enabled'] = opts['right_stick_mouse']
             self.data['profile_options'].setdefault(name, {}).update(opts)
+        elif op == 'clear_all':
+            current_mappings = self.data.get('profiles', {}).get(name, {})
+            cleared = {}
+            for trigger, entry in current_mappings.items():
+                item = {'short': {'action': 'none'}, 'long': {'action': 'none'}}
+                if isinstance(entry, dict) and 'long_press' in entry:
+                    item['long_press'] = entry['long_press']
+                cleared[trigger] = item
+            self.data.setdefault('profiles', {})[name] = cleared
         elif op == 'delete':
             if self.delete_profile(name, state) is None:
                 raise ValueError('至少保留一个预设')
@@ -1282,9 +1353,13 @@ def merge_changes(base, edited, latest):
 from .mapping_engine import GestureEngine
 
 
-def radial_deadzone(x, y, deadzone):
+def radial_deadzone(x, y, deadzone, anti_deadzone=0.0):
     magnitude = (x*x + y*y) ** .5
     if magnitude <= deadzone:
         return 0., 0.
-    gain = min(1., (magnitude - deadzone) / (1 - deadzone)) / magnitude
+    norm = min(1., (magnitude - deadzone) / max(1e-6, 1 - deadzone))
+    anti = max(0., min(0.25, float(anti_deadzone or 0.0)))
+    if anti > 0.:
+        norm = min(1., anti + (1. - anti) * norm)
+    gain = norm / magnitude
     return x * gain, y * gain

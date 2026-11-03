@@ -947,7 +947,14 @@ class MappingRuntime:
                     self._hold(nxt['binding'], True)
                     runner['is_down'] = True
                     runner['next_time'] += nxt['hold_s']
-        self._update_virtual_xinput_state(state, regular_mappings)
+        gyro_enabled = bool(mouse_opts.get('gyro_enabled', False))
+        gyro_trigger = mouse_opts.get('gyro_trigger', 'LT')
+        trigger_active = (gyro_trigger in ('', 'always') or
+                          gyro_trigger in self.inputs or
+                          ALIASES.get(gyro_trigger.upper()) in self.inputs)
+        gyro_active = bool(owns_profile and gyro_enabled and not self.preview and trigger_active)
+        gyro_output_mode = mouse_opts.get('gyro_output_mode', 'mouse')
+        self._update_virtual_xinput_state(state, regular_mappings, mouse_opts=mouse_opts, gyro_active=gyro_active)
         touch = self.touch_recognizer.update(state, self.now, config)
         self.touch_activity = {'contacts': touch['contacts'], 'mode': touch['mode']}
         if config.get('touch_gestures_enabled'):
@@ -980,20 +987,16 @@ class MappingRuntime:
             self.mouse_thread.set_click_lock(any(n for k, n in self.output_counts.items() if k.startswith('mouse:')))
 
             if hasattr(self.mouse_thread, 'update_gyro'):
-                gyro_enabled = bool(mouse_opts.get('gyro_enabled', False))
-                gyro_trigger = mouse_opts.get('gyro_trigger', 'LT')
-                trigger_active = (gyro_trigger in ('', 'always') or
-                                  gyro_trigger in self.inputs or
-                                  ALIASES.get(gyro_trigger.upper()) in self.inputs)
-                gyro_active = owns_profile and gyro_enabled and not self.preview and trigger_active
                 gyro_data = state.get('gyro', [])
-                if gyro_active and len(gyro_data) >= 3:
+                if gyro_active and gyro_output_mode != 'right_stick' and len(gyro_data) >= 3:
                     self.mouse_thread.update_gyro(*gyro_data[:3])
                 else:
                     self.mouse_thread.update_gyro(0.0, 0.0, 0.0)
 
-    def _update_virtual_xinput_state(self, state, regular_mappings):
+    def _update_virtual_xinput_state(self, state, regular_mappings, mouse_opts=None, gyro_active=False):
         from .virtual_xinput import XUSB_BUTTON_MASKS, compose_xusb_report
+        from .studio_core import radial_deadzone
+        mouse_opts = mouse_opts if isinstance(mouse_opts, dict) else {}
         intercepted = set()
         for trig_key, entry in (regular_mappings or {}).items():
             if not isinstance(entry, dict):
@@ -1015,14 +1018,47 @@ class MappingRuntime:
             if cnt > 0 and tok.startswith('pad:')
         }
         combined = passthrough | emitted
-        _, snap = compose_xusb_report(combined, (state or {}).get('axes', ()))
+        axes_out = list((state or {}).get('axes', ()))
+        try:
+            anti_dz = max(0.0, min(0.25, float(mouse_opts.get('anti_deadzone', 0.0) or 0.0)))
+        except (TypeError, ValueError):
+            anti_dz = 0.0
+        if anti_dz > 0.0 and len(axes_out) >= 2:
+            while len(axes_out) < 4:
+                axes_out.append(0.0)
+            axes_out[0], axes_out[1] = radial_deadzone(float(axes_out[0]), float(axes_out[1]), 0.02, anti_dz)
+            axes_out[2], axes_out[3] = radial_deadzone(float(axes_out[2]), float(axes_out[3]), 0.02, anti_dz)
+        gyro_output_mode = mouse_opts.get('gyro_output_mode', 'mouse')
+        gyro_data = (state or {}).get('gyro', ())
+        gyro_rs_active = bool(gyro_active and gyro_output_mode == 'right_stick' and len(gyro_data) >= 3)
+        if gyro_rs_active:
+            while len(axes_out) < 4:
+                axes_out.append(0.0)
+            try:
+                sens_x = max(1.0, min(100.0, float(mouse_opts.get('gyro_sensitivity', 18.0))))
+            except (TypeError, ValueError):
+                sens_x = 18.0
+            try:
+                raw_sy = mouse_opts.get('gyro_sensitivity_y', sens_x)
+                sens_y = max(1.0, min(100.0, float(sens_x if raw_sy is None else raw_sy)))
+            except (TypeError, ValueError):
+                sens_y = sens_x
+            inv_y = bool(mouse_opts.get('gyro_invert_y', False))
+            pitch, yaw, roll = float(gyro_data[0]), float(gyro_data[1]), float(gyro_data[2])
+            gx = (-yaw - roll) * (sens_x / 36.0)
+            gy = (1.0 if inv_y else -1.0) * pitch * (sens_y / 36.0)
+            axes_out[2] = max(-1.0, min(1.0, float(axes_out[2]) + gx))
+            axes_out[3] = max(-1.0, min(1.0, float(axes_out[3]) + gy))
+        _, snap = compose_xusb_report(combined, axes_out)
         snap['passthrough_buttons'] = sorted(passthrough)
         snap['emitted_buttons'] = sorted(emitted)
         snap['intercepted_buttons'] = sorted(intercepted & self.inputs)
+        snap['gyro_output_mode'] = gyro_output_mode if gyro_output_mode in ('mouse', 'right_stick') else 'mouse'
+        snap['gyro_right_stick_active'] = gyro_rs_active
         self.virtual_xinput_state = snap
         if hasattr(self.actions, 'sync_virtual_gamepad'):
             try:
-                self.actions.sync_virtual_gamepad(buttons=combined, axes=(state or {}).get('axes', ()))
+                self.actions.sync_virtual_gamepad(buttons=combined, axes=axes_out)
             except Exception:
                 pass
 

@@ -35,19 +35,24 @@ GYRO_TRIGGERS = (
 
 DEFAULT_GYRO_SENSITIVITY = 18.0
 DEFAULT_GYRO_TRIGGER = 'LT'
+DEFAULT_GYRO_OUTPUT_MODE = 'mouse'
+DEFAULT_ANTI_DEADZONE = 0.0
 DEFAULT_STICK_SOURCE = 'right'
 DEFAULT_TURBO_RATE = 15
+GYRO_OUTPUT_MODES = ('mouse', 'right_stick')
 
 MOUSE_NUMERIC_RANGES = {
     'sensitivity': (1.0, 100.0),
     'deadzone': (0.01, 0.50),
+    'anti_deadzone': (0.0, 0.25),
     'y_ratio': (0.1, 2.0),
     'edge_boost': (1.0, 3.0),
     'gyro_sensitivity': (1.0, 100.0),
+    'gyro_sensitivity_y': (1.0, 100.0),
 }
 MOUSE_BOOL_FIELDS = {'invert_y', 'gyro_enabled', 'gyro_invert_y'}
 MOUSE_OPTION_FIELDS = (
     set(MOUSE_NUMERIC_RANGES)
     | MOUSE_BOOL_FIELDS
-    | {'mode', 'stick_source', 'gyro_trigger'}
+    | {'mode', 'stick_source', 'gyro_trigger', 'gyro_output_mode'}
 )
