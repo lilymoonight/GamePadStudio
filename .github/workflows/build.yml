@@ -17,6 +17,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-macos:
     name: Build macOS (.dmg & .zip)
@@ -89,6 +93,7 @@ jobs:
       SDL_VIDEODRIVER: dummy
       SDL_AUDIODRIVER: dummy
       PYGAME_HIDE_SUPPORT_PROMPT: "1"
+      VGAMEPAD_SKIP_VIGEMBUS_INSTALL: "true"
 
     steps:
       - name: Checkout repository
