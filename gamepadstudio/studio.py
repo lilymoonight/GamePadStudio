@@ -2214,7 +2214,8 @@ class Studio(GlassWindow):
             self.refresh_screenshot_hotkey_status()
             self.refresh_controller_isolation()
             self.refresh_input_permission_status()
-            self.refresh_vigembus_status()
+            if hasattr(self, 'refresh_vigembus_status'):
+                self.refresh_vigembus_status()
             if connected != self.previous_connected:
                 self.engine.reset(); self.actions.release_all(); self.last_touch=None
                 self.previous_connected=connected
@@ -2313,12 +2314,13 @@ class Studio(GlassWindow):
             if new:
                 active_entries = effective_mappings(self.config, state)
                 fam = (state or {}).get('family', 'generic')
+                compact = getattr(self, 'compact_binding', Studio.compact_binding)
                 parts = []
                 for k in sorted(new):
                     btn_name = self.button_names.get(k, str(k))
                     short_spec = active_entries.get(str(k), {}).get('short', {})
                     if short_spec.get('action', 'none') not in ('none', 'suppress'):
-                        parts.append(f"{btn_name} → {self.compact_binding(short_spec, fam)}")
+                        parts.append(f"{btn_name} → {compact(short_spec, fam)}")
                     else:
                         parts.append(btn_name)
                 summary = tr('按下 ') + ' / '.join(parts)
