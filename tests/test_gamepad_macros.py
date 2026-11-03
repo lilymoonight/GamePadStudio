@@ -95,12 +95,15 @@ def test_gamepad_target_selector_ui(tmp_path):
     selector.set_mode('turbo')
     selector.turbo_spin.setValue(18)
     assert selector.get_turbo_rate() == 18
+    selector.deleteLater()
+    app.processEvents()
 
 
 def test_binding_dialog_pure_gamepad_configuration(tmp_path, monkeypatch):
     from gamepadstudio.studio import Studio
     app = QApplication.instance() or QApplication([])
     studio = Studio(tmp_path, standalone=True)
+    dialog = None
     try:
         # Edit button 0 (A / Cross)
         mapping_data = {
@@ -115,8 +118,13 @@ def test_binding_dialog_pure_gamepad_configuration(tmp_path, monkeypatch):
         assert '2' in val['long']['value'] and '3' in val['long']['value']
         assert val['long_press'] == 0.65
     finally:
+        if dialog is not None:
+            dialog.close()
+            dialog.deleteLater()
         studio.cleanup()
         studio.hide()
+        studio.deleteLater()
+        app.processEvents()
 
 
 def test_dropdown_isolation_gamepad_vs_kbm(tmp_path):
@@ -149,6 +157,8 @@ def test_dropdown_isolation_gamepad_vs_kbm(tmp_path):
     finally:
         studio.cleanup()
         studio.hide()
+        studio.deleteLater()
+        app.processEvents()
 
 
 def test_mode_inheritance_on_create_profile(tmp_path):
@@ -174,12 +184,16 @@ def test_mode_inheritance_on_create_profile(tmp_path):
     finally:
         studio.cleanup()
         studio.hide()
+        studio.deleteLater()
+        app.processEvents()
 
 
 def test_kbm_and_gamepad_dialog_modes(tmp_path):
     from gamepadstudio.studio import Studio
     app = QApplication.instance() or QApplication([])
     studio = Studio(tmp_path, standalone=True)
+    g_dialog = None
+    k_dialog = None
     try:
         # Gamepad mode dialog
         g_dialog = BindingDialog(studio, '0', profile=studio.current_gamepad_profile(), mode='gamepad')
@@ -193,5 +207,11 @@ def test_kbm_and_gamepad_dialog_modes(tmp_path):
         assert 'hold' in [k_dialog.action_combos['short'].itemData(i) for i in range(k_dialog.action_combos['short'].count())]
         assert 'gamepad_button' not in [k_dialog.action_combos['short'].itemData(i) for i in range(k_dialog.action_combos['short'].count())]
     finally:
+        for dlg in (g_dialog, k_dialog):
+            if dlg is not None:
+                dlg.close()
+                dlg.deleteLater()
         studio.cleanup()
         studio.hide()
+        studio.deleteLater()
+        app.processEvents()

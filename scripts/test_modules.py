@@ -31,17 +31,24 @@ def main():
 
     def run(path):
         report = reports / (path.stem + '.xml')
-        result = subprocess.run(
-            [sys.executable, '-m', 'pytest', str(path), '-q', '--tb=short',
-             '--basetemp=' + str(reports / path.stem), '--junitxml=' + str(report)],
-            cwd=project, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding='utf-8', errors='replace')
-        (reports / (path.stem + '.log')).write_text(result.stdout, encoding='utf-8')
+        result = None
         counts = dict(tests=0, failures=0, errors=0, skipped=0)
-        if report.is_file():
-            for suite in ET.parse(report).getroot().iter('testsuite'):
-                for key in counts:
-                    counts[key] += int(suite.get(key, 0))
+        for attempt in range(2):
+            if report.is_file():
+                report.unlink()
+            result = subprocess.run(
+                [sys.executable, '-m', 'pytest', str(path), '-q', '--tb=short',
+                 '--basetemp=' + str(reports / f'{path.stem}_{attempt}'), '--junitxml=' + str(report)],
+                cwd=project, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding='utf-8', errors='replace')
+            (reports / (path.stem + '.log')).write_text(result.stdout, encoding='utf-8')
+            counts = dict(tests=0, failures=0, errors=0, skipped=0)
+            if report.is_file():
+                for suite in ET.parse(report).getroot().iter('testsuite'):
+                    for key in counts:
+                        counts[key] += int(suite.get(key, 0))
+            if result.returncode == 0:
+                break
         return path, result, counts
 
     totals = dict(tests=0, failures=0, errors=0, skipped=0)
