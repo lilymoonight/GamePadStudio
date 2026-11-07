@@ -17,24 +17,33 @@ if not os.path.isfile(ffmpeg_binary):
 target_ffmpeg_name = 'bin/ffmpeg.exe' if sys.platform == 'win32' else 'bin/ffmpeg'
 added_binaries = [(ffmpeg_binary, 'bin')] if os.path.exists(ffmpeg_binary) else []
 if sys.platform == 'win32':
-    vigem_candidates = [os.path.join('gamepadstudio', 'bin', 'ViGEmClient.dll')]
+    vigem_candidates = [
+        os.path.join('gamepadstudio', 'bin', 'ViGEmClient.dll'),
+        os.path.join('gamepadstudio', 'assets', 'ViGEmClient.dll'),
+    ]
     try:
+        import importlib.util
         import struct
-        import vgamepad
-        vg_dir = os.path.dirname(os.path.abspath(vgamepad.__file__))
-        arch_dir = 'x64' if struct.calcsize('P') * 8 == 64 else 'x86'
-        vigem_candidates.append(os.path.join(vg_dir, 'win', 'vigem', 'client', arch_dir, 'ViGEmClient.dll'))
-        for root_dir, _, files in os.walk(vg_dir):
-            if 'ViGEmClient.dll' in files:
-                vigem_candidates.append(os.path.join(root_dir, 'ViGEmClient.dll'))
-        added_files.extend(collect_data_files('vgamepad'))
+        spec = importlib.util.find_spec('vgamepad')
+        if spec and spec.submodule_search_locations:
+            vg_dir = spec.submodule_search_locations[0]
+            arch_dir = 'x64' if struct.calcsize('P') * 8 == 64 else 'x86'
+            vigem_candidates.append(os.path.join(vg_dir, 'win', 'vigem', 'client', arch_dir, 'ViGEmClient.dll'))
+            for root_dir, _, files in os.walk(vg_dir):
+                if 'ViGEmClient.dll' in files:
+                    vigem_candidates.append(os.path.join(root_dir, 'ViGEmClient.dll'))
     except Exception:
         pass
+    bundled_vigem = False
     for vigem_dll in vigem_candidates:
         if os.path.isfile(vigem_dll):
             added_binaries.append((vigem_dll, 'gamepadstudio/bin'))
             added_binaries.append((vigem_dll, 'bin'))
+            added_binaries.append((vigem_dll, '.'))
+            bundled_vigem = True
             break
+    if not bundled_vigem:
+        raise RuntimeError('ViGEmClient.dll could not be located for Windows build.')
 if sys.platform == 'darwin':
     capture_helper = 'bin/gps-mac-capture'
     if not os.path.isfile(capture_helper):

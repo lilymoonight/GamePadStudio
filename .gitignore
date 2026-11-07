@@ -50,7 +50,9 @@ studio-data/
 Captures/
 *.log
 *.mp4
-bin/
+/bin/
+!gamepadstudio/bin/
+!gamepadstudio/bin/**
 .tools/
 tools/bilibili/
 docs/avatars/

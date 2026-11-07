@@ -315,7 +315,40 @@ VIGEMBUS_RELEASE_URL = 'https://github.com/nefarius/ViGEmBus/releases/latest'
 _VIGEM_CACHE: dict[str, Any] = {
     'found_path': None,
     'failed_until': 0.0,
+    'driver_connected': False,
 }
+
+
+def _probe_vigembus_connection(dll_path: Optional[str]) -> bool:
+    """Attempt a lightweight `vigem_connect` handshake via `ViGEmClient.dll` to verify the ViGEmBus driver is active."""
+    if not dll_path or sys.platform != 'win32':
+        return False
+    if _VIGEM_CACHE.get('driver_connected'):
+        return True
+    try:
+        lib = C.CDLL(dll_path)
+        lib.vigem_alloc.argtypes = []
+        lib.vigem_alloc.restype = C.c_void_p
+        lib.vigem_free.argtypes = [C.c_void_p]
+        lib.vigem_free.restype = None
+        lib.vigem_connect.argtypes = [C.c_void_p]
+        lib.vigem_connect.restype = C.c_uint32
+        lib.vigem_disconnect.argtypes = [C.c_void_p]
+        lib.vigem_disconnect.restype = None
+        client = lib.vigem_alloc()
+        if not client:
+            return False
+        try:
+            err = lib.vigem_connect(client)
+            if err == VIGEM_ERROR_NONE:
+                lib.vigem_disconnect(client)
+                _VIGEM_CACHE['driver_connected'] = True
+                return True
+        finally:
+            lib.vigem_free(client)
+    except Exception:
+        pass
+    return False
 
 
 def is_vigembus_driver_installed() -> bool:
@@ -327,18 +360,37 @@ def is_vigembus_driver_installed() -> bool:
         return False
     if sys.platform != 'win32':
         return False
-    vigem_bus_sys = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'drivers' / 'ViGEmBus.sys'
-    if vigem_bus_sys.is_file():
+    if _VIGEM_CACHE.get('driver_connected'):
         return True
+    sys_root = Path(os.environ.get('SystemRoot', r'C:\Windows'))
+    for rel in (
+        Path('System32') / 'drivers' / 'ViGEmBus.sys',
+        Path('Sysnative') / 'drivers' / 'ViGEmBus.sys',
+    ):
+        if (sys_root / rel).is_file():
+            return True
+    for pf_env, pf_default in (('ProgramFiles', r'C:\Program Files'), ('ProgramFiles(x86)', r'C:\Program Files (x86)')):
+        pf_dir = Path(os.environ.get(pf_env, pf_default)) / 'Nefarius Software Solutions' / 'ViGEm Bus Driver'
+        if pf_dir.is_dir():
+            return True
     try:
         import winreg
-        with winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE,
+        for subkey in (
             r'SYSTEM\CurrentControlSet\Services\ViGEmBus',
+            r'SOFTWARE\Nefarius Software Solutions e.U.\ViGEm Bus Driver',
+            r'SOFTWARE\WOW6432Node\Nefarius Software Solutions e.U.\ViGEm Bus Driver',
         ):
-            return True
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, subkey, 0, winreg.KEY_READ):
+                    return True
+            except Exception:
+                continue
     except Exception:
-        return False
+        pass
+    dll_path = _find_vigem_dll()
+    if dll_path and _probe_vigembus_connection(dll_path):
+        return True
+    return False
 
 
 def _find_vigem_dll() -> Optional[str]:
@@ -356,6 +408,7 @@ def _find_vigem_dll() -> Optional[str]:
     pkg_dir = Path(__file__).resolve().parent
     candidates = [
         pkg_dir / 'bin' / 'ViGEmClient.dll',
+        pkg_dir / 'assets' / 'ViGEmClient.dll',
         pkg_dir / 'ViGEmClient.dll',
     ]
     meipass = getattr(sys, '_MEIPASS', None)
@@ -363,6 +416,7 @@ def _find_vigem_dll() -> Optional[str]:
         mp = Path(meipass)
         candidates.extend([
             mp / 'gamepadstudio' / 'bin' / 'ViGEmClient.dll',
+            mp / 'gamepadstudio' / 'assets' / 'ViGEmClient.dll',
             mp / 'bin' / 'ViGEmClient.dll',
             mp / 'ViGEmClient.dll',
         ])
@@ -370,23 +424,27 @@ def _find_vigem_dll() -> Optional[str]:
         exe_dir = Path(sys.executable).resolve().parent
         candidates.extend([
             exe_dir / '_internal' / 'gamepadstudio' / 'bin' / 'ViGEmClient.dll',
+            exe_dir / '_internal' / 'gamepadstudio' / 'assets' / 'ViGEmClient.dll',
             exe_dir / '_internal' / 'bin' / 'ViGEmClient.dll',
+            exe_dir / '_internal' / 'ViGEmClient.dll',
             exe_dir / 'bin' / 'ViGEmClient.dll',
             exe_dir / 'ViGEmClient.dll',
         ])
     except Exception:
         pass
     try:
+        import importlib.util
         import struct
-        import vgamepad  # type: ignore
-        vg_root = Path(vgamepad.__file__).resolve().parent
-        arch_dir = 'x64' if struct.calcsize('P') * 8 == 64 else 'x86'
-        arch_dll = vg_root / 'win' / 'vigem' / 'client' / arch_dir / 'ViGEmClient.dll'
-        if arch_dll.is_file():
-            candidates.insert(0, arch_dll)
-        for dll in vg_root.rglob('ViGEmClient.dll'):
-            if dll not in candidates:
-                candidates.append(dll)
+        spec = importlib.util.find_spec('vgamepad')
+        if spec and spec.submodule_search_locations:
+            vg_root = Path(spec.submodule_search_locations[0]).resolve()
+            arch_dir = 'x64' if struct.calcsize('P') * 8 == 64 else 'x86'
+            arch_dll = vg_root / 'win' / 'vigem' / 'client' / arch_dir / 'ViGEmClient.dll'
+            if arch_dll.is_file():
+                candidates.insert(0, arch_dll)
+            for dll in vg_root.rglob('ViGEmClient.dll'):
+                if dll not in candidates:
+                    candidates.append(dll)
     except Exception:
         pass
     candidates.append(

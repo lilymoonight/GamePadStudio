@@ -2562,7 +2562,9 @@ class Studio(GlassWindow):
             self.vigembus_button.setToolTip(status['release_url'])
 
     def open_vigembus_download(self):
-        from .virtual_xinput import VIGEMBUS_RELEASE_URL, vigembus_status_summary
+        from .virtual_xinput import VIGEMBUS_RELEASE_URL, _VIGEM_CACHE, vigembus_status_summary
+        _VIGEM_CACHE['failed_until'] = 0.0
+        self.refresh_vigembus_status(force=True)
         status = vigembus_status_summary()
         if status['ready']:
             self.notify(tr('虚拟手柄驱动 (ViGEmBus) 已就绪，手柄按键互换与连发功能已自动激活'))
