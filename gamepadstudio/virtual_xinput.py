@@ -510,6 +510,9 @@ _NOTIFICATION_CB_TYPE = C.CFUNCTYPE(
     C.c_void_p,  # user_data
 )
 
+_VIRTUAL_HID_INSTANCES: set[str] = set()
+_ACTIVE_VIRTUAL_PADS: set[int] = set()
+
 
 class VirtualXInputPad:
     """Manages a unified Virtual XInput / HID controller across Windows (`ViGEmClient`) and macOS (`Darwin` IPC/Bridge)."""
@@ -592,6 +595,13 @@ class VirtualXInputPad:
             if lib is None:
                 return False
             try:
+                before_instances: set[str] = set()
+                if sys.platform == 'win32':
+                    try:
+                        from .hidhide import find_hid_instances
+                        before_instances = {p.upper() for p in find_hid_instances(0x045E, 0x028E, include_virtual=True)}
+                    except Exception:
+                        before_instances = set()
                 client = lib.vigem_alloc()
                 if not client:
                     return False
@@ -613,6 +623,14 @@ class VirtualXInputPad:
                 self._client = client
                 self._target = target
                 self._connected = True
+                _ACTIVE_VIRTUAL_PADS.add(id(self))
+                if sys.platform == 'win32':
+                    try:
+                        from .hidhide import find_hid_instances
+                        after_instances = {p.upper() for p in find_hid_instances(0x045E, 0x028E, include_virtual=True)}
+                        _VIRTUAL_HID_INSTANCES.update(after_instances - before_instances)
+                    except Exception:
+                        pass
                 if self._rumble_callback is not None:
                     self._bind_notification()
                 return True
@@ -658,6 +676,7 @@ class VirtualXInputPad:
         buttons: Iterable[Any] = (),
         axes: Iterable[float] = (),
         trigger_overrides: Optional[dict[str, float]] = None,
+        auto_connect: bool = True,
     ) -> dict[str, Any]:
         """Compose and transmit an `XUSB_REPORT` + `HID_GAMEPAD_REPORT` frame to the virtual controller."""
         with self._lock:
@@ -682,7 +701,7 @@ class VirtualXInputPad:
                 except Exception:
                     pass
 
-            if not self.is_connected:
+            if not self.is_connected and auto_connect:
                 self.connect()
             if self._sock is not None:
                 try:
@@ -699,7 +718,7 @@ class VirtualXInputPad:
     def reset(self) -> dict[str, Any]:
         with self._lock:
             self._last_share_down = False
-            return self.emit_frame(buttons=(), axes=())
+            return self.emit_frame(buttons=(), axes=(), auto_connect=False)
 
     def close(self) -> None:
         with self._lock:
@@ -736,6 +755,9 @@ class VirtualXInputPad:
                 except Exception:
                     pass
                 self._sock = None
+            _ACTIVE_VIRTUAL_PADS.discard(id(self))
+            if not _ACTIVE_VIRTUAL_PADS:
+                _VIRTUAL_HID_INSTANCES.clear()
             self._target = None
             self._client = None
             self._connected = False

@@ -1301,6 +1301,10 @@ class VirtualKbmPage(QWidget):
         self.application_profiles_action.setToolTip('' if application_profiles_supported() else tr('当前平台不支持应用关联'))
         more_menu.addAction(tr('设为手动预设'), lambda: owner.change_profile(self.current_scheme()))
         self.swap_bindings_action = more_menu.addAction(tr('交换绑定'), self.swap_bindings)
+        self.swap_ab_xy_action = more_menu.addAction(
+            tr('Switch / Xbox 布局互换 (A↔B, X↔Y)'),
+            lambda: getattr(owner, 'swap_ab_xy_layout', lambda profile=None: None)(self.current_scheme()),
+        )
         self.scene_templates_menu = more_menu.addMenu(tr('常用玩法一键套用'))
         self.scene_template_actions = {}
         for tpl_id, tpl_title in (
@@ -2123,6 +2127,8 @@ class VirtualKbmPage(QWidget):
         if hasattr(self.owner, '_cloaked_devices'):
             self.owner._cloaked_devices.clear()
         self.owner.setting('device_cloaking_enabled', False)
+        if hasattr(self.owner, 'refresh_hidhide_status'):
+            self.owner.refresh_hidhide_status(force=True)
         self.refresh_cloaking_status()
         self.cloaking_status_label.setText(text)
 
@@ -2151,5 +2157,7 @@ class VirtualKbmPage(QWidget):
                 self.owner._cloaked_devices.add(key)
             else:
                 self.owner._cloaked_devices.discard(key)
+        if hasattr(self.owner, 'refresh_hidhide_status'):
+            self.owner.refresh_hidhide_status(force=True)
         self.refresh_cloaking_status()
         self.cloaking_status_label.setText(text)

@@ -954,7 +954,26 @@ class MappingRuntime:
                           ALIASES.get(gyro_trigger.upper()) in self.inputs)
         gyro_active = bool(owns_profile and gyro_enabled and not self.preview and trigger_active)
         gyro_output_mode = mouse_opts.get('gyro_output_mode', 'mouse')
-        self._update_virtual_xinput_state(state, regular_mappings, mouse_opts=mouse_opts, gyro_active=gyro_active)
+        from .studio_core import profile_mode
+        active_mode = profile_mode(config, config.get('active_profile', ''))
+        has_gamepad_remap = bool(owns_profile and any(
+            isinstance(entry, dict) and any(
+                str(entry.get(g, {}).get('action', 'none')).startswith('gamepad_')
+                or (
+                    entry.get(g, {}).get('action') == 'macro_sequence'
+                    and any(str(s.get('action', '')).startswith('gamepad_') for s in entry.get(g, {}).get('steps', ()))
+                )
+                for g in GESTURES
+            )
+            for entry in (regular_mappings or {}).values()
+        ))
+        self._update_virtual_xinput_state(
+            state,
+            regular_mappings,
+            mouse_opts=mouse_opts,
+            gyro_active=gyro_active,
+            sync_hardware=(not self.preview) and (has_gamepad_remap or active_mode == 'gamepad' and bool(mouse_opts.get('anti_deadzone', 0.0))),
+        )
         touch = self.touch_recognizer.update(state, self.now, config)
         self.touch_activity = {'contacts': touch['contacts'], 'mode': touch['mode']}
         if config.get('touch_gestures_enabled'):
@@ -993,7 +1012,7 @@ class MappingRuntime:
                 else:
                     self.mouse_thread.update_gyro(0.0, 0.0, 0.0)
 
-    def _update_virtual_xinput_state(self, state, regular_mappings, mouse_opts=None, gyro_active=False):
+    def _update_virtual_xinput_state(self, state, regular_mappings, mouse_opts=None, gyro_active=False, sync_hardware=True):
         from .virtual_xinput import XUSB_BUTTON_MASKS, compose_xusb_report
         from .studio_core import radial_deadzone
         mouse_opts = mouse_opts if isinstance(mouse_opts, dict) else {}
@@ -1056,11 +1075,20 @@ class MappingRuntime:
         snap['gyro_output_mode'] = gyro_output_mode if gyro_output_mode in ('mouse', 'right_stick') else 'mouse'
         snap['gyro_right_stick_active'] = gyro_rs_active
         self.virtual_xinput_state = snap
+        should_sync = bool(sync_hardware or ((not self.preview) and (bool(emitted) or gyro_rs_active)))
+        was_syncing = bool(getattr(self, '_virtual_pad_was_syncing', False))
+        self._virtual_pad_was_syncing = should_sync
         if hasattr(self.actions, 'sync_virtual_gamepad'):
-            try:
-                self.actions.sync_virtual_gamepad(buttons=combined, axes=axes_out)
-            except Exception:
-                pass
+            if should_sync:
+                try:
+                    self.actions.sync_virtual_gamepad(buttons=combined, axes=axes_out)
+                except Exception:
+                    pass
+            elif was_syncing:
+                try:
+                    self.actions.sync_virtual_gamepad(buttons=(), axes=())
+                except Exception:
+                    pass
 
     def feedback(self):
         return {'preview': self.preview, 'inputs': sorted(self.inputs), 'active': list(self.engine.pressed),

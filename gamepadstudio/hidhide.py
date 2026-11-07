@@ -71,7 +71,11 @@ def dos_to_nt_path(dos_path: str) -> str:
     return dos_path
 
 
-def find_hid_instances(vendor: Optional[int] = None, product: Optional[int] = None) -> List[str]:
+def find_hid_instances(
+    vendor: Optional[int] = None,
+    product: Optional[int] = None,
+    include_virtual: bool = False,
+) -> List[str]:
     """
     根据 VID 与 PID，从 Windows 注册表枚举当前系统的 HID 设备实例路径 (Device Instance Path)
     例如：'HID\\VID_054C&PID_0CE6&REV_0100\\7&1A2B3C4D&0&0000'
@@ -116,6 +120,20 @@ def find_hid_instances(vendor: Optional[int] = None, product: Optional[int] = No
                     pass
     except Exception:
         pass
+    if not include_virtual and found:
+        try:
+            from .virtual_xinput import _ACTIVE_VIRTUAL_PADS, _VIRTUAL_HID_INSTANCES
+            if _VIRTUAL_HID_INSTANCES:
+                found = [item for item in found if item.upper() not in _VIRTUAL_HID_INSTANCES]
+            if is_xbox_synthetic and _ACTIVE_VIRTUAL_PADS:
+                non_virtual_xbox = [
+                    item for item in found
+                    if "PID_028E" not in item.upper() and "PID&028E" not in item.upper()
+                ]
+                if non_virtual_xbox:
+                    found = non_virtual_xbox
+        except Exception:
+            pass
     return found
 
 
@@ -129,7 +147,28 @@ def selected_device_instances(vendor, product, device_path=None):
         normalized = normalized.removeprefix('\\\\?\\')
         normalized = normalized.split('\\{', 1)[0]
         exact = [item for item in candidates if item.upper() == normalized]
-        return exact
+        if exact:
+            return exact
+        norm_parts = [p for p in normalized.split('\\') if p]
+        if len(norm_parts) >= 3:
+            norm_inst = norm_parts[2]
+            by_inst = [
+                item for item in candidates
+                if len(item.split('\\')) >= 3 and item.split('\\')[2].upper() == norm_inst
+            ]
+            if by_inst:
+                return by_inst
+            if '&' in norm_inst:
+                parent_prefix = norm_inst.rsplit('&', 1)[0] + '&'
+                by_parent = [
+                    item for item in candidates
+                    if len(item.split('\\')) >= 3 and item.split('\\')[2].upper().startswith(parent_prefix)
+                ]
+                if by_parent:
+                    return by_parent
+        if not normalized.startswith('HID\\') and len(candidates) == 1:
+            return candidates
+        return []
     # Legacy drivers can omit an interface path. A single match is unambiguous.
     return candidates if len(candidates) == 1 else []
 

@@ -560,6 +560,10 @@ class Studio(GlassWindow):
             tr('Switch / Xbox 布局互换 (A↔B, X↔Y)'),
             self.swap_ab_xy_layout,
         )
+        self.mapping_cloaking_action = mapping_more.addAction(
+            tr('设备隐身 (屏蔽原始输入)'),
+            lambda: self.virtual_kbm_page.open_cloaking(),
+        )
         mapping_more.addSeparator()
         self.application_profiles_action = mapping_more.addAction(tr('应用关联'), self.open_application_profiles)
         mapping_more.addAction(tr('设为手动预设'), lambda: self.change_profile(self.current_gamepad_profile()))
@@ -832,12 +836,36 @@ class Studio(GlassWindow):
             self.notify(tr('后台未连接，修改尚未保存'))
             return False
         self.end_learning()
+        if profile is None and target and self.config.get('active_profile') != target:
+            self.change_profile(target)
         ok = self.mapping_change({'op': 'swap_ab_xy', 'profile': target})
         if ok:
             entries = effective_mappings(self.config, self.snapshot, target)
             a_short = entries.get('0', {}).get('short', {})
-            if a_short.get('action') == 'gamepad_button' and a_short.get('value') == '1':
-                self.notify(tr('已切换为 A↔B / X↔Y 互换布局'))
+            is_swapped = (
+                (a_short.get('action') == 'gamepad_button' and a_short.get('value') == '1')
+                or (
+                    a_short.get('action') not in ('none', 'suppress', '')
+                    and entries.get('1', {}).get('short', {}).get('action') not in ('none', 'suppress', '')
+                    and a_short != entries.get('1', {}).get('short', {})
+                )
+            )
+            if is_swapped:
+                msg = tr('已切换为 A↔B / X↔Y 互换布局')
+                if sys.platform == 'win32' or WINDOWS_FEATURES:
+                    try:
+                        from .hidhide import HidHideClient
+                        hh = HidHideClient()
+                        if hh.is_driver_installed():
+                            if not self.config.get('device_cloaking_enabled'):
+                                self.setting('device_cloaking_enabled', True)
+                                self.apply_device_cloaking(self.snapshot)
+                            msg = tr('已切换为 A↔B / X↔Y 互换布局 · 已开启设备隐身（若游戏已运行，请重插一次手柄生效）')
+                        else:
+                            msg = tr('已切换为 A↔B / X↔Y 互换布局 · 提示：Windows 下需安装 HidHide 并开启「设备隐身」屏蔽原始输入，否则游戏仍会收到原始 A 键')
+                    except Exception:
+                        pass
+                self.notify(msg)
             else:
                 self.notify(tr('已恢复 A/B/X/Y 默认原始布局'))
         return ok
@@ -1236,6 +1264,13 @@ class Studio(GlassWindow):
             tr('手柄按键互换、手柄连发与重映射所需的系统虚拟手柄驱动'), self.vigembus_button)
         background.add_row(self.vigembus_row)
         self.refresh_vigembus_status(force=True)
+
+        self.hidhide_button = button(tr('隐身设置'), self.open_hidhide_settings, pill=True)
+        self.hidhide_row = AppleRow(
+            'shield', (TOKENS['purple'], TOKENS['accent_lo']), tr('物理手柄原始输入屏蔽 (HidHide)'),
+            tr('虚拟手柄/按键互换(A↔B)时屏蔽物理手柄原始信号，防止游戏同时收到原始 A 键与映射 B 键'), self.hidhide_button)
+        background.add_row(self.hidhide_row)
+        self.refresh_hidhide_status(force=True)
 
         if sys.platform == 'darwin' and not WINDOWS_FEATURES:
             self.input_permission_button = button(tr('授权辅助功能'), self.authorize_input, pill=True)
@@ -2571,6 +2606,50 @@ class Studio(GlassWindow):
             return
         QDesktopServices.openUrl(QUrl(VIGEMBUS_RELEASE_URL))
         self.notify(tr('已在浏览器打开 ViGEmBus 官方驱动下载页，安装后重启软件即可生效'))
+
+    def refresh_hidhide_status(self, force=False):
+        if not hasattr(self, 'hidhide_row'):
+            return
+        now = time.monotonic()
+        if not force and now - getattr(self, '_last_hidhide_check', -float('inf')) < 2.0:
+            return
+        self._last_hidhide_check = now
+        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
+            self.hidhide_row.subtitle_label.setText(
+                tr('macOS 通过系统独占访问隔离手柄原始输入 · 可在「设备隐身」中开启'))
+            self.hidhide_button.setText(tr('隐身设置'))
+            return
+        from .hidhide import HIDHIDE_RELEASE_URL, HidHideClient
+        try:
+            hh = HidHideClient()
+            installed = hh.is_driver_installed()
+            active = bool(installed and hh.is_active())
+        except Exception:
+            installed = False
+            active = False
+        if not installed:
+            self.hidhide_row.subtitle_label.setText(
+                tr('未安装 HidHide · 虚拟手柄与 A↔B 互换需安装此驱动屏蔽原始输入，否则游戏仍会响应原始按键'))
+            self.hidhide_button.setText(tr('下载驱动'))
+            self.hidhide_button.setToolTip(HIDHIDE_RELEASE_URL)
+        elif active or self.config.get('device_cloaking_enabled'):
+            self.hidhide_row.subtitle_label.setText(
+                tr('已开启原始输入屏蔽 · 若游戏已提前打开，请重插一次手柄让游戏释放旧连接'))
+            self.hidhide_button.setText(tr('隐身设置'))
+            self.hidhide_button.setToolTip(tr('打开设备隐身设置面板'))
+        else:
+            self.hidhide_row.subtitle_label.setText(
+                tr('驱动已安装（当前未开启隐身）· 使用 A↔B 互换或虚拟手柄时请点击开启原始输入屏蔽'))
+            self.hidhide_button.setText(tr('开启隐身'))
+            self.hidhide_button.setToolTip(tr('打开设备隐身设置面板'))
+
+    def open_hidhide_settings(self):
+        self.refresh_hidhide_status(force=True)
+        if (sys.platform == 'win32' or WINDOWS_FEATURES) and hasattr(self, 'virtual_kbm_page'):
+            self.virtual_kbm_page.open_cloaking()
+            return
+        if hasattr(self, 'virtual_kbm_page'):
+            self.virtual_kbm_page.open_cloaking()
 
     def authorize_input(self):
         self.request_macos_permission(request_input_permission, ACCESSIBILITY_SETTINGS_URL)

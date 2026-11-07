@@ -505,3 +505,26 @@ def test_vigembus_status_summary_and_env_overrides(monkeypatch, tmp_path):
     assert summary['dll_available'] is True
     assert summary['ready'] is True
     assert 'ViGEmBus' in summary['release_url']
+
+
+def test_virtual_pad_reset_does_not_auto_connect_and_unmapped_kbm_skips_hardware_sync(swap_store):
+    from gamepadstudio.virtual_xinput import VirtualXInputPad
+    from unittest.mock import MagicMock
+
+    fake_lib = MagicMock()
+    pad = VirtualXInputPad(lib=fake_lib)
+    pad.reset()
+    assert pad.is_connected is False
+    fake_lib.vigem_alloc.assert_not_called()
+
+    store, state, kbm_profile = swap_store
+    store.data['active_profile'] = kbm_profile
+    # Replace gamepad_macro/gamepad_turbo test fixtures with pure KBM bindings
+    store.data['profiles'][kbm_profile]['0'] = {'short': {'action': 'hold', 'value': 'Space'}, 'long': {'action': 'none'}}
+    store.data['profiles'][kbm_profile]['1'] = {'short': {'action': 'hold', 'value': 'Q'}, 'long': {'action': 'none'}}
+    actions = Actions()
+    sync_calls = []
+    actions.sync_virtual_gamepad = lambda buttons=None, axes=None: sync_calls.append((set(buttons or ()), list(axes or ())))
+    runtime = MappingRuntime(actions, lambda b, down=True: None, start_mouse=False)
+    runtime.update(dict(state, buttons=[0], axes=[0.0] * 6), store.data, enabled=True, now=1.0)
+    assert sync_calls == []

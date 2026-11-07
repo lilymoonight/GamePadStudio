@@ -640,3 +640,24 @@ def test_entry_uncloak_all_cli(monkeypatch, capsys):
         data = json.loads(captured.out)
         assert data['ok'] is True
         assert '已恢复所有手柄共享访问' in data['message']
+
+
+def test_selected_device_instances_matches_composite_and_xinput_paths(monkeypatch):
+    from gamepadstudio.hidhide import selected_device_instances
+    # SDL on Windows often reports synthetic PID_02FD or &IG_00 while registry has PID_0B13 or no &IG_00
+    reg_pad = r'HID\VID_045E&PID_0B13&IG_00\7&1A2B3C4D&0&0000'
+    monkeypatch.setattr(
+        'gamepadstudio.hidhide.find_hid_instances',
+        lambda vendor, product, include_virtual=False: [reg_pad],
+    )
+    # 1. Different hardware segment (synthetic PID_02FD vs PID_0B13), same instance_id
+    sdl_path_1 = r'\\?\hid#vid_045e&pid_02fd#7&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}'
+    assert selected_device_instances(0x045E, 0x02FD, sdl_path_1) == [reg_pad]
+
+    # 2. USB composite path sharing parent prefix 7&1A2B3C4D&0&
+    sdl_path_2 = r'\\?\hid#vid_045e&pid_0b13&mi_00#7&1a2b3c4d&0&0001#{4d1e55b2-f16f-11cf-88cb-001111000030}'
+    assert selected_device_instances(0x045E, 0x0B13, sdl_path_2) == [reg_pad]
+
+    # 3. Raw USB\... path from XInput / GIP when single physical candidate exists
+    sdl_usb_path = r'\\?\usb#vid_045e&pid_028e#1234567#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}'
+    assert selected_device_instances(0x045E, 0x028E, sdl_usb_path) == [reg_pad]
