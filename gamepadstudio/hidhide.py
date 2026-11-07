@@ -71,6 +71,58 @@ def dos_to_nt_path(dos_path: str) -> str:
     return dos_path
 
 
+def _get_present_hid_instance_ids() -> set[str]:
+    """Query SetupAPI on Windows for currently connected (DIGCF_PRESENT) HID Device Instance IDs."""
+    if sys.platform != 'win32':
+        return set()
+    present: set[str] = set()
+    try:
+        setupapi = C.WinDLL('setupapi', use_last_error=True)
+        DIGCF_PRESENT = 0x00000002
+        DIGCF_ALLCLASSES = 0x00000004
+
+        class SP_DEVINFO_DATA(C.Structure):
+            _fields_ = [
+                ('cbSize', W.DWORD),
+                ('ClassGuid', C.c_byte * 16),
+                ('DevInst', W.DWORD),
+                ('Reserved', C.c_void_p),
+            ]
+
+        setupapi.SetupDiGetClassDevsW.argtypes = [C.c_void_p, W.LPCWSTR, W.HWND, W.DWORD]
+        setupapi.SetupDiGetClassDevsW.restype = C.c_void_p
+        setupapi.SetupDiEnumDeviceInfo.argtypes = [C.c_void_p, W.DWORD, C.POINTER(SP_DEVINFO_DATA)]
+        setupapi.SetupDiEnumDeviceInfo.restype = W.BOOL
+        setupapi.SetupDiGetDeviceInstanceIdW.argtypes = [
+            C.c_void_p, C.POINTER(SP_DEVINFO_DATA), W.LPWSTR, W.DWORD, C.POINTER(W.DWORD)
+        ]
+        setupapi.SetupDiGetDeviceInstanceIdW.restype = W.BOOL
+        setupapi.SetupDiDestroyDeviceInfoList.argtypes = [C.c_void_p]
+        setupapi.SetupDiDestroyDeviceInfoList.restype = W.BOOL
+
+        for enum_name in ('HID', 'BTHLEDevice'):
+            hdev = setupapi.SetupDiGetClassDevsW(None, enum_name, None, DIGCF_PRESENT | DIGCF_ALLCLASSES)
+            if not hdev or hdev in (-1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF):
+                continue
+            try:
+                idx = 0
+                info = SP_DEVINFO_DATA()
+                info.cbSize = C.sizeof(SP_DEVINFO_DATA)
+                buf = C.create_unicode_buffer(512)
+                req = W.DWORD(0)
+                while setupapi.SetupDiEnumDeviceInfo(hdev, idx, C.byref(info)):
+                    idx += 1
+                    if setupapi.SetupDiGetDeviceInstanceIdW(hdev, C.byref(info), buf, 512, C.byref(req)):
+                        val = buf.value.strip().upper()
+                        if val:
+                            present.add(val)
+            finally:
+                setupapi.SetupDiDestroyDeviceInfoList(hdev)
+    except Exception:
+        return set()
+    return present
+
+
 def find_hid_instances(
     vendor: Optional[int] = None,
     product: Optional[int] = None,
@@ -91,40 +143,58 @@ def find_hid_instances(
     known_mice = {"0932", "082C", "07A5"}
 
     found = []
+    ig_fallback = []
     try:
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Enum\HID") as root:
             n_subkeys = winreg.QueryInfoKey(root)[0]
             for i in range(n_subkeys):
                 hw_name = winreg.EnumKey(root, i)
                 u = hw_name.upper()
+                is_ig_xinput = is_xbox_synthetic and ("&IG_00" in u or "&IG_01" in u)
+                matched = True
                 if v_hex:
                     if not (f"VID_{v_hex}" in u or f"VID&{v_hex}" in u or f"VID&02{v_hex}" in u or f"VID_{vendor:X}" in u):
-                        continue
-                if is_xbox_synthetic:
-                    if any(f"PID_{p}" in u or f"PID&{p}" in u for p in known_mice):
-                        continue
-                    if not any(f"PID_{p}" in u or f"PID&{p}" in u for p in xbox_pids):
-                        continue
-                elif p_hex:
-                    if not (f"PID_{p_hex}" in u or f"PID&{p_hex}" in u or f"PID&02{p_hex}" in u or f"PID_{product:X}" in u):
-                        continue
+                        matched = False
+                if matched:
+                    if is_xbox_synthetic:
+                        if any(f"PID_{p}" in u or f"PID&{p}" in u for p in known_mice):
+                            matched = False
+                        elif not any(f"PID_{p}" in u or f"PID&{p}" in u for p in xbox_pids):
+                            matched = False
+                    elif p_hex:
+                        if not (f"PID_{p_hex}" in u or f"PID&{p_hex}" in u or f"PID&02{p_hex}" in u or f"PID_{product:X}" in u):
+                            matched = False
+                if not matched and not is_ig_xinput:
+                    continue
                 try:
                     with winreg.OpenKey(root, hw_name) as hw_key:
                         n_inst = winreg.QueryInfoKey(hw_key)[0]
                         for j in range(n_inst):
                             inst_id = winreg.EnumKey(hw_key, j)
                             full_path = f"HID\\{hw_name}\\{inst_id}"
-                            if full_path not in found:
-                                found.append(full_path)
+                            if matched:
+                                if full_path not in found:
+                                    found.append(full_path)
+                            elif is_ig_xinput and full_path not in ig_fallback:
+                                ig_fallback.append(full_path)
                 except Exception:
                     pass
     except Exception:
         pass
-    if not include_virtual and found:
+    present_ids = _get_present_hid_instance_ids()
+    if present_ids:
+        present_found = [item for item in found if item.upper() in present_ids]
+        if present_found:
+            found = present_found
+        present_ig = [item for item in ig_fallback if item.upper() in present_ids]
+        if present_ig:
+            ig_fallback = present_ig
+    if not include_virtual:
         try:
             from .virtual_xinput import _ACTIVE_VIRTUAL_PADS, _VIRTUAL_HID_INSTANCES
             if _VIRTUAL_HID_INSTANCES:
                 found = [item for item in found if item.upper() not in _VIRTUAL_HID_INSTANCES]
+                ig_fallback = [item for item in ig_fallback if item.upper() not in _VIRTUAL_HID_INSTANCES]
             if is_xbox_synthetic and _ACTIVE_VIRTUAL_PADS:
                 non_virtual_xbox = [
                     item for item in found
@@ -134,15 +204,47 @@ def find_hid_instances(
                     found = non_virtual_xbox
         except Exception:
             pass
+    if not found and ig_fallback:
+        found = ig_fallback
     return found
+
+
+def _all_candidates_belong_to_single_device(candidates: List[str]) -> bool:
+    if len(candidates) <= 1:
+        return len(candidates) == 1
+    hw_names = set()
+    parent_prefixes = set()
+    for item in candidates:
+        parts = [p for p in item.split('\\') if p]
+        if len(parts) < 3:
+            return False
+        hw_names.add(parts[1].upper())
+        inst = parts[2].upper()
+        if '&' in inst:
+            parent_prefixes.add(inst.rsplit('&', 1)[0])
+        else:
+            parent_prefixes.add(inst)
+    if len(parent_prefixes) == 1 and any('&' in item.split('\\')[2] for item in candidates if len(item.split('\\')) >= 3):
+        return True
+    if len(hw_names) == len(candidates) and len(hw_names) > 1:
+        return True
+    return False
 
 
 def selected_device_instances(vendor, product, device_path=None):
     """Resolve only the selected physical HID, never all pads of its model."""
     if vendor is None or product is None:
         return []
-    candidates = find_hid_instances(vendor, product)
+    candidates = list(find_hid_instances(vendor, product))
     if device_path:
+        import re
+        m = re.search(r'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})', str(device_path), re.IGNORECASE)
+        if m:
+            path_vid, path_pid = int(m.group(1), 16), int(m.group(2), 16)
+            if (path_vid, path_pid) != (vendor, product):
+                for extra in find_hid_instances(path_vid, path_pid):
+                    if extra not in candidates:
+                        candidates.append(extra)
         normalized = str(device_path).upper().replace('#', '\\')
         normalized = normalized.removeprefix('\\\\?\\')
         normalized = normalized.split('\\{', 1)[0]
@@ -166,11 +268,11 @@ def selected_device_instances(vendor, product, device_path=None):
                 ]
                 if by_parent:
                     return by_parent
-        if not normalized.startswith('HID\\') and len(candidates) == 1:
+        if not normalized.startswith('HID\\') and _all_candidates_belong_to_single_device(candidates):
             return candidates
         return []
-    # Legacy drivers can omit an interface path. A single match is unambiguous.
-    return candidates if len(candidates) == 1 else []
+    # Legacy drivers can omit an interface path. A single match (or multiple interfaces of one pad) is unambiguous.
+    return candidates if _all_candidates_belong_to_single_device(candidates) else []
 
 
 def find_all_gamepad_instances() -> List[str]:
@@ -248,6 +350,9 @@ def ensure_current_app_input_access(client=None) -> Tuple[bool, str]:
         return False, '无法登记当前程序的手柄访问权限，已隐身的手柄可能不可见。'
 
 
+_INVALID_HANDLES = {None, 0, -1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF}
+
+
 class HidHideClient:
     """
     HidHide 驱动通信客户端
@@ -255,9 +360,22 @@ class HidHideClient:
     """
     def __init__(self):
         self._kernel32 = None
+        self._cli_active: Optional[bool] = None
+        self._cli_blacklist: List[str] = []
         if sys.platform == 'win32':
             try:
                 self._kernel32 = C.WinDLL('kernel32', use_last_error=True)
+                self._kernel32.CreateFileW.argtypes = [
+                    W.LPCWSTR, W.DWORD, W.DWORD, W.LPVOID, W.DWORD, W.DWORD, W.HANDLE
+                ]
+                self._kernel32.CreateFileW.restype = W.HANDLE
+                self._kernel32.DeviceIoControl.argtypes = [
+                    W.HANDLE, W.DWORD, W.LPVOID, W.DWORD, W.LPVOID, W.DWORD,
+                    C.POINTER(W.DWORD), W.LPVOID
+                ]
+                self._kernel32.DeviceIoControl.restype = W.BOOL
+                self._kernel32.CloseHandle.argtypes = [W.HANDLE]
+                self._kernel32.CloseHandle.restype = W.BOOL
             except Exception:
                 self._kernel32 = None
         try:
@@ -279,10 +397,13 @@ class HidHideClient:
             pass
 
         # 方式 2：尝试打开设备句柄
-        h = self._open_device(read_only=True)
-        if h is not None and h != INVALID_HANDLE_VALUE:
-            self._close_device(h)
-            return True
+        try:
+            h = self._open_device(read_only=True)
+            if h is not None and h not in _INVALID_HANDLES:
+                self._close_device(h)
+                return True
+        except Exception:
+            pass
 
         return False
 
@@ -290,21 +411,24 @@ class HidHideClient:
         if not self._kernel32:
             return None
         access = GENERIC_READ if read_only else (GENERIC_READ | GENERIC_WRITE)
-        h = self._kernel32.CreateFileW(
-            r"\\.\HidHide",
-            access,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            None
-        )
-        if h == INVALID_HANDLE_VALUE or h is None:
+        try:
+            h = self._kernel32.CreateFileW(
+                r"\\.\HidHide",
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None
+            )
+        except Exception:
+            return None
+        if h in _INVALID_HANDLES:
             return None
         return h
 
     def _close_device(self, handle: int):
-        if self._kernel32 and handle and handle != INVALID_HANDLE_VALUE:
+        if self._kernel32 and handle not in _INVALID_HANDLES:
             try:
                 self._kernel32.CloseHandle(handle)
             except Exception:
@@ -321,6 +445,29 @@ class HidHideClient:
             in_len = len(in_bytes)
             if in_len > 0:
                 in_buf = (C.c_char * in_len).from_buffer_copy(in_bytes)
+
+            # HidHide.sys requires querying exact output buffer size first for GET_WHITELIST / GET_BLACKLIST
+            if ioctl_code in (IOCTL_GET_WHITELIST, IOCTL_GET_BLACKLIST) and in_len == 0 and out_size > 0:
+                needed = W.DWORD(0)
+                ok_size = self._kernel32.DeviceIoControl(
+                    h, ioctl_code, None, 0, None, 0, C.byref(needed), None
+                )
+                if ok_size and needed.value > 0:
+                    if needed.value <= 2:
+                        return True, b'\x00\x00\x00\x00'
+                    exact_buf = (C.c_char * needed.value)()
+                    ret_bytes = W.DWORD(0)
+                    ok_data = self._kernel32.DeviceIoControl(
+                        h, ioctl_code, None, 0, exact_buf, needed.value, C.byref(ret_bytes), None
+                    )
+                    if ok_data:
+                        raw = bytes(exact_buf[:ret_bytes.value])
+                        if raw in (b'', b'\x00\x00'):
+                            return True, b'\x00\x00\x00\x00'
+                        return True, raw
+                elif ok_size and needed.value == 0:
+                    # Try standard buffer call in case a mock returned needed=0
+                    pass
 
             out_buf = None
             if out_size > 0:
@@ -339,7 +486,11 @@ class HidHideClient:
             )
             if ok:
                 ret_data = bytes(out_buf[:bytes_returned.value]) if out_buf else b''
+                if ioctl_code in (IOCTL_GET_WHITELIST, IOCTL_GET_BLACKLIST) and ret_data in (b'', b'\x00\x00'):
+                    return True, b'\x00\x00\x00\x00'
                 return True, ret_data
+            return False, b''
+        except Exception:
             return False, b''
         finally:
             self._close_device(h)
@@ -348,13 +499,19 @@ class HidHideClient:
         """获取全局设备隐身功能是否处于激活状态"""
         ok, data = self._send_ioctl(IOCTL_GET_ACTIVE, out_size=1)
         if ok and len(data) >= 1:
-            return bool(data[0])
+            val = bool(data[0])
+            self._cli_active = val
+            return val
+        if self._cli_active is not None:
+            return self._cli_active
         return False
 
     def set_active(self, active: bool) -> bool:
         """开启或关闭全局设备隐身功能"""
         in_byte = b'\x01' if active else b'\x00'
         ok, _ = self._send_ioctl(IOCTL_SET_ACTIVE, in_bytes=in_byte, out_size=0)
+        if ok:
+            self._cli_active = bool(active)
         return ok
 
     def get_whitelist(self) -> List[str]:
@@ -400,41 +557,52 @@ class HidHideClient:
             candidates.append(nt_path)
         return self._append_whitelist_paths(candidates)
 
-    def add_current_app_to_whitelist(self) -> bool:
-        """确保当前运行的 Python 进程及其同伴程序 (python.exe, pythonw.exe 等，包含 venv 与真实基准解释器) 在白名单中 (同时加入 NT 设备路径与 DOS 路径)"""
+    def _current_app_whitelist_candidates(self) -> Tuple[List[str], List[str]]:
         curr_exe = sys.executable
         base_exe = getattr(sys, '_base_executable', curr_exe)
-        paths_to_add = [curr_exe, base_exe]
+        dos_paths: List[str] = []
         for exe in (curr_exe, base_exe):
+            if exe and exe not in dos_paths:
+                dos_paths.append(exe)
             p_obj = Path(exe)
             if 'python' in p_obj.name.lower():
                 pyw = str(p_obj.with_name('pythonw.exe'))
                 py = str(p_obj.with_name('python.exe'))
                 for candidate in (pyw, py):
-                    if os.path.isfile(candidate) and candidate not in paths_to_add:
-                        paths_to_add.append(candidate)
+                    if os.path.isfile(candidate) and candidate not in dos_paths:
+                        dos_paths.append(candidate)
 
-        # 转换为完整候选列表（DOS + NT 路径）
-        full_candidates = []
-        for p in paths_to_add:
-            full_candidates.append(p)
+        full_candidates: List[str] = []
+        for p in dos_paths:
+            if p not in full_candidates:
+                full_candidates.append(p)
             nt_p = dos_to_nt_path(p)
             if nt_p and nt_p not in full_candidates:
                 full_candidates.append(nt_p)
+        return dos_paths, full_candidates
 
+    def add_current_app_to_whitelist(self) -> bool:
+        """确保当前运行的 Python 进程及其同伴程序 (python.exe, pythonw.exe 等，包含 venv 与真实基准解释器) 在白名单中 (同时加入 NT 设备路径与 DOS 路径)"""
+        _, full_candidates = self._current_app_whitelist_candidates()
         return self._append_whitelist_paths(full_candidates)
 
     def get_blacklist(self) -> List[str]:
         """获取当前被屏蔽隐身的外设 Instance ID 列表"""
         ok, data = self._send_ioctl(IOCTL_GET_BLACKLIST, out_size=8192)
         if ok:
-            return decode_multi_sz(data)
+            items = decode_multi_sz(data)
+            self._cli_blacklist = list(items)
+            return items
+        if self._cli_blacklist:
+            return list(self._cli_blacklist)
         return []
 
     def set_blacklist(self, device_instance_ids: List[str]) -> bool:
         """设置被屏蔽隐身的外设列表"""
         payload = encode_multi_sz(device_instance_ids)
         ok, _ = self._send_ioctl(IOCTL_SET_BLACKLIST, in_bytes=payload, out_size=0)
+        if ok:
+            self._cli_blacklist = list(device_instance_ids)
         return ok
 
     def sanitize_blacklist(self) -> bool:
@@ -473,38 +641,67 @@ class HidHideClient:
         direct_ok = False
         try:
             wl_ok = self.add_current_app_to_whitelist()
-            blacklist = self.get_blacklist()
-            for inst in instances:
-                norm_inst = inst.upper()
-                if not any(b.upper() == norm_inst for b in blacklist):
-                    blacklist.append(inst)
-            bl_ok = self.set_blacklist(blacklist)
-            act_ok = self.set_active(True)
-            if wl_ok and bl_ok and act_ok:
-                direct_ok = True
+            if not wl_ok:
+                ok_raw, raw_wl = self._send_ioctl(IOCTL_GET_WHITELIST, out_size=8192)
+                if ok_raw and not decode_multi_sz(raw_wl):
+                    _, full_candidates = self._current_app_whitelist_candidates()
+                    wl_ok = self.set_whitelist(full_candidates)
+            if wl_ok:
+                blacklist = self.get_blacklist()
+                for inst in instances:
+                    norm_inst = inst.upper()
+                    if not any(b.upper() == norm_inst for b in blacklist):
+                        blacklist.append(inst)
+                bl_ok = self.set_blacklist(blacklist)
+                act_ok = self.set_active(True)
+                if bl_ok and act_ok:
+                    direct_ok = True
         except Exception:
             direct_ok = False
 
         if direct_ok:
             return True, f"已成功将 {len(instances)} 个硬件手柄节点屏蔽，对外部游戏完全隐身（请重新拔插一次手柄或重启游戏使其生效）"
 
-        # 若直接通信未成功（非管理员或受系统权限限制），通过 HidHideCLI 进行 UAC 提权代理
+        # 若直接通信未成功（非管理员或受系统权限限制），通过 HidHideCLI 执行
         cli_path = r"C:\Program Files\Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe"
         if os.path.exists(cli_path):
-            hide_args = " ".join([f'--dev-hide "{inst}"' for inst in instances])
-            pyw = sys.executable.replace("python.exe", "pythonw.exe")
-            app_args = f'--app-reg "{sys.executable}" --app-reg "{pyw}"'
-            cmd = f'Start-Process "{cli_path}" -ArgumentList \'{app_args} {hide_args} --cloak-on\' -Verb RunAs -Wait'
+            dos_paths, _ = self._current_app_whitelist_candidates()
+            existing_dos = [p for p in dos_paths if os.path.isfile(p)] or [sys.executable]
             try:
                 import subprocess
                 flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
+                # 1. 先尝试直接无弹窗调用 HidHideCLI（单条命令逐一执行）
+                cli_direct_ok = True
+                for app_p in existing_dos:
+                    subprocess.call([cli_path, "--app-reg", app_p], creationflags=flags)
+                for inst in instances:
+                    if subprocess.call([cli_path, "--dev-hide", inst], creationflags=flags) != 0:
+                        cli_direct_ok = False
+                if cli_direct_ok and subprocess.call([cli_path, "--cloak-on"], creationflags=flags) == 0:
+                    for inst in instances:
+                        if not any(b.upper() == inst.upper() for b in self._cli_blacklist):
+                            self._cli_blacklist.append(inst)
+                    self._cli_active = True
+                    return True, f"已成功将 {len(instances)} 个硬件手柄节点屏蔽，对外部游戏完全隐身（请重新拔插一次手柄或重启游戏使其生效）"
+
+                # 2. 若无提权调用失败，则通过 UAC 提权在单个 PowerShell 会话中顺序执行
+                ps_cmds = [f'& "{cli_path}" --app-reg "{p}"' for p in existing_dos]
+                ps_cmds.extend([f'& "{cli_path}" --dev-hide "{inst}"' for inst in instances])
+                ps_cmds.append(f'& "{cli_path}" --cloak-on')
+                joined_script = "; ".join(ps_cmds)
+                escaped_script = joined_script.replace("'", "''")
+                cmd = f"Start-Process powershell -ArgumentList '-NoProfile -WindowStyle Hidden -Command \"{escaped_script}\"' -Verb RunAs -Wait"
                 ret = subprocess.call(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd], creationflags=flags)
                 if ret == 0:
+                    for inst in instances:
+                        if not any(b.upper() == inst.upper() for b in self._cli_blacklist):
+                            self._cli_blacklist.append(inst)
+                    self._cli_active = True
                     return True, f"已通过管理员权限成功将 {len(instances)} 个硬件手柄节点屏蔽，对外部游戏完全隐身（请重新拔插一次手柄或重启游戏使其生效）"
             except Exception as e:
                 return False, f"管理员提权执行失败: {e}"
 
-        return False, "写入黑名单失败，请检查驱动权限或以管理员身份运行工作台"
+        return False, "写入隐身配置失败：若后台正打开着 HidHide 官方配置窗口 (HidHide Client)，请先将其关闭后再试，或以管理员身份运行工作台"
 
     def uncloak_controller(self, vendor: Optional[int] = None, product: Optional[int] = None, device_path=None) -> Tuple[bool, str]:
         """解除特定控制器的隐身屏蔽，恢复系统共享访问"""
@@ -568,20 +765,38 @@ class HidHideClient:
 
         # 提权回退
         if os.path.exists(cli_path):
-            if not vendor and not product:
-                cmd = f'Start-Process "{cli_path}" -ArgumentList \'--cloak-off\' -Verb RunAs -Wait'
-            else:
-                instances = targets
-                unhide_args = " ".join([f'--dev-unhide "{inst}"' for inst in instances]) if instances else ""
-                cloak_flag = '--cloak-on' if remaining else '--cloak-off'
-                cmd = f'Start-Process "{cli_path}" -ArgumentList \'{unhide_args} {cloak_flag}\' -Verb RunAs -Wait'
             try:
                 import subprocess
                 flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
+                if not vendor and not product:
+                    if subprocess.call([cli_path, "--cloak-off"], creationflags=flags) == 0:
+                        self._cli_blacklist.clear()
+                        self._cli_active = False
+                        return True, "已恢复所有手柄共享访问"
+                    cmd = f'Start-Process "{cli_path}" -ArgumentList \'--cloak-off\' -Verb RunAs -Wait'
+                else:
+                    instances = targets or []
+                    cli_direct_ok = True
+                    for inst in instances:
+                        if subprocess.call([cli_path, "--dev-unhide", inst], creationflags=flags) != 0:
+                            cli_direct_ok = False
+                    cloak_flag = '--cloak-on' if remaining else '--cloak-off'
+                    if cli_direct_ok and subprocess.call([cli_path, cloak_flag], creationflags=flags) == 0:
+                        self._cli_blacklist = list(remaining)
+                        self._cli_active = bool(remaining)
+                        return True, "已解除当前控制器隐身"
+                    ps_cmds = [f'& "{cli_path}" --dev-unhide "{inst}"' for inst in instances]
+                    ps_cmds.append(f'& "{cli_path}" {cloak_flag}')
+                    escaped_script = "; ".join(ps_cmds).replace("'", "''")
+                    cmd = f"Start-Process powershell -ArgumentList '-NoProfile -WindowStyle Hidden -Command \"{escaped_script}\"' -Verb RunAs -Wait"
                 result = subprocess.call(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd], creationflags=flags)
                 if result == 0:
                     if not vendor and not product:
+                        self._cli_blacklist.clear()
+                        self._cli_active = False
                         return True, "已恢复所有手柄共享访问"
+                    self._cli_blacklist = list(remaining)
+                    self._cli_active = bool(remaining)
                     return True, "已解除当前控制器隐身"
             except Exception:
                 pass

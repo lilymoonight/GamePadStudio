@@ -1905,7 +1905,7 @@ class VirtualKbmPage(QWidget):
         )
         self.mouse_toggle.setText(tr('左摇杆控制鼠标') if stick_source == 'left' else tr('右摇杆控制鼠标'))
         self.mouse_toggle.setVisible(bool(stick_axes_sources & set(sources)))
-        self.cloaking_action.setEnabled(bool((WINDOWS_FEATURES or sys.platform == 'darwin') and self.owner.snapshot and self.owner.snapshot.get('vendor') and self.owner.snapshot.get('product')))
+        self.cloaking_action.setEnabled(bool((WINDOWS_FEATURES or sys.platform == 'darwin') and self.owner.snapshot))
         self.application_profiles_action.setEnabled(bool(application_profiles_supported() and self.owner.snapshot))
         self.import_profile_action.setEnabled(bool(self.owner.snapshot))
         self.export_profile_action.setEnabled(bool(self.owner.snapshot))
@@ -1972,7 +1972,7 @@ class VirtualKbmPage(QWidget):
         self.device_state = state
         self.refresh_curve_actions(state)
         self.refresh_touch_action(state)
-        self.cloaking_action.setEnabled(bool((WINDOWS_FEATURES or sys.platform == 'darwin') and state and state.get('vendor') and state.get('product')))
+        self.cloaking_action.setEnabled(bool((WINDOWS_FEATURES or sys.platform == 'darwin') and state))
         from .mapping_swap_ui import can_swap_bindings
         self.swap_bindings_action.setEnabled(can_swap_bindings(self.owner, self.current_scheme()))
         self.bindings._sync_controls()
@@ -2044,21 +2044,32 @@ class VirtualKbmPage(QWidget):
 
     def get_current_device_info(self):
         state = self.owner.snapshot or self.device_state or {}
-        return state.get('vendor'), state.get('product')
+        if not state:
+            return None, None
+        vendor = state.get('vendor')
+        product = state.get('product')
+        if (not vendor or not product) and (state.get('family') or state.get('name') or state.get('device_key')):
+            return int(vendor or 0x045E), int(product or 0x028E)
+        return vendor, product
 
     def open_cloaking(self):
+        parent_win = self.window() or self
         if sys.platform == 'darwin' and not WINDOWS_FEATURES:
             if not (self.owner.snapshot or self.device_state):
                 self.owner.notify(tr('请先连接并选择原生手柄'))
                 return
             if not hasattr(self,'cloaking_dialog'):
-                self.cloaking_dialog = QDialog(self); self.cloaking_dialog.setWindowTitle(tr('设备隐身'))
+                self.cloaking_dialog = QDialog(parent_win); self.cloaking_dialog.setWindowTitle(tr('设备隐身'))
+                self.cloaking_dialog.setMinimumWidth(440)
                 layout = QVBoxLayout(self.cloaking_dialog)
                 self.cloaking_toggle = Toggle(tr('向其他应用隐藏手柄原始输入'))
                 self.cloaking_status_label = QLabel(); self.cloaking_status_label.setWordWrap(True)
                 layout.addWidget(self.cloaking_status_label); layout.addWidget(self.cloaking_toggle)
                 self.cloaking_toggle.toggled.connect(self.toggle_cloaking)
-            self.refresh_cloaking_status(); self.cloaking_dialog.show()
+            self.refresh_cloaking_status()
+            self.cloaking_dialog.show()
+            self.cloaking_dialog.raise_()
+            self.cloaking_dialog.activateWindow()
             return
         if not WINDOWS_FEATURES:
             self.owner.notify(tr('HidHide 仅支持 Windows，macOS 无法隐藏手柄原始输入'))
@@ -2066,7 +2077,8 @@ class VirtualKbmPage(QWidget):
         if not hasattr(self, 'hidhide'):
             from .hidhide import hidhide_usage_guidance
             self.hidhide = HidHideClient()
-            self.cloaking_dialog = QDialog(self); self.cloaking_dialog.setWindowTitle(tr('设备隐身'))
+            self.cloaking_dialog = QDialog(parent_win); self.cloaking_dialog.setWindowTitle(tr('设备隐身'))
+            self.cloaking_dialog.setMinimumWidth(460)
             layout = QVBoxLayout(self.cloaking_dialog)
             self.cloaking_toggle = Toggle(tr('向其他应用隐藏手柄原始输入'))
             self.cloaking_status_label = QLabel(); self.cloaking_status_label.setWordWrap(True)
@@ -2080,8 +2092,13 @@ class VirtualKbmPage(QWidget):
             layout.addWidget(self.cloaking_guidance_label)
             layout.addWidget(self.btn_uncloak_all); layout.addWidget(self.btn_install_driver)
             self.cloaking_toggle.toggled.connect(self.toggle_cloaking)
-        self.refresh_cloaking_status()
+        try:
+            self.refresh_cloaking_status()
+        except Exception as exc:
+            self.cloaking_status_label.setText(tr('读取驱动状态异常：') + str(exc))
         self.cloaking_dialog.show()
+        self.cloaking_dialog.raise_()
+        self.cloaking_dialog.activateWindow()
 
     def refresh_cloaking_status(self):
         if sys.platform == 'darwin' and not WINDOWS_FEATURES:
