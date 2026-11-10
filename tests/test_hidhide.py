@@ -661,3 +661,18 @@ def test_selected_device_instances_matches_composite_and_xinput_paths(monkeypatc
     # 3. Raw USB\... path from XInput / GIP when single physical candidate exists
     sdl_usb_path = r'\\?\usb#vid_045e&pid_028e#1234567#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}'
     assert selected_device_instances(0x045E, 0x028E, sdl_usb_path) == [reg_pad]
+
+
+def test_resolve_controller_vid_pid_with_device_path_and_xinput_fallbacks():
+    from gamepadstudio.hidhide import resolve_controller_vid_pid
+    assert resolve_controller_vid_pid(None) == (None, None)
+    assert resolve_controller_vid_pid({}) == (None, None)
+    assert resolve_controller_vid_pid({'vendor': 0x054C, 'product': 0x0CE6}) == (0x054C, 0x0CE6)
+    assert resolve_controller_vid_pid({
+        'vendor': 0, 'product': 0,
+        'device_path': r'\\?\hid#vid_057e&pid_2009#inst#{guid}',
+    }) == (0x057E, 0x2009)
+    assert resolve_controller_vid_pid({
+        'vendor': 0, 'product': 0, 'family': 'xbox', 'name': 'XInput Controller',
+    }) == (0x045E, 0x028E)
+

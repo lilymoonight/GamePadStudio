@@ -143,6 +143,15 @@ class WindowsActions:
             self.virtual_pad = VirtualXInputPad(on_share=getattr(self, 'on_share_button', None))
         return self.virtual_pad
 
+    def disconnect_virtual_gamepad(self):
+        with self._lock:
+            pad = getattr(self, 'virtual_pad', None)
+            if pad is not None and getattr(pad, 'is_connected', False):
+                try:
+                    pad.close()
+                except Exception:
+                    pass
+
     def sync_virtual_gamepad(self, buttons=None, axes=(), trigger_overrides=None):
         with self._lock:
             pad = self._ensure_virtual_pad()

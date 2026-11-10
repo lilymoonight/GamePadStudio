@@ -857,10 +857,12 @@ class Studio(GlassWindow):
                         from .hidhide import HidHideClient
                         hh = HidHideClient()
                         if hh.is_driver_installed():
-                            if not self.config.get('device_cloaking_enabled'):
-                                self.setting('device_cloaking_enabled', True)
-                                self.apply_device_cloaking(self.snapshot)
-                            msg = tr('已切换为 A↔B / X↔Y 互换布局 · 已开启设备隐身（若游戏已运行，请重插一次手柄生效）')
+                            self.setting('device_cloaking_enabled', True)
+                            cloaked_ok, _ = self.apply_device_cloaking(self.snapshot, enabled=True)
+                            if cloaked_ok:
+                                msg = tr('已切换为 A↔B / X↔Y 互换布局 · 已开启设备隐身（若游戏已运行，请重插一次手柄生效）')
+                            else:
+                                msg = tr('已切换为 A↔B / X↔Y 互换布局 · 请在「设备隐身」中确认已隐藏原始输入')
                         else:
                             msg = tr('已切换为 A↔B / X↔Y 互换布局 · 提示：Windows 下需安装 HidHide 并开启「设备隐身」屏蔽原始输入，否则游戏仍会收到原始 A 键')
                     except Exception:
@@ -869,6 +871,61 @@ class Studio(GlassWindow):
             else:
                 self.notify(tr('已恢复 A/B/X/Y 默认原始布局'))
         return ok
+
+    def apply_device_cloaking(self, state=None, enabled=None):
+        target_state = state if state is not None else self.snapshot
+        if not target_state:
+            return False, tr('请先连接手柄')
+        resolved = device_config(self.config, target_state)
+        use_enabled = bool(resolved.get('device_cloaking_enabled', True) if enabled is None else enabled)
+        if sys.platform == 'darwin' and not WINDOWS_FEATURES:
+            res = self.set_controller_isolation(use_enabled)
+            return bool(res.get('applied') or res.get('active')), str(res.get('message', ''))
+        if not (sys.platform == 'win32' or WINDOWS_FEATURES):
+            return False, ''
+        from .hidhide import HidHideClient, resolve_controller_vid_pid
+        vendor, product = resolve_controller_vid_pid(target_state)
+        if not vendor or not product:
+            return False, tr('未连接设备')
+        applied = False
+        msg = ''
+        if self.remote and self.client and self.client.connected:
+            try:
+                res = request(
+                    self.store.root,
+                    'set_device_cloaking',
+                    enabled=use_enabled,
+                    device_scope=profile_scope(target_state),
+                    timeout=4000,
+                )
+                if res and res.get('ok') and res.get('applied'):
+                    applied = True
+                    msg = str(res.get('message', ''))
+            except Exception:
+                pass
+        if not applied:
+            try:
+                hh = HidHideClient()
+                if hh.is_driver_installed():
+                    opts = {'device_path': target_state['device_path']} if target_state.get('device_path') else {}
+                    applied, msg = (
+                        hh.cloak_controller(vendor, product, **opts)
+                        if use_enabled
+                        else hh.uncloak_controller(vendor, product, **opts)
+                    )
+                    if applied:
+                        key = (vendor, product, opts.get('device_path'))
+                        if not hasattr(self, '_cloaked_devices'):
+                            self._cloaked_devices = set()
+                        if use_enabled:
+                            self._cloaked_devices.add(key)
+                        else:
+                            self._cloaked_devices.discard(key)
+            except Exception as exc:
+                msg = str(exc)
+        if hasattr(self, 'refresh_hidhide_status'):
+            self.refresh_hidhide_status(force=True)
+        return applied, msg
 
     def build_settings(self):
         page = QWidget()
@@ -2251,8 +2308,12 @@ class Studio(GlassWindow):
             self.refresh_input_permission_status()
             if hasattr(self, 'refresh_vigembus_status'):
                 self.refresh_vigembus_status()
+            if hasattr(self, 'refresh_hidhide_status'):
+                self.refresh_hidhide_status()
             if connected != self.previous_connected:
                 self.engine.reset(); self.actions.release_all(); self.last_touch=None
+                if not connected and not self.remote and hasattr(self.actions, 'disconnect_virtual_gamepad'):
+                    self.actions.disconnect_virtual_gamepad()
                 self.previous_connected=connected
                 self.notify(tr('已连接 ') + state['name'] if connected else tr('手柄已断开，等待重新连接'))
                 if connected and state.get('led') and not self.remote: self.device.led(device_config(self.config, state)['led'])
@@ -2632,7 +2693,7 @@ class Studio(GlassWindow):
                 tr('未安装 HidHide · 虚拟手柄与 A↔B 互换需安装此驱动屏蔽原始输入，否则游戏仍会响应原始按键'))
             self.hidhide_button.setText(tr('下载驱动'))
             self.hidhide_button.setToolTip(HIDHIDE_RELEASE_URL)
-        elif active or self.config.get('device_cloaking_enabled'):
+        elif active:
             self.hidhide_row.subtitle_label.setText(
                 tr('已开启原始输入屏蔽 · 若游戏已提前打开，请重插一次手柄让游戏释放旧连接'))
             self.hidhide_button.setText(tr('隐身设置'))
@@ -3450,9 +3511,14 @@ class Studio(GlassWindow):
         return True
 
     def _restore_device_access(self):
+        if hasattr(getattr(self, 'actions', None), 'disconnect_virtual_gamepad'):
+            try:
+                self.actions.disconnect_virtual_gamepad()
+            except Exception:
+                pass
         if sys.platform == 'win32' and getattr(self, '_cloaked_devices', None):
             try:
-                from .hidhide import HidHideClient
+                from .hidhide import HidHideClient, resolve_controller_vid_pid
                 client = HidHideClient()
                 if client.is_driver_installed():
                     if not self.remote or not (self.client and self.client.connected):
@@ -3460,9 +3526,11 @@ class Studio(GlassWindow):
                             opts = {'device_path': dev_path} if dev_path else {}
                             client.uncloak_controller(vendor, product, **opts)
                         self._cloaked_devices.clear()
-                        if hasattr(self, 'snapshot') and self.snapshot and self.snapshot.get('vendor') and self.snapshot.get('product'):
-                            opts = {'device_path': self.snapshot.get('device_path')} if self.snapshot.get('device_path') else {}
-                            client.uncloak_controller(self.snapshot['vendor'], self.snapshot['product'], **opts)
+                        snap = getattr(self, 'snapshot', None)
+                        vendor, product = resolve_controller_vid_pid(snap)
+                        if snap and vendor and product:
+                            opts = {'device_path': snap.get('device_path')} if snap.get('device_path') else {}
+                            client.uncloak_controller(vendor, product, **opts)
                         if not client.get_blacklist():
                             client.set_active(False)
             except Exception:

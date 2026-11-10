@@ -199,6 +199,7 @@ class Device:
             pass
         self.lib.SDL_PumpEvents()
         from .device_quirks import detect_input_protocol, identify_controller_hardware, is_generic_controller_name
+        from .virtual_xinput import _VIRTUAL_HID_INSTANCES
         rows=[]
         for i in range(self.lib.SDL_NumJoysticks()):
             instance=self.lib.SDL_JoystickGetDeviceInstanceID(i)
@@ -213,6 +214,10 @@ class Device:
             path_api=getattr(self.lib, 'SDL_JoystickPathForIndex', None)
             path=path_api(i) if path_api else None
             path_str=path.decode('utf-8', 'replace') if path else ''
+            if path_str and _VIRTUAL_HID_INSTANCES:
+                norm_path = path_str.upper().replace('#', '\\').removeprefix('\\\\?\\').split('\\{', 1)[0]
+                if norm_path in _VIRTUAL_HID_INSTANCES:
+                    continue
             guid=bytes(self.lib.SDL_JoystickGetDeviceGUID(i).data).hex()
             backend=input_backend_for_guid(guid) if is_gamecontroller else ''
             protocol=detect_input_protocol(guid=guid, is_gamecontroller=is_gamecontroller,
@@ -266,11 +271,19 @@ class Device:
                 is_attached = bool(self.lib.SDL_GameControllerGetAttached(self.handle))
         if self.handle and not is_attached:
             self.close_handle()
+        from .virtual_xinput import _ACTIVE_VIRTUAL_PADS
+        has_non_x360 = any(
+            r.get('supported', True) and (r.get('vendor'), r.get('product')) != (0x045E, 0x028E)
+            for r in self.available
+        )
+        if (
+            self.handle
+            and _ACTIVE_VIRTUAL_PADS
+            and has_non_x360
+            and (self.metadata.get('vendor'), self.metadata.get('product')) == (0x045E, 0x028E)
+        ):
+            self.close_handle()
         if not self.handle:
-            has_non_x360 = any(
-                r.get('supported', True) and (r.get('vendor'), r.get('product')) != (0x045E, 0x028E)
-                for r in self.available
-            )
             for row in sorted(
                 self.available,
                 key=lambda r: (

@@ -122,12 +122,11 @@ class Agent(QObject):
         settings = device_config(self.config, self.state)
         if not self.state:
             return
-        vendor = self.state.get('vendor')
-        product = self.state.get('product')
-        if not vendor:
-            return
         try:
-            from .hidhide import HidHideClient
+            from .hidhide import HidHideClient, resolve_controller_vid_pid
+            vendor, product = resolve_controller_vid_pid(self.state)
+            if not vendor or not product:
+                return
             client = HidHideClient()
             if client.is_driver_installed():
                 enabled = settings.get('device_cloaking_enabled', True)
@@ -376,6 +375,8 @@ class Agent(QObject):
             device_changed = identity(previous) != identity(self.state)
             if device_changed:
                 self.release();self.last_buttons=set()
+                if not self.state and hasattr(self.actions, 'disconnect_virtual_gamepad'):
+                    self.actions.disconnect_virtual_gamepad()
                 self.log('手柄已连接' if self.state else '手柄已断开')
                 # Legacy test/headless clients may provide buttons without an
                 # identity. Keep their explicitly selected profile untouched.
@@ -514,7 +515,9 @@ class Agent(QObject):
                 self._isolation_apply_pending = False
                 self.log(result['message']); self.broadcast()
                 return result
-            if not self.state or not self.state.get('vendor'):
+            from .hidhide import HidHideClient, resolve_controller_vid_pid
+            vendor, product = resolve_controller_vid_pid(self.state)
+            if not self.state or not vendor or not product:
                 raise ValueError('请先连接支持设备隐身的手柄')
             enabled = bool(message.get('enabled', True))
             self.store.set_setting('device_cloaking_enabled', enabled, self.state)
@@ -522,11 +525,8 @@ class Agent(QObject):
             applied = False
             msg = '未连接手柄或无需隐身'
             if self.state:
-                from .hidhide import HidHideClient
                 client = HidHideClient()
                 if client.is_driver_installed():
-                    vendor = self.state.get('vendor')
-                    product = self.state.get('product')
                     options = {'device_path': self.state['device_path']} if self.state.get('device_path') else {}
                     key = (vendor, product, options.get('device_path'))
                     applied, msg = client.cloak_controller(vendor, product, **options) if enabled else client.uncloak_controller(vendor, product, **options)
@@ -751,9 +751,14 @@ class Agent(QObject):
         finish('关闭后台通信失败',self.server.close)
 
     def _restore_device_access(self):
+        if hasattr(getattr(self, 'actions', None), 'disconnect_virtual_gamepad'):
+            try:
+                self.actions.disconnect_virtual_gamepad()
+            except Exception:
+                pass
         if sys.platform == 'win32':
             try:
-                from .hidhide import HidHideClient
+                from .hidhide import HidHideClient, resolve_controller_vid_pid
                 client = HidHideClient()
                 if client.is_driver_installed():
                     for vendor, product, dev_path in list(getattr(self, '_cloaked_devices', set())):
@@ -761,9 +766,10 @@ class Agent(QObject):
                         client.uncloak_controller(vendor, product, **opts)
                     if hasattr(self, '_cloaked_devices'):
                         self._cloaked_devices.clear()
-                    if self.state and self.state.get('vendor') and self.state.get('product'):
+                    vendor, product = resolve_controller_vid_pid(self.state)
+                    if self.state and vendor and product:
                         opts = {'device_path': self.state['device_path']} if self.state.get('device_path') else {}
-                        client.uncloak_controller(self.state['vendor'], self.state['product'], **opts)
+                        client.uncloak_controller(vendor, product, **opts)
                     if not client.get_blacklist():
                         client.set_active(False)
             except Exception as exc:

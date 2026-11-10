@@ -473,6 +473,13 @@ class GestureEngine:
                 self._emit(key, fired, action, False)
         elif not cancel:
             action = mapping.get('short', {})
+            long_action = mapping.get('long', {})
+            if (
+                action.get('action', 'none') == 'none'
+                and long_action.get('action', 'none') in GAMEPAD_ACTIONS
+                and key in GAMEPAD_TARGETS
+            ):
+                action = {'action': 'gamepad_button', 'value': key}
             self._emit(key, 'short', action, True)
             if action.get('action') in HOLD_ACTIONS:
                 # A quick tap still needs a nonzero key-down interval for games.

@@ -2043,14 +2043,9 @@ class VirtualKbmPage(QWidget):
         self.set_device_state(state)
 
     def get_current_device_info(self):
+        from .hidhide import resolve_controller_vid_pid
         state = self.owner.snapshot or self.device_state or {}
-        if not state:
-            return None, None
-        vendor = state.get('vendor')
-        product = state.get('product')
-        if (not vendor or not product) and (state.get('family') or state.get('name') or state.get('device_key')):
-            return int(vendor or 0x045E), int(product or 0x028E)
-        return vendor, product
+        return resolve_controller_vid_pid(state)
 
     def open_cloaking(self):
         parent_win = self.window() or self

@@ -231,6 +231,24 @@ def _all_candidates_belong_to_single_device(candidates: List[str]) -> bool:
     return False
 
 
+def resolve_controller_vid_pid(state: Optional[Dict[str, Any]]) -> Tuple[Optional[int], Optional[int]]:
+    """Resolve (vendor, product) from a controller state dict, with path and XInput fallbacks."""
+    if not isinstance(state, dict) or not state:
+        return None, None
+    vendor = state.get('vendor')
+    product = state.get('product')
+    dev_path = state.get('device_path')
+    if (not vendor or not product) and dev_path:
+        import re
+        m = re.search(r'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})', str(dev_path), re.IGNORECASE)
+        if m:
+            vendor = int(vendor or int(m.group(1), 16))
+            product = int(product or int(m.group(2), 16))
+    if (not vendor or not product) and (state.get('family') or state.get('name') or state.get('device_key')):
+        return int(vendor or 0x045E), int(product or 0x028E)
+    return (int(vendor) if vendor else None), (int(product) if product else None)
+
+
 def selected_device_instances(vendor, product, device_path=None):
     """Resolve only the selected physical HID, never all pads of its model."""
     if vendor is None or product is None:

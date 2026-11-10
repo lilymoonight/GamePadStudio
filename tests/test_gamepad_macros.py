@@ -62,6 +62,19 @@ def test_gamepad_macro_gesture_dispatch():
     engine.update(set(), maps, 2.0)
     assert ('gamepad_chord', '2+3', False) in events
 
+    events.clear()
+    # Short tap when short is 'none' (pass-through) and long is a gamepad macro (e.g. '动作与格斗宏')
+    # must pulse the native button ('0') on the virtual controller instead of swallowing it!
+    passthrough_maps = {
+        '0': {'short': {'action': 'none'}, 'long': {'action': 'gamepad_turbo', 'value': '0', 'rate_hz': 15}}
+    }
+    engine.update({'0'}, passthrough_maps, 3.0)
+    engine.update({'0'}, passthrough_maps, 3.1)
+    engine.update(set(), passthrough_maps, 3.2)
+    engine.update(set(), passthrough_maps, 3.3)
+    assert ('gamepad_button', '0', True) in events
+    assert ('gamepad_button', '0', False) in events
+
 
 @pytest.mark.parametrize('action,value', [('gamepad_button', '3'),
                                         ('gamepad_chord', '2+3'), ('gamepad_turbo', '0')])
