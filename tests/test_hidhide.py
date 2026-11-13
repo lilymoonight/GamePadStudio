@@ -48,6 +48,7 @@ def block_native_hidhide_access(monkeypatch):
     original_exists = module.os.path.exists
     cli = r'C:\Program Files\Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe'
     monkeypatch.setattr(module.os.path, 'exists', lambda path: False if str(path) == cli else original_exists(path))
+    monkeypatch.setattr(module, 'resolve_hidhide_cli_path', lambda: None)
 
 
 def test_multi_sz_codec():
@@ -675,4 +676,120 @@ def test_resolve_controller_vid_pid_with_device_path_and_xinput_fallbacks():
     assert resolve_controller_vid_pid({
         'vendor': 0, 'product': 0, 'family': 'xbox', 'name': 'XInput Controller',
     }) == (0x045E, 0x028E)
+
+
+def test_selected_device_instances_includes_sibling_ble_gatt_and_ig_nodes(monkeypatch):
+    from gamepadstudio.hidhide import selected_device_instances
+    from gamepadstudio.studio_core import profile_has_gamepad_remap
+    ig_node = r'HID\{00001812-0000-1000-8000-00805f9b34fb}&Dev&VID_045e&PID_0b13&REV_0520&f46ad79fb5e2&IG_00\9&24d70bae&0&0000'
+    gatt_node = r'HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&02045e_PID&0b13_REV&0520_f46ad79fb5e2\9&24d70bae&0&0000'
+    monkeypatch.setattr(
+        'gamepadstudio.hidhide.find_hid_instances',
+        lambda vendor, product, include_virtual=False: [ig_node, gatt_node],
+    )
+    sdl_path = r'\\?\HID#{00001812-0000-1000-8000-00805f9b34fb}&Dev&VID_045e&PID_0b13&REV_0520&f46ad79fb5e2&IG_00#9&24d70bae&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}'
+    assert selected_device_instances(0x045E, 0x0B13, sdl_path) == [ig_node, gatt_node]
+
+    cfg = {
+        'active_profile': 'AexchangeB',
+        'profiles': {
+            'AexchangeB': {
+                '0': {'short': {'action': 'gamepad_button', 'value': '1'}, 'long': {'action': 'none'}},
+                '1': {'short': {'action': 'gamepad_button', 'value': '0'}, 'long': {'action': 'none'}},
+            },
+            'Default': {
+                '0': {'short': {'action': 'none'}, 'long': {'action': 'none'}},
+            },
+        },
+    }
+    assert profile_has_gamepad_remap(cfg) is True
+    assert profile_has_gamepad_remap(cfg, profile_name='Default') is False
+
+
+def test_composite_controller_container_grouping_and_non_gamepad_exclusion(monkeypatch):
+    from gamepadstudio.hidhide import selected_device_instances
+    # Physical Controller #1 (GameSir composite with two distinct IG instance IDs, sharing ContainerID A)
+    pad1_ig00 = r'HID\VID_3537&PID_103E&IG_00\9&7D600EF&0&0000'
+    pad1_ig04 = r'HID\VID_3537&PID_103E&IG_04\9&2E40FD57&0&0000'
+    # Physical Controller #2 (same model, different ContainerID B)
+    pad2_ig00 = r'HID\VID_3537&PID_103E&IG_00\9&AAAA111&0&0000'
+    cid_map = {
+        pad1_ig00.upper(): (False, '{705b77a6-477a-589f-96dc-dd0728f98a6f}'),
+        pad1_ig04.upper(): (False, '{705b77a6-477a-589f-96dc-dd0728f98a6f}'),
+        pad2_ig00.upper(): (False, '{bbbb2222-477a-589f-96dc-dd0728f98a6f}'),
+    }
+    monkeypatch.setattr(
+        'gamepadstudio.hidhide.find_hid_instances',
+        lambda vendor, product, include_virtual=False: [pad1_ig00, pad1_ig04, pad2_ig00],
+    )
+    monkeypatch.setattr(
+        'gamepadstudio.hidhide._inspect_hid_registry_node',
+        lambda path: cid_map.get(str(path).upper(), (False, '')),
+    )
+    sdl_path = r'\\?\HID#VID_3537&PID_103E&IG_00#9&7d600ef&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}'
+    selected = selected_device_instances(0x3537, 0x103E, sdl_path)
+    assert selected == [pad1_ig00, pad1_ig04]
+    assert pad2_ig00 not in selected
+
+
+def test_virtual_controller_detection_and_config_self_healing(tmp_path):
+    import json
+    from gamepadstudio.virtual_xinput import is_virtual_controller_device
+    from gamepadstudio.studio_core import ConfigStore, default_config
+
+    # Pure virtual controllers (Steam Virtual Gamepad & vJoy) are always detected
+    assert is_virtual_controller_device('', vendor=0x28DE, product=0x11FF, name='Steam Virtual Gamepad') is True
+    assert is_virtual_controller_device('', vendor=0x1234, product=0xBEAD, name='vJoy Device') is True
+    # Real controllers are never falsely flagged
+    assert is_virtual_controller_device('', vendor=0x045E, product=0x0B13, name='Xbox Wireless Controller') is False
+    assert is_virtual_controller_device('', vendor=0x054C, product=0x0CE6, name='DualSense Wireless Controller') is False
+
+    # Self-healing of ghost virtual controller profiles in studio.json
+    cfg = default_config(tmp_path)
+    real_scope = 'xbox:045e:0b13:030000005e040000fd02000020057200:serial1'
+    virt_scope = 'xbox:045e:028e:030003f05e0400008e02000000007200'
+    cfg['profiles']['AexchangeB'] = {
+        '0': {'short': {'action': 'gamepad_button', 'value': '1'}, 'long': {'action': 'none'}},
+        '1': {'short': {'action': 'gamepad_button', 'value': '0'}, 'long': {'action': 'none'}},
+    }
+    cfg['profiles']['Xbox · 默认 2'] = {
+        '0': {'short': {'action': 'none'}, 'long': {'action': 'none'}},
+    }
+    cfg['profile_modes']['AexchangeB'] = 'gamepad'
+    cfg['profile_modes']['Xbox · 默认 2'] = 'gamepad'
+    cfg['profile_devices']['AexchangeB'] = real_scope
+    cfg['profile_devices']['Xbox · 默认 2'] = virt_scope
+    cfg['controller_profiles'][real_scope] = 'AexchangeB'
+    cfg['controller_profiles'][virt_scope] = 'Xbox · 默认 2'
+    cfg['preferred_controller'] = virt_scope
+    cfg['active_profile'] = 'Xbox · 默认 2'
+    (tmp_path / 'studio.json').write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
+
+    store = ConfigStore(tmp_path)
+    assert 'Xbox · 默认 2' not in store.data['profiles']
+    assert 'AexchangeB' in store.data['profiles']
+    assert store.data['active_profile'] == 'AexchangeB'
+    assert store.data['preferred_controller'] == real_scope
+
+
+def test_flexible_face_pair_swap_south_east_only(tmp_path):
+    from gamepadstudio.studio_core import ConfigStore
+    store = ConfigStore(tmp_path)
+    state = {
+        'instance_id': 1,
+        'family': 'xbox',
+        'device_key': 'xbox:045e:0b13:realpad',
+        'profile_key': 'xbox:045e:0b13:realpad',
+        'available_buttons': list(range(15)),
+        'axes': [0.0] * 6,
+    }
+    store.activate_controller(state)
+    prof = store.data['active_profile']
+    store.apply_mapping_change({'op': 'swap_ab_xy', 'profile': prof, 'pairs': [['0', '1']]}, state)
+    entries = store.data['profiles'][prof]
+    assert entries['0']['short'] == {'action': 'gamepad_button', 'value': '1'}
+    assert entries['1']['short'] == {'action': 'gamepad_button', 'value': '0'}
+    assert entries.get('2', {}).get('short', {'action': 'none'}).get('action', 'none') == 'none'
+
+
 

@@ -670,6 +670,7 @@ def test_agent_stop_commands_reach_full_recording_finalization_through_app_quit(
 
 
 def test_windows_agent_cloaking_still_uses_hidhide_and_preserves_mac_opt_in(mac_environment, monkeypatch):
+    from gamepadstudio.kbm_mapper import NIKKI_PROFILE_NAME
     env = mac_environment.make_agent()
     monkeypatch.setattr(agent_module, 'sys', SimpleNamespace(platform='win32'))
     calls = []
@@ -678,6 +679,7 @@ def test_windows_agent_cloaking_still_uses_hidhide_and_preserves_mac_opt_in(mac_
         uncloak_controller=lambda vendor, product, **kwargs: (calls.append((False, vendor, product, kwargs)) or (True, 'visible')))
     monkeypatch.setattr('gamepadstudio.hidhide.HidHideClient', lambda: hid)
     env.actor.state['device_path'] = 'fake-windows-device-path'
+    env.actor.config['active_profile'] = NIKKI_PROFILE_NAME
     env.actor.apply_device_cloaking()
     env.actor.store.set_setting('device_cloaking_enabled', False, env.actor.state)
     env.actor.apply_device_cloaking()

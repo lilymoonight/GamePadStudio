@@ -109,6 +109,7 @@ MappingDialog = BindingDialog
 class Studio(GlassWindow):
     device_sample = Signal(object)
     recording_finished = Signal(str,str)
+    driver_install_finished = Signal(object)
     def __init__(self, root, standalone=False, lang=None, input_device=None):
         super().__init__()
         root=Path(root).resolve(); self.remote=not standalone; self.closed=False
@@ -136,7 +137,9 @@ class Studio(GlassWindow):
                 spawn(root,'--agent')
         self.snapshot=None; self.previous_connected=False; self.enabled=bool(self.config.get('mapping_enabled',True)); self.last_capture=0; self.worker=None
         self.manual_recording = None
+        self._driver_installing = False
         self.recording_finished.connect(self.on_recording_finished)
+        self.driver_install_finished.connect(self._on_driver_install_finished)
         if sys.platform == 'darwin' and not WINDOWS_FEATURES:
             from .macos_windows import configure_window_exclusions
             configure_window_exclusions({os.getpid(), read_lock_pid(root / 'agent.lock')})
@@ -334,6 +337,11 @@ class Studio(GlassWindow):
         self.tray_menu = QMenu(self)
         self.tray_open_action = self.tray_menu.addAction(tr('打开工作台'))
         self.tray_open_action.triggered.connect(self.show_home)
+        if sys.platform == 'win32':
+            from .application_profiles import is_process_elevated
+            if not is_process_elevated(None):
+                self.tray_admin_action = self.tray_menu.addAction(tr('以管理员身份重启'))
+                self.tray_admin_action.triggered.connect(self.restart_as_admin)
         self.tray_menu.addSeparator()
         self.tray_exit_action = self.tray_menu.addAction(tr('退出'))
         self.tray_exit_action.triggered.connect(self.quit_app)
@@ -553,12 +561,34 @@ class Studio(GlassWindow):
         instruction.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         profile_actions.addWidget(instruction, 1)
         profile_actions.addWidget(button(tr('新建手柄配置'), lambda: self.duplicate_profile(target_mode='gamepad'), icon='plus'))
+        self.swap_ab_xy_btn = button(tr('快捷互换'), lambda: None, icon='swap')
+        self.swap_ab_xy_btn.setToolTip(tr('快速互换确认/取消键 (A↔B)、四键布局 (A↔B, X↔Y) 或任意两个手柄按键'))
+        swap_menu = QMenu(self.swap_ab_xy_btn)
+        self.swap_south_east_action = swap_menu.addAction(
+            tr('互换 A↔B (确认 / 取消)'),
+            lambda: self.swap_ab_xy_layout(pairs=[('0', '1')]),
+        )
+        self.swap_four_face_action = swap_menu.addAction(
+            tr('四键布局互换 (A↔B, X↔Y)'),
+            lambda: self.swap_ab_xy_layout(pairs=[('0', '1'), ('2', '3')]),
+        )
+        swap_menu.addSeparator()
+        self.swap_custom_two_action = swap_menu.addAction(
+            tr('任意两键互换...'),
+            lambda: self.open_mapping_swap(self.current_gamepad_profile(), self.mapping_deck.selected_trigger),
+        )
+        self.swap_ab_xy_btn.setMenu(swap_menu)
+        profile_actions.addWidget(self.swap_ab_xy_btn)
         profile_actions.addWidget(button(tr('恢复默认'), self.reset_profile, icon='refresh'))
         self.mapping_more_button = button(tr('更多设置'), lambda: None)
         mapping_more = QMenu(self.mapping_more_button)
         self.swap_ab_xy_action = mapping_more.addAction(
-            tr('Switch / Xbox 布局互换 (A↔B, X↔Y)'),
-            self.swap_ab_xy_layout,
+            tr('互换 A↔B (确认 / 取消)'),
+            lambda: self.swap_ab_xy_layout(pairs=[('0', '1')]),
+        )
+        self.swap_ab_xy_all_action = mapping_more.addAction(
+            tr('四键布局互换 (A↔B, X↔Y)'),
+            lambda: self.swap_ab_xy_layout(pairs=[('0', '1'), ('2', '3')]),
         )
         self.mapping_cloaking_action = mapping_more.addAction(
             tr('设备隐身 (屏蔽原始输入)'),
@@ -576,6 +606,27 @@ class Studio(GlassWindow):
         self.delete_profile_btn.setObjectName('danger')
         profile_actions.addWidget(self.delete_profile_btn)
         layout.addLayout(profile_actions)
+
+        self.remap_guard_banner = QFrame()
+        self.remap_guard_banner.setStyleSheet(
+            f"QFrame {{ background: rgba(245, 158, 11, 0.10); border: 1px solid rgba(245, 158, 11, 0.32); "
+            f"border-radius: {TOKENS['r_md']}px; }}"
+        )
+        guard_row = QHBoxLayout(self.remap_guard_banner)
+        guard_row.setContentsMargins(14, 9, 14, 9)
+        guard_row.setSpacing(12)
+        self.remap_guard_text = QLabel('')
+        self.remap_guard_text.setWordWrap(True)
+        self.remap_guard_text.setStyleSheet(
+            f"color: {TOKENS['amber']}; font-size: 12px; font-weight: 600; background: transparent; border: none;"
+        )
+        guard_row.addWidget(self.remap_guard_text, 1)
+        self.remap_guard_btn = button(tr('立即修复'), self._on_remap_guard_action, primary=True)
+        self.remap_guard_btn.setFixedHeight(28)
+        guard_row.addWidget(self.remap_guard_btn)
+        self._remap_guard_mode = ''
+        self.remap_guard_banner.hide()
+        layout.addWidget(self.remap_guard_banner)
 
         workspace = QWidget()
         workspace.setMinimumHeight(350)
@@ -824,7 +875,15 @@ class Studio(GlassWindow):
             if self.remote:
                 self.client.send('suspend', seconds=2 if QApplication.activeModalWidget() is not None else 0)
 
-    def swap_ab_xy_layout(self, profile=None):
+    def _face_swap_labels(self, family='generic'):
+        fam = str(family or 'generic').lower()
+        if fam in ('dualsense', 'dualshock4', 'ps4', 'ps5'):
+            return ('×↔○', '×↔○, □↔△')
+        if fam == 'switch':
+            return ('B↔A', 'B↔A, Y↔X')
+        return ('A↔B', 'A↔B, X↔Y')
+
+    def swap_ab_xy_layout(self, profile=None, pairs=None):
         if not self.snapshot:
             self.notify(tr('请先连接手柄'))
             return False
@@ -838,8 +897,14 @@ class Studio(GlassWindow):
         self.end_learning()
         if profile is None and target and self.config.get('active_profile') != target:
             self.change_profile(target)
-        ok = self.mapping_change({'op': 'swap_ab_xy', 'profile': target})
+        payload = {'op': 'swap_ab_xy', 'profile': target}
+        if pairs is not None:
+            payload['pairs'] = [list(p) for p in pairs]
+        ok = self.mapping_change(payload)
         if ok:
+            fam = profile_family(self.config, self.snapshot, target)
+            se_label, four_label = self._face_swap_labels(fam)
+            used_label = se_label if (pairs is not None and len(pairs) == 1) else four_label
             entries = effective_mappings(self.config, self.snapshot, target)
             a_short = entries.get('0', {}).get('short', {})
             is_swapped = (
@@ -851,26 +916,184 @@ class Studio(GlassWindow):
                 )
             )
             if is_swapped:
-                msg = tr('已切换为 A↔B / X↔Y 互换布局')
+                msg = tr('已启用按键互换 ({layout})', layout=used_label)
                 if sys.platform == 'win32' or WINDOWS_FEATURES:
                     try:
                         from .hidhide import HidHideClient
+                        from .virtual_xinput import vigembus_status_summary
+                        vigem_ready = bool(vigembus_status_summary().get('ready'))
                         hh = HidHideClient()
-                        if hh.is_driver_installed():
+                        if not vigem_ready:
+                            msg = tr('已启用按键互换 ({layout}) · 请点击上方横幅一键安装虚拟手柄驱动 (ViGEmBus)', layout=used_label)
+                        elif hh.is_driver_installed():
                             self.setting('device_cloaking_enabled', True)
                             cloaked_ok, _ = self.apply_device_cloaking(self.snapshot, enabled=True)
                             if cloaked_ok:
-                                msg = tr('已切换为 A↔B / X↔Y 互换布局 · 已开启设备隐身（若游戏已运行，请重插一次手柄生效）')
+                                msg = tr('已启用按键互换 ({layout}) · 已开启原始输入屏蔽（若游戏已在运行，重插一次手柄生效）', layout=used_label)
                             else:
-                                msg = tr('已切换为 A↔B / X↔Y 互换布局 · 请在「设备隐身」中确认已隐藏原始输入')
+                                msg = tr('已启用按键互换 ({layout}) · 请确认「设备隐身」已屏蔽原始输入', layout=used_label)
                         else:
-                            msg = tr('已切换为 A↔B / X↔Y 互换布局 · 提示：Windows 下需安装 HidHide 并开启「设备隐身」屏蔽原始输入，否则游戏仍会收到原始 A 键')
+                            msg = tr('已启用按键互换 ({layout}) · 请点击上方横幅一键安装 HidHide 屏蔽原始输入', layout=used_label)
                     except Exception:
                         pass
                 self.notify(msg)
             else:
-                self.notify(tr('已恢复 A/B/X/Y 默认原始布局'))
+                if (sys.platform == 'win32' or WINDOWS_FEATURES) and not self.remote and self.snapshot:
+                    try:
+                        from .hidhide import should_auto_cloak_controller
+                        if not should_auto_cloak_controller(self.config, self.snapshot, mapping_enabled=self.enabled):
+                            self.apply_device_cloaking(self.snapshot, enabled=False)
+                    except Exception:
+                        pass
+                self.notify(tr('已恢复默认原始按键布局'))
+            self.refresh_remap_guard_banner()
         return ok
+
+    def install_driver_async(self, kind: str):
+        if getattr(self, '_driver_installing', False):
+            self.notify(tr('驱动安装程序正在下载中，请稍候…'))
+            return
+        self._driver_installing = True
+        self.notify(tr('正在获取官方签名驱动安装包，请稍候…'))
+
+        def _worker():
+            from .driver_setup import download_and_launch_driver_installer
+            res = download_and_launch_driver_installer(kind)
+            res['kind'] = kind
+            self.driver_install_finished.emit(res)
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_driver_install_finished(self, result):
+        self._driver_installing = False
+        if not isinstance(result, dict):
+            return
+        if result.get('fallback_browser') and result.get('release_url'):
+            QDesktopServices.openUrl(QUrl(result['release_url']))
+        msg = str(result.get('message') or '')
+        if msg:
+            self.notify(tr(msg))
+
+        def _recheck():
+            from .virtual_xinput import _VIGEM_CACHE
+            _VIGEM_CACHE['failed_until'] = 0.0
+            if hasattr(self, 'refresh_vigembus_status'):
+                self.refresh_vigembus_status(force=True)
+            if hasattr(self, 'refresh_hidhide_status'):
+                self.refresh_hidhide_status(force=True)
+            self.refresh_remap_guard_banner()
+
+        for delay_ms in (3000, 7000, 14000):
+            QTimer.singleShot(delay_ms, _recheck)
+
+    def _on_remap_guard_action(self):
+        mode = getattr(self, '_remap_guard_mode', '')
+        if mode == 'vigembus':
+            self.open_vigembus_download()
+        elif mode == 'hidhide_install':
+            self.install_driver_async('hidhide')
+        elif mode in ('enable_cloaking', 'hidhide_gui_blocking'):
+            self.setting('device_cloaking_enabled', True)
+            ok, msg = self.apply_device_cloaking(self.snapshot, enabled=True)
+            self.refresh_remap_guard_banner()
+            if ok:
+                self.notify(tr('已开启原始输入屏蔽（若游戏已在运行，请重插一次手柄生效）'))
+            else:
+                self.notify(msg or tr('未能自动屏蔽原始输入，请打开「设备隐身」检查驱动状态'))
+        elif mode == 'steam_whitelist_conflict':
+            from .driver_setup import remove_steam_from_hidhide_whitelist
+            ok, msg = remove_steam_from_hidhide_whitelist()
+            self.refresh_remap_guard_banner()
+            self.notify(tr(msg) if msg else tr('已处理 Steam 白名单设置'))
+        elif mode == 'slot_contention':
+            self._slot_hint_dismissed = True
+            self.remap_guard_banner.hide()
+        elif mode == 'elevate_admin':
+            self.restart_as_admin()
+
+    def refresh_remap_guard_banner(self):
+        if not hasattr(self, 'remap_guard_banner'):
+            return
+        if not (sys.platform == 'win32' or WINDOWS_FEATURES):
+            self.remap_guard_banner.hide()
+            return
+        from .studio_core import profile_has_gamepad_remap
+        target = self.current_gamepad_profile()
+        if not target or not profile_has_gamepad_remap(self.config, self.snapshot, profile_name=target):
+            self.remap_guard_banner.hide()
+            return
+        try:
+            from .virtual_xinput import vigembus_status_summary
+            vigem = vigembus_status_summary()
+            if not vigem.get('ready'):
+                self._remap_guard_mode = 'vigembus'
+                self.remap_guard_text.setText(
+                    tr('⚠ 当前预设包含手柄重映射/宏，需安装虚拟手柄驱动 (ViGEmBus) 后游戏才能收到重映射按键。')
+                )
+                self.remap_guard_btn.setText(tr('一键安装虚拟手柄驱动'))
+                self.remap_guard_banner.show()
+                return
+        except Exception:
+            pass
+        try:
+            from .driver_setup import find_steam_whitelist_conflicts, is_hidhide_gui_running
+            from .hidhide import HidHideClient
+            hh = HidHideClient()
+            if not hh.is_driver_installed():
+                self._remap_guard_mode = 'hidhide_install'
+                self.remap_guard_text.setText(
+                    tr('⚠ 当前预设包含手柄按键重映射，尚未安装 HidHide 驱动；不屏蔽原始输入时游戏会同时响应未互换的物理按键。')
+                )
+                self.remap_guard_btn.setText(tr('一键安装 HidHide 驱动'))
+                self.remap_guard_banner.show()
+                return
+            if self.snapshot:
+                resolved = device_config(self.config, self.snapshot)
+                if not resolved.get('device_cloaking_enabled', True) or not hh.is_active():
+                    if is_hidhide_gui_running():
+                        self._remap_guard_mode = 'hidhide_gui_blocking'
+                        self.remap_guard_text.setText(
+                            tr('⚠ 检测到官方 HidHide 配置窗口正在运行并独占驱动句柄，请先关闭该窗口后再点击开启屏蔽。')
+                        )
+                        self.remap_guard_btn.setText(tr('重新检测并开启'))
+                    else:
+                        self._remap_guard_mode = 'enable_cloaking'
+                        self.remap_guard_text.setText(
+                            tr('⚠ 当前未开启原始输入屏蔽，游戏会同时收到物理原按键与虚拟映射按键（双重输入）。')
+                        )
+                        self.remap_guard_btn.setText(tr('一键开启原始输入屏蔽'))
+                    self.remap_guard_banner.show()
+                    return
+                if find_steam_whitelist_conflicts(hh.get_whitelist()):
+                    self._remap_guard_mode = 'steam_whitelist_conflict'
+                    self.remap_guard_text.setText(
+                        tr('⚠ 检测到 Steam 位于 HidHide 白名单中，会导致游戏同时收到原按键与互换按键（双重输入）。')
+                    )
+                    self.remap_guard_btn.setText(tr('一键移除 Steam 冲突'))
+                    self.remap_guard_banner.show()
+                    return
+        except Exception:
+            pass
+        vpad_info = {}
+        if self.remote and self.client and self.client.connected:
+            vpad_info = self.client.status.get('virtual_gamepad') or {}
+        else:
+            pad = getattr(self.actions, 'virtual_pad', None) or getattr(self.actions, '_virtual_pad', None)
+            if pad is not None and getattr(pad, 'is_connected', False):
+                vpad_info = {'connected': True, 'user_index': getattr(pad, 'user_index', None)}
+        u_idx = vpad_info.get('user_index') if isinstance(vpad_info, dict) else None
+        if u_idx == 0:
+            self._slot_hint_dismissed = False
+        elif isinstance(u_idx, int) and u_idx > 0 and self.snapshot and not getattr(self, '_slot_hint_dismissed', False):
+            self._remap_guard_mode = 'slot_contention'
+            self.remap_guard_text.setText(
+                tr('💡 提示：手柄先于工作台开机，虚拟手柄当前位于 {slot}P 槽位；若单机游戏未响应，保持工作台开启并将手柄关机重连（或拔插）一次即可自动切回 1P。', slot=u_idx + 1)
+            )
+            self.remap_guard_btn.setText(tr('我知道了'))
+            self.remap_guard_banner.show()
+            return
+        self.remap_guard_banner.hide()
 
     def apply_device_cloaking(self, state=None, enabled=None):
         target_state = state if state is not None else self.snapshot
@@ -914,6 +1137,7 @@ class Studio(GlassWindow):
                         else hh.uncloak_controller(vendor, product, **opts)
                     )
                     if applied:
+                        from .hidhide import record_hidhide_session
                         key = (vendor, product, opts.get('device_path'))
                         if not hasattr(self, '_cloaked_devices'):
                             self._cloaked_devices = set()
@@ -921,6 +1145,7 @@ class Studio(GlassWindow):
                             self._cloaked_devices.add(key)
                         else:
                             self._cloaked_devices.discard(key)
+                        record_hidhide_session(self._cloaked_devices, getattr(self.store, 'root', None))
             except Exception as exc:
                 msg = str(exc)
         if hasattr(self, 'refresh_hidhide_status'):
@@ -2255,6 +2480,12 @@ class Studio(GlassWindow):
         except Exception as exc: self.notify(tr('设备扫描失败：')+str(exc))
 
     def testing_protected(self):
+        if hasattr(self, 'actions') and hasattr(self.actions, 'is_nikki_game_focused'):
+            try:
+                if self.actions.is_nikki_game_focused():
+                    return False
+            except Exception:
+                pass
         return self.stack.currentIndex()==3 and self.isVisible() and not self.isMinimized() and self.tester.protect.isChecked()
 
     def preview_requested(self):
@@ -2342,7 +2573,23 @@ class Studio(GlassWindow):
                     self.status_capsule.setStyleSheet(f"QWidget#statusCapsule {{ border: 1px solid {TOKENS['border']}; background: {TOKENS['surface']}; border-radius: 18px; }}")
             self.side_status.setText(tr('●  已连接') if connected else tr('○  未连接'))
             self.rumble_button.setEnabled(bool(state and state.get('rumble')))
-            self.tester.update_state(state,collect=self.stack.currentIndex()==3 and self.isVisible() and not self.isMinimized())
+            mapped_targets = {}
+            if state:
+                try:
+                    active_entries = effective_mappings(self.config, state)
+                    fam = state.get('family', 'generic')
+                    compact = getattr(self, 'compact_binding', Studio.compact_binding)
+                    for b in state.get('buttons', []):
+                        short_spec = active_entries.get(str(b), {}).get('short', {})
+                        if short_spec.get('action', 'none') not in ('none', 'suppress'):
+                            mapped_targets[b] = compact(short_spec, fam)
+                except Exception:
+                    mapped_targets = {}
+            self.tester.update_state(
+                state,
+                collect=self.stack.currentIndex()==3 and self.isVisible() and not self.isMinimized(),
+                mapped_targets=mapped_targets,
+            )
             self.mapping_art.update_state(state)
             if hasattr(self, 'matrix'):
                 if state:
@@ -2366,6 +2613,10 @@ class Studio(GlassWindow):
                 feedback = self.engine.feedback() if state else {}
             self.virtual_kbm_page.set_device_state(state)
             self.refresh_application_profile_status()
+            cur_vslot = (self.client.status.get('virtual_gamepad') or {}).get('user_index') if (self.remote and self.client.connected) else None
+            if cur_vslot != getattr(self, '_last_virtual_slot', None):
+                self._last_virtual_slot = cur_vslot
+                self.refresh_remap_guard_banner()
             self.virtual_kbm_page.update_feedback(feedback, bool(state), self.client.status.get('suspended',False) if self.remote else QApplication.activeModalWidget() is not None)
             self.mapping_deck.feedback(feedback)
             if not self.notice_timer.isActive():
@@ -2658,14 +2909,17 @@ class Studio(GlassWindow):
             self.vigembus_button.setToolTip(status['release_url'])
 
     def open_vigembus_download(self):
-        from .virtual_xinput import VIGEMBUS_RELEASE_URL, _VIGEM_CACHE, vigembus_status_summary
+        from .virtual_xinput import _VIGEM_CACHE, vigembus_status_summary
         _VIGEM_CACHE['failed_until'] = 0.0
         self.refresh_vigembus_status(force=True)
         status = vigembus_status_summary()
         if status['ready']:
             self.notify(tr('虚拟手柄驱动 (ViGEmBus) 已就绪，手柄按键互换与连发功能已自动激活'))
             return
-        QDesktopServices.openUrl(QUrl(VIGEMBUS_RELEASE_URL))
+        if sys.platform == 'win32':
+            self.install_driver_async('vigembus')
+            return
+        QDesktopServices.openUrl(QUrl(status['release_url']))
         self.notify(tr('已在浏览器打开 ViGEmBus 官方驱动下载页，安装后重启软件即可生效'))
 
     def refresh_hidhide_status(self, force=False):
@@ -2703,6 +2957,8 @@ class Studio(GlassWindow):
                 tr('驱动已安装（当前未开启隐身）· 使用 A↔B 互换或虚拟手柄时请点击开启原始输入屏蔽'))
             self.hidhide_button.setText(tr('开启隐身'))
             self.hidhide_button.setToolTip(tr('打开设备隐身设置面板'))
+        if hasattr(self, 'refresh_remap_guard_banner'):
+            self.refresh_remap_guard_banner()
 
     def open_hidhide_settings(self):
         self.refresh_hidhide_status(force=True)
@@ -3055,6 +3311,16 @@ class Studio(GlassWindow):
         target_gamepad = self.current_gamepad_profile()
         compact = self.compact_binding
         family = (profile_family(self.config, self.snapshot, target_gamepad))
+        se_label, four_label = self._face_swap_labels(family)
+        if hasattr(self, 'swap_south_east_action'):
+            self.swap_south_east_action.setText(tr('互换 {pair} (确认 / 取消)', pair=se_label))
+        if hasattr(self, 'swap_four_face_action'):
+            self.swap_four_face_action.setText(tr('四键布局互换 ({layout})', layout=four_label))
+        if hasattr(self, 'swap_ab_xy_action'):
+            self.swap_ab_xy_action.setText(tr('互换 {pair} (确认 / 取消)', pair=se_label))
+        if hasattr(self, 'swap_ab_xy_all_action'):
+            self.swap_ab_xy_all_action.setText(tr('四键布局互换 ({layout})', layout=four_label))
+        self.refresh_remap_guard_banner()
         gamepad_entries = effective_mappings(self.config, self.snapshot, target_gamepad)
         for key, info in self.mapping_labels.items():
             entry = gamepad_entries.get(str(key), {})
@@ -3128,6 +3394,17 @@ class Studio(GlassWindow):
                     self.update_application_profile(force=True)
                 if change.get('op') == 'import_profile':
                     self.last_imported_profile = self.store.last_imported_profile
+            if (sys.platform == 'win32' or WINDOWS_FEATURES) and not self.remote and self.snapshot:
+                try:
+                    from .hidhide import should_auto_cloak_controller
+                    want_cloak = should_auto_cloak_controller(
+                        self.config,
+                        self.snapshot,
+                        mapping_enabled=bool(getattr(self, 'enabled', True)),
+                    )
+                    self.apply_device_cloaking(self.snapshot, enabled=want_cloak)
+                except Exception:
+                    pass
             self.refresh_mappings()
             if change.get('op') == 'import_profile':
                 self.notify(tr('已导入预设：{name}', name=self.last_imported_profile))
@@ -3533,9 +3810,24 @@ class Studio(GlassWindow):
                             client.uncloak_controller(vendor, product, **opts)
                         if not client.get_blacklist():
                             client.set_active(False)
+                        from .hidhide import clear_hidhide_session
+                        clear_hidhide_session(getattr(getattr(self, 'store', None), 'root', None))
             except Exception:
                 pass
         self.device.close()
+
+    def restart_as_admin(self):
+        if sys.platform != 'win32':
+            return False
+        from .application_profiles import is_process_elevated, relaunch_as_administrator
+        if is_process_elevated(None):
+            self.notify(tr('当前工作台已处于管理员权限运行'))
+            return True
+        if relaunch_as_administrator(['--wait-pid', str(os.getpid())]):
+            self.quit_app()
+            return True
+        self.notify(tr('未授予管理员权限，继续以普通权限运行'))
+        return False
 
     def quit_app(self):
         self.quitting=True
@@ -3560,6 +3852,7 @@ def run():
     parser.add_argument('--data-dir',type=Path,default=None)
     parser.add_argument('--cli',action='store_true',help='使用原命令行截图模式')
     parser.add_argument('--smoke-test',action='store_true',help=argparse.SUPPRESS)
+    parser.add_argument('--wait-pid',type=int,default=0,help=argparse.SUPPRESS)
     parser.add_argument('--page',choices=list(pages),default='home')
     parser.add_argument('--lang',choices=['auto','zh','en'],default=None,help=tr('UI 界面语言选择 (auto/zh/en)'))
     args,extra=parser.parse_known_args()
@@ -3568,9 +3861,24 @@ def run():
         sys.argv=[sys.argv[0],*extra]; cli(); return
     root=(args.data_dir or default_root()).resolve()
     root.mkdir(parents=True,exist_ok=True)
+    if args.wait_pid > 0:
+        from .ipc import is_process_alive
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and (
+            is_process_alive(args.wait_pid)
+            or (root / 'studio.lock').exists()
+            or (root / 'agent.lock').exists()
+        ):
+            time.sleep(0.08)
     if sys.platform=='win32':
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('GamePadStudio.ControllerManager')
+        if not args.smoke_test:
+            try:
+                from .hidhide import recover_orphan_hidhide_session
+                recover_orphan_hidhide_session(root)
+            except Exception:
+                pass
     app=QApplication(sys.argv[:1]); app.setApplicationName('GamePad Studio'); app.setStyle('Fusion'); app.setStyleSheet(STYLE)
     lock=QLockFile(str(root/'studio.lock'))
     lock.setStaleLockTime(1500)

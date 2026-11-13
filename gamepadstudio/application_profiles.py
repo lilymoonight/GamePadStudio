@@ -266,6 +266,18 @@ def is_process_elevated(pid=None):
 
         kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
         advapi32 = ctypes.WinDLL('advapi32', use_last_error=True)
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)
+        ]
+        advapi32.GetTokenInformation.restype = wintypes.BOOL
         TOKEN_QUERY = 0x0008
         TokenElevation = 20
         close_process = False
@@ -300,9 +312,12 @@ def is_process_elevated(pid=None):
         return False
 
 
-def uipi_elevation_warning(foreground):
+def uipi_elevation_warning(foreground, mode='kbm'):
     """Return a user-facing warning if a Windows foreground game runs elevated while GamePad Studio does not."""
     if sys.platform != 'win32' or not isinstance(foreground, dict):
+        return ''
+    if mode == 'gamepad':
+        # Native gamepad remap uses kernel XInputGetStateEx + kernel ViGEmBus, which are unaffected by UIPI.
         return ''
     pid = int(foreground.get('pid') or 0)
     if pid <= 0 or pid == os.getpid():
@@ -312,6 +327,33 @@ def uipi_elevation_warning(foreground):
     exe = str(foreground.get('executable') or '').strip()
     name = Path(exe).name if exe else f'PID {pid}'
     return f'检测到前台程序（{name}）以管理员权限运行，Windows UIPI 会拦截普通权限的键鼠模拟；请以管理员身份运行 GamePad Studio。'
+
+
+def relaunch_as_administrator(extra_args=None):
+    """Request Windows UAC elevation via ShellExecuteW('runas') to relaunch GamePad Studio as Administrator."""
+    if sys.platform != 'win32':
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        import subprocess
+        exe = sys.executable
+        tail = list(extra_args) if extra_args is not None else list(sys.argv[1:])
+        if getattr(sys, 'frozen', False):
+            arg_list = tail
+        else:
+            arg_list = ['-m', 'gamepadstudio', *tail]
+        params = subprocess.list2cmdline(arg_list) if arg_list else ''
+        cwd = str(Path.cwd())
+        shell32 = ctypes.WinDLL('shell32', use_last_error=True)
+        shell32.ShellExecuteW.argtypes = [
+            wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int
+        ]
+        shell32.ShellExecuteW.restype = ctypes.c_void_p
+        rc = shell32.ShellExecuteW(None, 'runas', exe, params, cwd, 1)
+        return int(rc or 0) > 32
+    except Exception:
+        return False
 
 
 def _foreground_identity(foreground):

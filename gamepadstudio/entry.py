@@ -21,11 +21,19 @@ def run():
     parser.add_argument('--agent-command',choices=['status','pause','resume','stop','capture'])
     parser.add_argument('--exit-ui',action='store_true')
     parser.add_argument('--uncloak-all',action='store_true')
+    parser.add_argument('--recover-hidhide',action='store_true')
     args,_=parser.parse_known_args()
     if args.uncloak_all:
-        from .hidhide import HidHideClient
+        from .hidhide import HidHideClient, clear_hidhide_session
         client = HidHideClient()
         ok, msg = client.uncloak_all_controllers()
+        clear_hidhide_session(args.data_dir)
+        if sys.stdout:
+            print(json.dumps({'ok': ok, 'message': msg}, ensure_ascii=False))
+        return 0 if ok else 1
+    if args.recover_hidhide:
+        from .hidhide import recover_orphan_hidhide_session
+        ok, msg = recover_orphan_hidhide_session(args.data_dir)
         if sys.stdout:
             print(json.dumps({'ok': ok, 'message': msg}, ensure_ascii=False))
         return 0 if ok else 1

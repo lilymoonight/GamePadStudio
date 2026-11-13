@@ -217,6 +217,25 @@ def profile_mode(config, name):
     return 'gamepad'
 
 
+def profile_has_gamepad_remap(config, state=None, profile_name=None):
+    """Return True if the target (or active) profile contains any gamepad-to-gamepad remap/macro."""
+    if not isinstance(config, dict):
+        return False
+    name = profile_name or config.get('active_profile', '')
+    if not name:
+        return False
+    profile = (config.get('profiles') or {}).get(name, {})
+    if not isinstance(profile, dict):
+        return False
+    for entry in profile.values():
+        if isinstance(entry, dict):
+            for gesture in ('short', 'long'):
+                act = (entry.get(gesture) or {}).get('action')
+                if act in ('gamepad_button', 'gamepad_chord', 'gamepad_turbo', 'gamepad_macro'):
+                    return True
+    return False
+
+
 def get_buttons(lang=None):
     from .i18n import get_language
     is_en = (lang == 'en') or (lang is None and get_language() == 'en')
@@ -399,12 +418,84 @@ class ConfigStore:
         needs_device_profiles = self.data.get('device_profile_version', 0) < DEVICE_PROFILE_VERSION
         if needs_device_profiles:
             self._migrate_device_profiles()
-        if needs_mapping_migration or needs_cleanup or needs_nikki_layout or needs_device_profiles:
+        needs_virtual_cleanup = self._cleanup_virtual_controller_scopes()
+        if needs_mapping_migration or needs_cleanup or needs_nikki_layout or needs_device_profiles or needs_virtual_cleanup:
             self.data['mapping_revision'] = self.data.get('mapping_revision', 0) + 1
             self.save(merge=False)
         elif needs_recording_mode:
             self.save(merge=False)
         self._baseline = copy.deepcopy(self.data)
+
+    def _cleanup_virtual_controller_scopes(self) -> bool:
+        """Self-heal ghost profiles auto-created by virtual gamepads (ViGEmBus / Steam / vJoy)."""
+        owners = self.data.get('profile_devices', {})
+        ctrl_profiles = self.data.get('controller_profiles', {})
+        if not isinstance(owners, dict) or not isinstance(ctrl_profiles, dict):
+            return False
+        all_scopes = {
+            s for s in (*owners.values(), *ctrl_profiles.keys(), self.data.get('preferred_controller', ''))
+            if isinstance(s, str) and s and s != OFFLINE_PROFILE_SCOPE
+        }
+        if not all_scopes:
+            return False
+
+        def _is_pure_virtual_scope(s: str) -> bool:
+            low = s.lower()
+            return ':28de:11ff' in low or ':1234:bead' in low
+
+        real_scopes = [
+            s for s in all_scopes
+            if not _is_pure_virtual_scope(s)
+            and not s.lower().startswith('xbox:045e:028e:030003f05e0400008e02000000007200')
+        ]
+        virtual_scopes = set()
+        for s in all_scopes:
+            low = s.lower()
+            if _is_pure_virtual_scope(s):
+                virtual_scopes.add(s)
+            elif low.startswith('xbox:045e:028e:030003f05e0400008e02000000007200') and real_scopes:
+                # Only purge ambiguous 045e:028e scope if all its profiles are untouched auto-defaults
+                owned_names = [n for n, o in owners.items() if o == s]
+                all_untouched = True
+                for n in owned_names:
+                    if is_nikki_profile(self.data, n):
+                        continue
+                    if re.fullmatch(r'(?:Xbox|通用手柄|XInput) · 默认(?: \d+)?', n):
+                        prof = self.data['profiles'].get(n, {})
+                        if not profile_has_gamepad_remap({'active_profile': n, 'profiles': {n: prof}}):
+                            continue
+                    all_untouched = False
+                    break
+                if all_untouched:
+                    virtual_scopes.add(s)
+
+        if not virtual_scopes:
+            return False
+
+        ghost_profiles = {name for name, owner in owners.items() if owner in virtual_scopes}
+        fallback_scope = real_scopes[0] if real_scopes else ''
+        fallback_profile = ctrl_profiles.get(fallback_scope, '') if fallback_scope else ''
+        if not fallback_profile or fallback_profile in ghost_profiles or fallback_profile not in self.data['profiles']:
+            for name, owner in owners.items():
+                if owner == fallback_scope and name not in ghost_profiles and profile_mode(self.data, name) == 'gamepad':
+                    fallback_profile = name
+                    break
+
+        was_virtual_active = self.data.get('active_profile') in ghost_profiles
+        if ghost_profiles:
+            remove_profiles(self.data, ghost_profiles)
+        for s in virtual_scopes:
+            ctrl_profiles.pop(s, None)
+            self.data.get('device_settings', {}).pop(s, None)
+            self.data.get('application_profiles', {}).pop(s, None)
+            init_list = self.data.get('device_profile_initialized')
+            if isinstance(init_list, list) and s in init_list:
+                init_list.remove(s)
+        if self.data.get('preferred_controller') in virtual_scopes:
+            self.data['preferred_controller'] = fallback_scope
+        if was_virtual_active and fallback_profile and fallback_profile in self.data['profiles']:
+            self.data['active_profile'] = fallback_profile
+        return True
 
     def _migrate_mappings(self):
         if self.path.exists():
@@ -1111,9 +1202,29 @@ class ConfigStore:
         return copy.deepcopy(self.data)
 
     def _swap_ab_xy(self, change, state):
-        """Atomically exchange A↔B ('0'↔'1') and X↔Y ('2'↔'3') in a gamepad profile."""
-        from .mapping_engine import validate_mappings
+        """Atomically exchange button pairs (default A↔B '0'↔'1' and X↔Y '2'↔'3') in a gamepad profile."""
+        from .mapping_engine import canonical_trigger, input_sources, validate_mappings
         mapping_input_signature(state)
+        raw_pairs = change.get('pairs')
+        if raw_pairs is None:
+            swap_pairs = (('0', '1'), ('2', '3'))
+        else:
+            if not isinstance(raw_pairs, (list, tuple)) or not raw_pairs:
+                raise ValueError('无效的按键互换配对')
+            allowed = set(input_sources(state))
+            parsed = []
+            seen = set()
+            for pair in raw_pairs:
+                if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                    raise ValueError('无效的按键互换配对')
+                a, b = canonical_trigger(str(pair[0])), canonical_trigger(str(pair[1]))
+                if a == b or a in seen or b in seen:
+                    raise ValueError('请选择不重复的按键互换配对')
+                if not (set(a.split('+')) <= allowed and set(b.split('+')) <= allowed):
+                    raise ValueError('请选择当前手柄支持的输入按键')
+                seen.update((a, b))
+                parsed.append((a, b))
+            swap_pairs = tuple(parsed)
         staged = copy.deepcopy(self.data)
         if self.path.exists():
             staged = json.loads(self.path.read_text(encoding='utf-8'))
@@ -1124,7 +1235,7 @@ class ConfigStore:
             raise ValueError('请选择当前手柄的预设')
         mode = profile_mode(staged, name)
         updates = {}
-        for first, second in (('0', '1'), ('2', '3')):
+        for first, second in swap_pairs:
             before_first = swap_binding_entry(staged, state, name, first)
             before_second = swap_binding_entry(staged, state, name, second)
             updates[first] = resolve_swapped_entry(first, second, before_second, mode=mode)

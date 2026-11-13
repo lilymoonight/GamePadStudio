@@ -2,6 +2,22 @@
 
 All notable changes to **GamePad Studio** are documented in this file.
 
+## [2.3.0] - 2026-11-13
+
+### 🛡️ Universal Windows Compatibility & Anti-Lockout Hardening
+- **Kernel XInput UIPI Bypass (`device.py`)**: Added direct `xinput1_4.dll` (`XInputGetStateEx` ordinal 100) kernel `XUSB` fallback when an elevated or anti-cheat foreground game (such as *Infinity Nikki*) blocks background `WM_INPUT` (`RAWINPUT`) messages under standard user privileges, while strictly excluding `active_virtual_xinput_slots()` to avoid feedback loops.
+- **Smart Auto-Cloaking Guard (`hidhide.py` / `agent.py` / `studio.py`)**: Prevented physical controllers from ever being cloaked into a non-responsive state on unmapped native gamepad profiles, while mapping is paused, or before `ViGEmBus` is installed; toggling A↔B swap off or pausing mapping automatically restores native controller access.
+- **Orphan HidHide Self-Healing & Safe Uninstall (`hidhide.py` / `entry.py` / `GamePadStudio.iss`)**: Added session-owned HidHide state tracking (`hidhide_session.json`), a lightweight `--recover-hidhide` Windows logon & startup guard for crash/power-loss recovery, and mandatory `--uncloak-all` cleanup during uninstallation even when the app is closed.
+- **Composite USB XInput Co-Cloaking & Dynamic `HidHideCLI` Discovery (`hidhide.py`)**: Extended `ContainerID` matching to co-cloak/uncloak `Enum\USB` `XnaComposite` and `XboxComposite` nodes for wired and 2.4GHz controllers, added dynamic registry/PATH resolution for `HidHideCLI.exe` with `stdin=DEVNULL` non-blocking execution, and added non-destructive `--app-reg` bootstrap fallback.
+- **Player 1 (`Slot 0`) Reservation & C++ Notification GC Safety (`virtual_xinput.py` / `agent.py`)**: Pre-reserved `Slot 0 (1P)` at startup for remapped profiles, added automatic `reclaim_slot_zero()` on physical controller reconnect, surfaced a `2P` slot-contention hint banner, and eliminated CPython cyclic-GC crashes (`0xc000001d`) in `ViGEmClient.dll` notification threads via `weakref` closure isolation.
+- **One-Click Driver Installer & Conflict Detection (`driver_setup.py` / `studio.py`)**: Added background one-click download and launch for official signed `ViGEmBus` and `HidHide` installers (with `winget` and browser fallbacks), exclusive `HidHideClient.exe` GUI handle contention detection, one-click Steam HidHide whitelist conflict removal, and tray "Restart as Administrator" handoff (`--wait-pid`) for elevated Virtual KBM games.
+
+### 📦 Packaging & Release Pipeline
+- Synchronized version `2.3.0` across `pyproject.toml`, `gamepadstudio/__init__.py`, `GamePadStudio.spec`, and `installer/GamePadStudio.iss`.
+- Updated `.github/workflows/build.yml` to build and verify fresh Windows x64 and macOS 15 release artifacts directly on `v*` tag pushes.
+
+---
+
 ## [2.2.0] - 2026-10-27
 
 ### ✨ Design Aesthetics & UI Architecture

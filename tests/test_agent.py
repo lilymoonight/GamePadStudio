@@ -360,8 +360,14 @@ def test_cloaking_commands_forward_selected_physical_path_and_never_guess(tmp_pa
     agent._user32 = SimpleNamespace(GetAsyncKeyState=lambda key: 0)
     agent._last_prtsc_down = False
     try:
+        from gamepadstudio.kbm_mapper import NIKKI_PROFILE_NAME
         assert not calls
         agent.poll()
+        # Default native unmapped profile keeps physical pad visible; switching to KBM profile cloaks it
+        assert calls == [('uncloak', 0x054c, 0x0ce6, {'device_path': state['device_path']})]
+        calls.clear()
+        agent.config['active_profile'] = NIKKI_PROFILE_NAME
+        agent.apply_device_cloaking()
         assert calls == [('cloak', 0x054c, 0x0ce6, {'device_path': state['device_path']})]
         result = agent.handle({'command': 'set_device_cloaking', 'enabled': False})
         assert not result['applied'] and result['message'] == 'multiple hardware candidates'

@@ -156,6 +156,7 @@ class WindowsActions:
         with self._lock:
             pad = self._ensure_virtual_pad()
             active_buttons = set(self.held_gamepad_buttons) if buttons is None else set(buttons)
+            self._last_passthrough_buttons = set(active_buttons) - set(self.held_gamepad_buttons)
             self._last_virtual_axes = tuple(axes or ())
             return pad.emit_frame(buttons=active_buttons, axes=self._last_virtual_axes, trigger_overrides=trigger_overrides)
 
@@ -166,8 +167,9 @@ class WindowsActions:
                 self.held_gamepad_buttons.add(b)
             else:
                 self.held_gamepad_buttons.discard(b)
+            combined = set(self.held_gamepad_buttons) | getattr(self, '_last_passthrough_buttons', set())
             self._ensure_virtual_pad().emit_frame(
-                buttons=set(self.held_gamepad_buttons),
+                buttons=combined,
                 axes=getattr(self, '_last_virtual_axes', ()),
             )
 
@@ -182,8 +184,9 @@ class WindowsActions:
                     self.held_gamepad_buttons.add(tok)
                 else:
                     self.held_gamepad_buttons.discard(tok)
+            combined = set(self.held_gamepad_buttons) | getattr(self, '_last_passthrough_buttons', set())
             self._ensure_virtual_pad().emit_frame(
-                buttons=set(self.held_gamepad_buttons),
+                buttons=combined,
                 axes=getattr(self, '_last_virtual_axes', ()),
             )
 
@@ -315,42 +318,117 @@ class WindowsActions:
 
     def is_nikki_game_focused(self) -> bool:
         """
-        判断当前前台活动窗口是否为 3D 动作游戏本体 (InfinityNikki / X6Game / Genshin 等)
-        - 采用双重感知：先检查窗口类名与标题 (即便被反作弊阻止 OpenProcess 也能 100% 准确感知)，再校验进程名
-        - 自动精准排除启动器 (xstarter.exe / Qt 启动器)，保障启动器与桌面原生点击自由度
+        通用前台游戏窗口感知（兼容 Unreal / Unity / SDL / GLFW / CryEngine / 原生全屏与无边框全屏游戏）
+        - 自动排除自身进程、桌面 Shell、浏览器、IDE、终端、视频播放器与各类游戏启动器
+        - 支持窗口类名识别、独占/隐藏硬件光标感知、全屏/无边框全屏覆盖感知与进程特征回退
         """
+        import os
+
+        _NON_GAME_PROCESSES = {
+            'explorer.exe', 'dwm.exe', 'searchhost.exe', 'shellexperiencehost.exe',
+            'startmenuexperiencehost.exe', 'applicationframehost.exe', 'taskmgr.exe',
+            'lockapp.exe', 'sihost.exe', 'textinputhost.exe',
+            'chrome.exe', 'msedge.exe', 'firefox.exe', 'brave.exe', 'opera.exe', 'arc.exe', 'vivaldi.exe',
+            'code.exe', 'devenv.exe', 'pycharm64.exe', 'idea64.exe', 'cursor.exe', 'windsurf.exe', 'antigravity.exe',
+            'powershell.exe', 'pwsh.exe', 'cmd.exe', 'windowsterminal.exe', 'conhost.exe',
+            'python.exe', 'pythonw.exe', 'pytest.exe',
+            'discord.exe', 'qq.exe', 'weixin.exe', 'wechat.exe', 'telegram.exe', 'slack.exe',
+            'obs64.exe', 'notepad.exe', 'winword.exe', 'excel.exe', 'powerpnt.exe',
+            'vlc.exe', 'mpv.exe', 'potplayermini64.exe', 'potplayer64.exe',
+        }
+        _LAUNCHER_KEYWORDS = (
+            'starter', 'launcher', 'install', 'update', 'setup', 'unins',
+            'steamwebhelper', 'epicgameslauncher', 'playnite', 'galaxyclient',
+            'riotclient', 'wegame', 'gamepadstudio', 'dualsensestudio',
+        )
+        _GAME_WINDOW_CLASSES = {
+            'UnrealWindow', 'UnityWndClass', 'SDL_app', 'SDL_Window',
+            'GLFW30', 'CryENGINE', 'grcWindow', 'Prism3D', 'Valve001',
+        }
+        _NON_GAME_CLASSES = {
+            'Progman', 'WorkerW', 'Shell_TrayWnd', 'CabinetWClass',
+            'ConsoleWindowClass', 'CASCADIA_HOSTING_WINDOW_CLASS', 'ApplicationFrameWindow',
+        }
+
+        pname = (self.get_foreground_process_name() or '').lower()
+        if pname:
+            if pname in _NON_GAME_PROCESSES or any(kw in pname for kw in _LAUNCHER_KEYWORDS):
+                return False
+
         try:
             hwnd = self.user32.GetForegroundWindow()
             if hwnd:
+                fg_pid = W.DWORD(0)
+                self.user32.GetWindowThreadProcessId(hwnd, C.byref(fg_pid))
+                if fg_pid.value == os.getpid():
+                    return False
+
                 cbuf = C.create_unicode_buffer(260)
                 tbuf = C.create_unicode_buffer(260)
                 self.user32.GetClassNameW(hwnd, cbuf, 260)
                 self.user32.GetWindowTextW(hwnd, tbuf, 260)
                 cname = cbuf.value or ''
                 title = tbuf.value or ''
+                title_low = title.lower()
 
-                # 如果是 Qt 启动器窗口，明确判定为非游戏本体
-                if 'Qt' in cname or 'launcher' in title.lower() or '启动器' in title:
+                if 'Qt' in cname or cname in _NON_GAME_CLASSES or 'launcher' in title_low or '启动器' in title:
                     return False
 
-                # 虚幻引擎原生窗口，且非编辑器
-                if cname == 'UnrealWindow' and 'editor' not in title.lower():
+                if cname in _GAME_WINDOW_CLASSES and 'editor' not in title_low:
                     return True
 
-                # 标题明确匹配目标游戏本体
-                if any(k in title.lower() for k in ('infinitynikki', 'x6game', '无限暖暖', 'nikki', 'infinity')):
+                if any(k in title_low for k in ('infinitynikki', 'x6game', '无限暖暖', 'nikki')):
                     return True
+
+                rect = RECT()
+                if self.user32.GetWindowRect(hwnd, C.byref(rect)):
+                    win_w = rect.right - rect.left
+                    win_h = rect.bottom - rect.top
+                    if win_w >= 640 and win_h >= 480 and pname and pname not in _NON_GAME_PROCESSES:
+                        # 1. 3D/动作游戏捕获并隐藏系统硬件鼠标光标 (CURSOR_SHOWING == 0x1 未置位)
+                        class _CURSORINFO(C.Structure):
+                            _fields_ = [
+                                ('cbSize', W.DWORD),
+                                ('flags', W.DWORD),
+                                ('hCursor', W.HANDLE),
+                                ('ptScreenPos', POINT),
+                            ]
+                        ci = _CURSORINFO()
+                        ci.cbSize = C.sizeof(_CURSORINFO)
+                        if self.user32.GetCursorInfo(C.byref(ci)) and ci.flags == 0:
+                            return True
+
+                        # 2. 全屏 / 无边框全屏独占覆盖当前显示器
+                        class _MONITORINFO(C.Structure):
+                            _fields_ = [
+                                ('cbSize', W.DWORD),
+                                ('rcMonitor', RECT),
+                                ('rcWork', RECT),
+                                ('dwFlags', W.DWORD),
+                            ]
+                        hmon = self.user32.MonitorFromWindow(hwnd, 2)
+                        if hmon:
+                            mi = _MONITORINFO()
+                            mi.cbSize = C.sizeof(_MONITORINFO)
+                            if self.user32.GetMonitorInfoW(hmon, C.byref(mi)):
+                                mr = mi.rcMonitor
+                                if (
+                                    rect.left <= mr.left and rect.top <= mr.top
+                                    and rect.right >= mr.right and rect.bottom >= mr.bottom
+                                ):
+                                    return True
         except Exception:
             pass
 
-        # 2. 回退校验进程映像名称
-        pname = self.get_foreground_process_name()
         if not pname:
             return False
-        # 排除各类启动器程序
-        if any(kw in pname for kw in ('starter', 'launcher', 'install', 'update')):
-            return False
-        return any(kw in pname for kw in ('infinitynikki', 'x6game', 'nikki', 'genshin', 'game'))
+        return any(kw in pname for kw in (
+            'infinitynikki', 'x6game', 'nikki', 'genshin', 'starrail', 'zenless',
+            'wuthering', 'eldenring', 'cyberpunk', 'monsterhunter', 'sekiro',
+            'palworld', 'blackmyth', 'b1-win64', 'win64-shipping', 'game',
+        ))
+
+    is_game_window_focused = is_nikki_game_focused
 
 
     def guard_cursor_edge(self, margin=35, only_if_game=True):

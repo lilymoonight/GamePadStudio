@@ -107,6 +107,26 @@ class InputTester(QWidget):
         self.raw_tag.setToolTip(tr('SDL 原始标准轴值；不应用软件死区。'))
         toolbar.addWidget(self.raw_tag, 0, Qt.AlignTop)
 
+        self.protect = QPushButton(tr('测试保护: 开'))
+        self.protect.setObjectName('testAction')
+        self.protect.setCheckable(True)
+        self.protect.setChecked(True)
+        self.protect.setFixedHeight(24)
+        self.protect.setAccessibleName(tr('测试保护'))
+        self.protect.setToolTip(tr('在硬件遥测页前台测试时暂停映射输出；点击切换为「关」可在副屏边看遥测边测试虚拟手柄/网页手柄输出。'))
+
+        def _sync_protect_style(checked):
+            self.protect.setText(tr('测试保护: 开') if checked else tr('测试保护: 关'))
+            color = TOKENS['amber'] if checked else TOKENS['green']
+            self.protect.setStyleSheet(
+                f'font-size: 11px; min-height: 20px; padding: 0 6px; font-weight: 700; '
+                f'{tag_style(color, 0.12, 0.28)}'
+            )
+
+        _sync_protect_style(True)
+        self.protect.toggled.connect(_sync_protect_style)
+        toolbar.addWidget(self.protect, 0, Qt.AlignTop)
+
         self.events_button = QPushButton(tr('活动记录'))
         self.events_button.setObjectName('testAction')
         self.events_button.setFixedHeight(24)
@@ -133,12 +153,6 @@ class InputTester(QWidget):
         layout.addLayout(toolbar)
 
         # Headless tool state controllers (auto-active; hidden from UI to eliminate noise)
-        self.protect = IconButton('shield', tr('测试保护'), size=32)
-        self.protect.setParent(self)
-        self.protect.setCheckable(True)
-        self.protect.setChecked(True)
-        self.protect.hide()
-
         self.trace = IconButton('wave', tr('显示摇杆运动轨迹'), size=32)
         self.trace.setParent(self)
         self.trace.setCheckable(True)
@@ -472,7 +486,7 @@ class InputTester(QWidget):
         for i in range(1, count):
             QTimer.singleShot(i * 180, pulse)
 
-    def update_state(self, state, collect=True):
+    def update_state(self, state, collect=True, mapped_targets=None):
         self.state = state
         from .stick_calibration import supports_right_stick
         self.measure_stick_button.setEnabled(supports_right_stick(state))
@@ -602,7 +616,14 @@ class InputTester(QWidget):
                 )
 
         if pressed:
-            pressed_names = [names[b] for b in sorted(pressed) if b < len(names)]
+            pressed_names = []
+            for b in sorted(pressed):
+                if b < len(names):
+                    base_name = names[b]
+                    if isinstance(mapped_targets, dict) and b in mapped_targets and mapped_targets[b]:
+                        pressed_names.append(f'{base_name} → {mapped_targets[b]}')
+                    else:
+                        pressed_names.append(base_name)
             self.pressed_reading.setText(tr('按下: ') + '、'.join(pressed_names))
             self.key_count.setText(f'{len(pressed)} / {len(self.diagram.available)}')
         else:

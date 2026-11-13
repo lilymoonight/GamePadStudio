@@ -1,4 +1,4 @@
-#define AppVersion "2.2.0"
+#define AppVersion "2.3.0"
 [Setup]
 AppId={{A430C3D2-9278-48A9-BA24-15C59D0A0120}
 AppName=GamePad Studio
@@ -43,7 +43,9 @@ Name: "{autodesktop}\GamePad Studio"; Filename: "{app}\GamePadStudio.exe"; IconF
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "DualSenseStudioAgent"; Flags: deletevalue
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "GamePadStudioAgent"; ValueData: """{app}\GamePadStudio.exe"" --agent"; Tasks: startup; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "GamePadStudioHidHideGuard"; Flags: deletevalue; Tasks: startup
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "GamePadStudioAgent"; Flags: deletevalue; Check: not WizardIsTaskSelected('startup')
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "GamePadStudioHidHideGuard"; ValueData: """{app}\GamePadStudio.exe"" --recover-hidhide"; Check: not WizardIsTaskSelected('startup'); Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\GamePadStudio.exe"; Description: "打开 GamePad Studio"; Flags: nowait postinstall skipifsilent
@@ -69,7 +71,14 @@ begin
 end;
 
 function InitializeUninstall(): Boolean;
+var
+  ResultCode: Integer;
+  ExePath: String;
 begin
   StopInstalledApp();
+  ExePath := ExpandConstant('{app}\GamePadStudio.exe');
+  if FileExists(ExePath) then begin
+    Exec(ExePath, '--uncloak-all', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
   Result := True;
 end;

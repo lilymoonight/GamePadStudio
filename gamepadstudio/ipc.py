@@ -177,12 +177,20 @@ def is_process_alive(pid: int) -> bool:
         return False
     if sys.platform == 'win32':
         try:
-            hproc = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            from ctypes import wintypes as _W
+            k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            k32.OpenProcess.argtypes = [_W.DWORD, _W.BOOL, _W.DWORD]
+            k32.OpenProcess.restype = _W.HANDLE
+            k32.GetExitCodeProcess.argtypes = [_W.HANDLE, ctypes.POINTER(_W.DWORD)]
+            k32.GetExitCodeProcess.restype = _W.BOOL
+            k32.CloseHandle.argtypes = [_W.HANDLE]
+            k32.CloseHandle.restype = _W.BOOL
+            hproc = k32.OpenProcess(0x1000, False, int(pid))
             if not hproc:
                 return False
-            exit_code = ctypes.c_ulong()
-            ret = ctypes.windll.kernel32.GetExitCodeProcess(hproc, ctypes.byref(exit_code))
-            ctypes.windll.kernel32.CloseHandle(hproc)
+            exit_code = _W.DWORD(0)
+            ret = k32.GetExitCodeProcess(hproc, ctypes.byref(exit_code))
+            k32.CloseHandle(hproc)
             return bool(ret and exit_code.value == 259)
         except Exception:
             return False
@@ -201,11 +209,21 @@ def terminate_pid(pid: int, timeout_ms: int = 800) -> bool:
     if sys.platform == 'win32':
         # 1. 尝试 Win32 API 直接终止
         try:
-            hproc = ctypes.windll.kernel32.OpenProcess(0x0001 | 0x00100000, False, pid)
+            from ctypes import wintypes as _W
+            k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            k32.OpenProcess.argtypes = [_W.DWORD, _W.BOOL, _W.DWORD]
+            k32.OpenProcess.restype = _W.HANDLE
+            k32.TerminateProcess.argtypes = [_W.HANDLE, _W.UINT]
+            k32.TerminateProcess.restype = _W.BOOL
+            k32.WaitForSingleObject.argtypes = [_W.HANDLE, _W.DWORD]
+            k32.WaitForSingleObject.restype = _W.DWORD
+            k32.CloseHandle.argtypes = [_W.HANDLE]
+            k32.CloseHandle.restype = _W.BOOL
+            hproc = k32.OpenProcess(0x0001 | 0x00100000, False, int(pid))
             if hproc:
-                ctypes.windll.kernel32.TerminateProcess(hproc, 1)
-                ctypes.windll.kernel32.WaitForSingleObject(hproc, timeout_ms)
-                ctypes.windll.kernel32.CloseHandle(hproc)
+                k32.TerminateProcess(hproc, 1)
+                k32.WaitForSingleObject(hproc, int(timeout_ms))
+                k32.CloseHandle(hproc)
                 if not is_process_alive(pid):
                     return True
         except Exception:
@@ -232,6 +250,47 @@ def terminate_pid(pid: int, timeout_ms: int = 800) -> bool:
         except OSError:
             return False
     return False
+
+
+def _is_our_process_image(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if sys.platform != 'win32':
+        return True
+    try:
+        from ctypes import wintypes as _W
+        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        k32.OpenProcess.argtypes = [_W.DWORD, _W.BOOL, _W.DWORD]
+        k32.OpenProcess.restype = _W.HANDLE
+        k32.QueryFullProcessImageNameW.argtypes = [_W.HANDLE, _W.DWORD, _W.LPWSTR, ctypes.POINTER(_W.DWORD)]
+        k32.QueryFullProcessImageNameW.restype = _W.BOOL
+        k32.CloseHandle.argtypes = [_W.HANDLE]
+        k32.CloseHandle.restype = _W.BOOL
+        hproc = k32.OpenProcess(0x1000, False, int(pid))
+        if not hproc:
+            return False
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = _W.DWORD(1024)
+            if k32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size)):
+                exe_base = os.path.basename(buf.value).lower()
+                return any(tag in exe_base for tag in ('gamepadstudio', 'dualsensestudio', 'python'))
+        finally:
+            k32.CloseHandle(hproc)
+    except Exception:
+        pass
+    return True
+
+
+def is_endpoint_alive(root: Path, role: str = 'agent') -> bool:
+    """Return True if the lock file for `role` ('agent' or 'ui') is owned by a live GamePad Studio process."""
+    lock_name = 'studio.lock' if role == 'ui' else 'agent.lock'
+    pid = read_lock_pid(Path(root) / lock_name)
+    if pid <= 0 or not is_process_alive(pid):
+        return False
+    return _is_our_process_image(pid)
 
 
 def cleanup_stale_agent(root: Path):

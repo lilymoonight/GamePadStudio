@@ -2138,6 +2138,11 @@ class VirtualKbmPage(QWidget):
         ok, text = self.hidhide.uncloak_all_controllers()
         if hasattr(self.owner, '_cloaked_devices'):
             self.owner._cloaked_devices.clear()
+        try:
+            from .hidhide import clear_hidhide_session
+            clear_hidhide_session(getattr(self.store, 'root', None))
+        except Exception:
+            pass
         self.owner.setting('device_cloaking_enabled', False)
         if hasattr(self.owner, 'refresh_hidhide_status'):
             self.owner.refresh_hidhide_status(force=True)
@@ -2169,6 +2174,11 @@ class VirtualKbmPage(QWidget):
                 self.owner._cloaked_devices.add(key)
             else:
                 self.owner._cloaked_devices.discard(key)
+            try:
+                from .hidhide import record_hidhide_session
+                record_hidhide_session(self.owner._cloaked_devices, getattr(self.store, 'root', None))
+            except Exception:
+                pass
         if hasattr(self.owner, 'refresh_hidhide_status'):
             self.owner.refresh_hidhide_status(force=True)
         self.refresh_cloaking_status()

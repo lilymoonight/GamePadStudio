@@ -1,6 +1,7 @@
 """Independent mapping process for the current user's desktop session."""
 from datetime import datetime
 import copy
+import ctypes as C
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,7 @@ from .application_profiles import (
     ApplicationProfileResolver,
     application_profiles_supported,
     foreground_application,
+    is_process_elevated,
     uipi_elevation_warning,
 )
 from .battery_monitor import BatteryMonitor
@@ -96,7 +98,60 @@ class Agent(QObject):
         self.apply_gamebar_shield()
         self.scan()
         self.apply_device_cloaking()
+        if sys.platform == 'win32' and isinstance(getattr(self.device, 'lib', None), C.CDLL) and self._should_hold_virtual_gamepad():
+            self._ensure_virtual_gamepad_slot_zero()
         self.log('后台映射已启动')
+
+    def _should_hold_virtual_gamepad(self):
+        if sys.platform != 'win32' or not self.enabled:
+            return False
+        from .studio_core import profile_has_gamepad_remap
+        from .virtual_xinput import virtual_gamepad_backend_available
+        if not virtual_gamepad_backend_available():
+            return False
+        if self.state:
+            settings = device_config(self.config, self.state)
+            return bool(
+                settings.get('device_cloaking_enabled', True)
+                and profile_has_gamepad_remap(self.config, self.state)
+            )
+        controller_profiles = self.config.get('controller_profiles')
+        if not isinstance(controller_profiles, dict):
+            return False
+        dev_settings = self.config.get('device_settings')
+        dev_settings = dev_settings if isinstance(dev_settings, dict) else {}
+        pref = str(self.config.get('preferred_controller') or '').strip()
+        scopes = [pref] if pref and pref in controller_profiles else [
+            sc for sc in controller_profiles if sc and sc != 'offline:xinput'
+        ]
+        for scope in scopes:
+            prof = controller_profiles.get(scope, '')
+            sc_cfg = dev_settings.get(scope, {})
+            cloaking_on = sc_cfg.get('device_cloaking_enabled', True) if isinstance(sc_cfg, dict) else True
+            if cloaking_on and prof and profile_has_gamepad_remap(self.config, {'device_key': scope}, profile_name=prof):
+                return True
+        return False
+
+    def _ensure_virtual_gamepad_slot_zero(self):
+        if not hasattr(self.actions, 'sync_virtual_gamepad'):
+            return
+        try:
+            self.actions.sync_virtual_gamepad(buttons=(), axes=())
+            pad = getattr(self.actions, 'virtual_pad', None) or getattr(self.actions, '_virtual_pad', None)
+            if pad is not None and not self.state and getattr(pad, 'user_index', None) not in (None, 0):
+                if hasattr(pad, 'reclaim_slot_zero'):
+                    pad.reclaim_slot_zero()
+                    self.actions.sync_virtual_gamepad(buttons=(), axes=())
+        except Exception:
+            pass
+
+    def _virtual_gamepad_status(self):
+        pad = getattr(self.actions, 'virtual_pad', None) or getattr(self.actions, '_virtual_pad', None)
+        connected = bool(pad is not None and getattr(pad, 'is_connected', False))
+        return {
+            'connected': connected,
+            'user_index': getattr(pad, 'user_index', None) if connected else None,
+        }
 
     def apply_device_cloaking(self):
         if sys.platform == 'darwin':
@@ -119,17 +174,25 @@ class Agent(QObject):
             return
         if sys.platform != 'win32':
             return
-        settings = device_config(self.config, self.state)
         if not self.state:
             return
         try:
-            from .hidhide import HidHideClient, resolve_controller_vid_pid
+            from .hidhide import (
+                HidHideClient,
+                record_hidhide_session,
+                resolve_controller_vid_pid,
+                should_auto_cloak_controller,
+            )
             vendor, product = resolve_controller_vid_pid(self.state)
             if not vendor or not product:
                 return
             client = HidHideClient()
             if client.is_driver_installed():
-                enabled = settings.get('device_cloaking_enabled', True)
+                enabled = should_auto_cloak_controller(
+                    self.config,
+                    self.state,
+                    mapping_enabled=bool(getattr(self, 'enabled', True)),
+                )
                 options = {'device_path': self.state['device_path']} if self.state.get('device_path') else {}
                 key = (vendor, product, options.get('device_path'))
                 ok, msg = client.cloak_controller(vendor, product, **options) if enabled else client.uncloak_controller(vendor, product, **options)
@@ -140,6 +203,7 @@ class Agent(QObject):
                         self._cloaked_devices.add(key)
                     else:
                         self._cloaked_devices.discard(key)
+                    record_hidhide_session(self._cloaked_devices, getattr(self, 'root', None))
                     self.log(f'硬件独占隐身已就绪：{msg}' if enabled else f'手柄原始输入已恢复：{msg}')
                 else:
                     self.log(f'硬件独占隐身未生效：{msg}')
@@ -185,6 +249,9 @@ class Agent(QObject):
 
     def status(self):
         return {'pid':os.getpid(),'device':self.state,'enabled':self.enabled,'capturing':self.busy,
+                'elevated':is_process_elevated(None),
+                'uipi_warning':getattr(self, '_current_uipi_warning', ''),
+                'virtual_gamepad':self._virtual_gamepad_status(),
                 'input_permission':input_permission_status(),
                 'capabilities':{'application_profiles':application_profiles_supported(),
                                 'emergency_hotkey':emergency_hotkey_supported()},
@@ -231,13 +298,18 @@ class Agent(QObject):
             return False
         self.last_application_check = now
         foreground = foreground_application()
-        warning = uipi_elevation_warning(foreground)
+        from .studio_core import profile_mode
+        active_mode = profile_mode(self.config, self.config.get('active_profile', ''))
+        warning = uipi_elevation_warning(foreground, mode=active_mode)
+        self._current_uipi_warning = warning
         if warning and warning != getattr(self, '_last_uipi_warning', ''):
             self._last_uipi_warning = warning
             try:
                 self.log(warning)
             except Exception:
                 pass
+        elif not warning:
+            self._last_uipi_warning = ''
         protected_pids = {os.getpid(), read_lock_pid(self.root / 'studio.lock')}
         protected_pids.discard(0)
         if sys.platform == 'darwin':
@@ -254,6 +326,8 @@ class Agent(QObject):
             self.config['active_profile'] = target
             self.config['mapping_revision'] = self.config.get('mapping_revision', 0) + 1
             self.store.save()
+            if sys.platform == 'win32' and self.state:
+                self.apply_device_cloaking()
         resolved['profile'] = self.config['active_profile']
         self.application_profile = resolved
         if changed:
@@ -325,6 +399,8 @@ class Agent(QObject):
             self.config['mapping_enabled']=True
             self.store.save()
             self.enabled=True
+        if sys.platform == 'win32' and getattr(self, 'state', None):
+            self.apply_device_cloaking()
 
     def emergency_pause(self):
         """A keyboard escape always stops this agent and never toggles resume."""
@@ -375,8 +451,6 @@ class Agent(QObject):
             device_changed = identity(previous) != identity(self.state)
             if device_changed:
                 self.release();self.last_buttons=set()
-                if not self.state and hasattr(self.actions, 'disconnect_virtual_gamepad'):
-                    self.actions.disconnect_virtual_gamepad()
                 self.log('手柄已连接' if self.state else '手柄已断开')
                 # Legacy test/headless clients may provide buttons without an
                 # identity. Keep their explicitly selected profile untouched.
@@ -384,6 +458,11 @@ class Agent(QObject):
                     self.store.activate_controller(self.state);self.store.save()
                 if self.state:
                     self.apply_device_cloaking()
+                elif hasattr(self.actions, 'disconnect_virtual_gamepad'):
+                    if self._should_hold_virtual_gamepad():
+                        self._ensure_virtual_gamepad_slot_zero()
+                    else:
+                        self.actions.disconnect_virtual_gamepad()
                 self.apply_device_settings()
                 settings = device_config(self.config, self.state)
                 options = settings.get('profile_options', {}).get(settings['active_profile'], {})
@@ -472,6 +551,23 @@ class Agent(QObject):
                                             'profile': self.config['active_profile']}
             if not importing and not calibrating and not swapping:
                 self.update_application_profile(force=True)
+            from .studio_core import profile_has_gamepad_remap
+            if sys.platform == 'win32' and self.state:
+                self.apply_device_cloaking()
+            if (
+                sys.platform == 'win32'
+                and self.state
+                and device_config(self.config, self.state).get('device_cloaking_enabled', True)
+                and profile_has_gamepad_remap(self.config, self.state)
+            ):
+                if isinstance(getattr(self.device, 'lib', None), C.CDLL):
+                    self._ensure_virtual_gamepad_slot_zero()
+            elif (
+                sys.platform == 'win32'
+                and hasattr(self.actions, 'disconnect_virtual_gamepad')
+                and not self._should_hold_virtual_gamepad()
+            ):
+                self.actions.disconnect_virtual_gamepad()
             self.broadcast()
             result = {'config': copy.deepcopy(self.config)}
             if importing:
@@ -515,7 +611,7 @@ class Agent(QObject):
                 self._isolation_apply_pending = False
                 self.log(result['message']); self.broadcast()
                 return result
-            from .hidhide import HidHideClient, resolve_controller_vid_pid
+            from .hidhide import HidHideClient, record_hidhide_session, resolve_controller_vid_pid
             vendor, product = resolve_controller_vid_pid(self.state)
             if not self.state or not vendor or not product:
                 raise ValueError('请先连接支持设备隐身的手柄')
@@ -537,6 +633,7 @@ class Agent(QObject):
                             self._cloaked_devices.add(key)
                         else:
                             self._cloaked_devices.discard(key)
+                        record_hidhide_session(self._cloaked_devices, getattr(self, 'root', None))
                     self.log(msg)
             return {'applied': applied, 'message': msg, 'enabled': enabled}
         elif command=='set_gamebar_shield':
@@ -758,7 +855,7 @@ class Agent(QObject):
                 pass
         if sys.platform == 'win32':
             try:
-                from .hidhide import HidHideClient, resolve_controller_vid_pid
+                from .hidhide import HidHideClient, clear_hidhide_session, resolve_controller_vid_pid
                 client = HidHideClient()
                 if client.is_driver_installed():
                     for vendor, product, dev_path in list(getattr(self, '_cloaked_devices', set())):
@@ -772,6 +869,7 @@ class Agent(QObject):
                         client.uncloak_controller(vendor, product, **opts)
                     if not client.get_blacklist():
                         client.set_active(False)
+                clear_hidhide_session(getattr(self, 'root', None))
             except Exception as exc:
                 self.log(f'恢复手柄访问失败：{exc}')
         self.device.close()
@@ -804,6 +902,12 @@ def run(root):
     existing=request(root,'status',timeout=400)
     if existing and existing.get('ok'):
         return 0
+    if sys.platform == 'win32':
+        try:
+            from .hidhide import recover_orphan_hidhide_session
+            recover_orphan_hidhide_session(root)
+        except Exception:
+            pass
 
     # A second startup must never terminate the process that owns held keys.
     # QLockFile handles dead PIDs; a live but busy owner keeps its lock.

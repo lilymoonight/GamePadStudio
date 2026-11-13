@@ -70,6 +70,7 @@ hidden_imports = [
     'gamepadstudio.controller_schematic',
     'gamepadstudio.controller_service',
     'gamepadstudio.device',
+    'gamepadstudio.driver_setup',
     'gamepadstudio.entry',
     'gamepadstudio.glass',
     'gamepadstudio.haptic_engine',
@@ -163,8 +164,8 @@ if sys.platform == 'darwin':
         icon='gamepadstudio/assets/studio.icns',
         bundle_identifier='io.github.lilymoonight.GamePadStudio',
         info_plist={
-            'CFBundleShortVersionString': '2.2.0',
-            'CFBundleVersion': '2.2.0',
+            'CFBundleShortVersionString': '2.3.0',
+            'CFBundleVersion': '2.3.0',
             'NSHighResolutionCapable': True,
             'NSBluetoothAlwaysUsageDescription': '读取已连接的游戏手柄输入，并提供设备支持的反馈。',
         },

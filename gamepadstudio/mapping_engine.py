@@ -626,6 +626,7 @@ class MappingRuntime:
         self.mouse_thread = None
         self.config_signature = None
         self.unsupported_bindings = []
+        self.last_virtual_pad_error = ''
         from .virtual_xinput import compose_xusb_report
         self.virtual_xinput_state = compose_xusb_report()[1]
         if start_mouse:
@@ -1089,13 +1090,15 @@ class MappingRuntime:
             if should_sync:
                 try:
                     self.actions.sync_virtual_gamepad(buttons=combined, axes=axes_out)
-                except Exception:
-                    pass
+                    self.last_virtual_pad_error = ''
+                except Exception as exc:
+                    self.last_virtual_pad_error = str(exc)
             elif was_syncing:
                 try:
                     self.actions.sync_virtual_gamepad(buttons=(), axes=())
-                except Exception:
-                    pass
+                    self.last_virtual_pad_error = ''
+                except Exception as exc:
+                    self.last_virtual_pad_error = str(exc)
 
     def feedback(self):
         return {'preview': self.preview, 'inputs': sorted(self.inputs), 'active': list(self.engine.pressed),

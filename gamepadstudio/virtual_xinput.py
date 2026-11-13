@@ -10,12 +10,14 @@ Provides:
 """
 from __future__ import annotations
 
+from collections import deque
 import ctypes as C
 import os
 import socket
 import sys
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -511,7 +513,118 @@ _NOTIFICATION_CB_TYPE = C.CFUNCTYPE(
 )
 
 _VIRTUAL_HID_INSTANCES: set[str] = set()
+_PRE_VIRTUAL_X360_INSTANCES: set[str] = set()
 _ACTIVE_VIRTUAL_PADS: set[int] = set()
+_ACTIVE_VIRTUAL_XINPUT_SLOTS: dict[int, int] = {}
+_VIGEM_HID_PATH_CACHE: dict[str, bool] = {}
+_RETIRED_NOTIFICATION_CBS: deque[Any] = deque(maxlen=128)
+
+
+def active_virtual_xinput_slots() -> set[int]:
+    """Return the set of XInput user indices (0..3) currently owned by our VirtualXInputPad instances."""
+    return set(_ACTIVE_VIRTUAL_XINPUT_SLOTS.values())
+
+
+_PURE_VIRTUAL_VID_PIDS: set[tuple[int, int]] = {
+    (0x28DE, 0x11FF),  # Valve / Steam Virtual Gamepad
+    (0x1234, 0xBEAD),  # vJoy Virtual Joystick
+}
+_VIGEM_USB_KEYS: tuple[str, ...] = (
+    r'SYSTEM\CurrentControlSet\Enum\USB\VID_045E&PID_028E',
+    r'SYSTEM\CurrentControlSet\Enum\USB\VID_054C&PID_05C4',
+)
+
+
+def is_vigembus_virtual_hid_path(
+    path_or_instance: str = '',
+    vendor: int = 0,
+    product: int = 0,
+    name: str = '',
+) -> bool:
+    """Return True if a HID path or VID:PID belongs to a virtual controller (ViGEmBus / Steam / vJoy)."""
+    if (int(vendor or 0), int(product or 0)) in _PURE_VIRTUAL_VID_PIDS:
+        return True
+    lowered_name = str(name or '').lower()
+    if lowered_name and any(tok in lowered_name for tok in ('virtual gamepad', 'vigem', 'vjoy')):
+        return True
+    if not path_or_instance:
+        return False
+    norm = str(path_or_instance).upper().replace('#', '\\').removeprefix('\\\\?\\').split('\\{', 1)[0]
+    if any(vp in norm for vp in ('VID_28DE&PID_11FF', 'VID&28DE_PID&11FF', 'VID_1234&PID_BEAD', 'VID&1234_PID&BEAD')):
+        return True
+    is_x360 = any(vp in norm for vp in ('VID_045E&PID_028E', 'VID&045E_PID&028E', 'VID&02045E_PID&028E'))
+    is_ds4 = any(vp in norm for vp in ('VID_054C&PID_05C4', 'VID&054C_PID&05C4', 'VID&02054C_PID&05C4'))
+    if not is_x360 and not is_ds4:
+        return False
+    if norm in _VIRTUAL_HID_INSTANCES:
+        return True
+    if is_x360 and _ACTIVE_VIRTUAL_PADS and norm not in _PRE_VIRTUAL_X360_INSTANCES:
+        _VIRTUAL_HID_INSTANCES.add(norm)
+        return True
+    if norm in _VIGEM_HID_PATH_CACHE:
+        return _VIGEM_HID_PATH_CACHE[norm]
+    if sys.platform == 'win32' and norm.startswith('USB\\'):
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, f'SYSTEM\\CurrentControlSet\\Enum\\{norm}') as usb_key:
+                meta_parts = []
+                for field in ('LocationInformation', 'FriendlyName', 'DeviceDesc', 'Service'):
+                    try:
+                        meta_parts.append(str(winreg.QueryValueEx(usb_key, field)[0] or '').lower())
+                    except OSError:
+                        pass
+                meta = ' '.join(meta_parts)
+                if any(tok in meta for tok in ('virtual gamepad', 'vigem', 'nefarius')):
+                    _VIGEM_HID_PATH_CACHE[norm] = True
+                    if _ACTIVE_VIRTUAL_PADS:
+                        _VIRTUAL_HID_INSTANCES.add(norm)
+                    return True
+                _VIGEM_HID_PATH_CACHE[norm] = False
+                return False
+        except Exception:
+            pass
+    if sys.platform == 'win32' and norm.startswith('HID\\'):
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, f'SYSTEM\\CurrentControlSet\\Enum\\{norm}') as hid_key:
+                container_id = str(winreg.QueryValueEx(hid_key, 'ContainerID')[0] or '').strip().lower()
+            if container_id:
+                usb_roots = (_VIGEM_USB_KEYS[0],) if is_x360 else (_VIGEM_USB_KEYS[1],)
+                for usb_path in usb_roots:
+                    try:
+                        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, usb_path) as usb_root:
+                            n_sub = winreg.QueryInfoKey(usb_root)[0]
+                            for idx in range(n_sub):
+                                sub_name = winreg.EnumKey(usb_root, idx)
+                                with winreg.OpenKey(usb_root, sub_name) as sub_key:
+                                    try:
+                                        sub_cid = str(winreg.QueryValueEx(sub_key, 'ContainerID')[0] or '').strip().lower()
+                                    except OSError:
+                                        continue
+                                    if sub_cid != container_id:
+                                        continue
+                                    meta_parts = []
+                                    for field in ('LocationInformation', 'FriendlyName', 'DeviceDesc', 'Service'):
+                                        try:
+                                            meta_parts.append(str(winreg.QueryValueEx(sub_key, field)[0] or '').lower())
+                                        except OSError:
+                                            pass
+                                    meta = ' '.join(meta_parts)
+                                    if any(tok in meta for tok in ('virtual gamepad', 'vigem', 'nefarius')):
+                                        _VIGEM_HID_PATH_CACHE[norm] = True
+                                        if _ACTIVE_VIRTUAL_PADS:
+                                            _VIRTUAL_HID_INSTANCES.add(norm)
+                                        return True
+                                    _VIGEM_HID_PATH_CACHE[norm] = False
+                                    return False
+                    except OSError:
+                        continue
+        except Exception:
+            pass
+    return False
+
+
+is_virtual_controller_device = is_vigembus_virtual_hid_path
 
 
 class VirtualXInputPad:
@@ -531,12 +644,17 @@ class VirtualXInputPad:
         self._client = None
         self._target = None
         self._connected = False
+        self._user_index: Optional[int] = None
         self._last_share_down = False
         self._rumble_callback: Optional[Callable[[float, float], None]] = None
         self._frame_callbacks: list[Callable[[dict[str, Any], dict[str, Any]], None]] = []
         self._c_notification_cb = None
         self.last_report: dict[str, Any] = compose_xusb_report()[1]
         self.last_hid_report: dict[str, Any] = compose_hid_gamepad_report()[1]
+
+    @property
+    def user_index(self) -> Optional[int]:
+        return self._user_index
 
     def _load_library(self) -> Any:
         if self._lib is not None:
@@ -569,6 +687,9 @@ class VirtualXInputPad:
                     C.c_void_p, C.c_void_p, _NOTIFICATION_CB_TYPE, C.c_void_p
                 ]
                 lib.vigem_target_x360_register_notification.restype = C.c_uint32
+            if hasattr(lib, 'vigem_target_x360_unregister_notification'):
+                lib.vigem_target_x360_unregister_notification.argtypes = [C.c_void_p]
+                lib.vigem_target_x360_unregister_notification.restype = None
             self._lib = lib
             return lib
         except Exception:
@@ -599,7 +720,14 @@ class VirtualXInputPad:
                 if sys.platform == 'win32':
                     try:
                         from .hidhide import find_hid_instances
-                        before_instances = {p.upper() for p in find_hid_instances(0x045E, 0x028E, include_virtual=True)}
+                        before_instances = {
+                            p.upper()
+                            for p in find_hid_instances(0x045E, 0x028E, include_virtual=True)
+                            if not is_vigembus_virtual_hid_path(p)
+                        }
+                        if not _ACTIVE_VIRTUAL_PADS:
+                            _PRE_VIRTUAL_X360_INSTANCES.clear()
+                            _PRE_VIRTUAL_X360_INSTANCES.update(before_instances)
                     except Exception:
                         before_instances = set()
                 client = lib.vigem_alloc()
@@ -631,8 +759,7 @@ class VirtualXInputPad:
                         _VIRTUAL_HID_INSTANCES.update(after_instances - before_instances)
                     except Exception:
                         pass
-                if self._rumble_callback is not None:
-                    self._bind_notification()
+                self._bind_notification()
                 return True
             except Exception:
                 self._connected = False
@@ -641,9 +768,24 @@ class VirtualXInputPad:
     def _bind_notification(self) -> bool:
         if not self.is_connected or not hasattr(self._lib, 'vigem_target_x360_register_notification'):
             return False
+        if self._c_notification_cb is not None:
+            return True
+
+        self_ref = weakref.ref(self)
+        pad_id = id(self)
 
         def _on_notify(_client, _target, large_motor, small_motor, _led, _userdata):
-            cb = self._rumble_callback
+            pad = self_ref()
+            if pad is None or not pad._connected:
+                return
+            try:
+                led_val = int(_led)
+                if 0 <= led_val <= 3:
+                    pad._user_index = led_val
+                    _ACTIVE_VIRTUAL_XINPUT_SLOTS[pad_id] = led_val
+            except Exception:
+                pass
+            cb = pad._rumble_callback
             if callable(cb):
                 try:
                     cb(float(large_motor) / 255.0, float(small_motor) / 255.0)
@@ -651,13 +793,26 @@ class VirtualXInputPad:
                     pass
 
         try:
-            self._c_notification_cb = _NOTIFICATION_CB_TYPE(_on_notify)
+            cb_ref = _NOTIFICATION_CB_TYPE(_on_notify)
             res = self._lib.vigem_target_x360_register_notification(
-                self._client, self._target, self._c_notification_cb, None
+                self._client, self._target, cb_ref, None
             )
-            return res == VIGEM_ERROR_NONE
+            if res == VIGEM_ERROR_NONE:
+                self._c_notification_cb = cb_ref
+                return True
+            return False
         except Exception:
             return False
+
+    def reclaim_slot_zero(self) -> bool:
+        """Reconnect if currently assigned to XInput Slot 1..3 so ViGEmBus can claim free Slot 0."""
+        with self._lock:
+            if not self.is_connected:
+                return self.connect()
+            if self._user_index in (None, 0):
+                return True
+            self.close()
+            return self.connect()
 
     def register_rumble_callback(self, callback: Optional[Callable[[float, float], None]]) -> bool:
         """Register a callback `callback(large_motor_0_to_1, small_motor_0_to_1)` for in-game rumble pass-through."""
@@ -756,9 +911,21 @@ class VirtualXInputPad:
                     pass
                 self._sock = None
             _ACTIVE_VIRTUAL_PADS.discard(id(self))
+            _ACTIVE_VIRTUAL_XINPUT_SLOTS.pop(id(self), None)
             if not _ACTIVE_VIRTUAL_PADS:
                 _VIRTUAL_HID_INSTANCES.clear()
+                _PRE_VIRTUAL_X360_INSTANCES.clear()
             self._target = None
             self._client = None
             self._connected = False
-            self._c_notification_cb = None
+            self._user_index = None
+            if self._c_notification_cb is not None:
+                _RETIRED_NOTIFICATION_CBS.append(self._c_notification_cb)
+                self._c_notification_cb = None
+
+    def __del__(self) -> None:
+        try:
+            if getattr(self, '_connected', False):
+                self.close()
+        except Exception:
+            pass

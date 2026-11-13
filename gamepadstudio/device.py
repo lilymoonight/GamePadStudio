@@ -3,6 +3,7 @@ import ctypes as C
 import os
 import hashlib
 import sys
+import time
 import uuid
 import threading
 from contextlib import nullcontext
@@ -56,6 +57,85 @@ class AxisBind(C.Structure):
 SDL_SENSOR_GYRO = 2
 
 
+class _XInputGamepadStruct(C.Structure):
+    _fields_ = [
+        ('wButtons', C.c_ushort),
+        ('bLeftTrigger', C.c_ubyte),
+        ('bRightTrigger', C.c_ubyte),
+        ('sThumbLX', C.c_short),
+        ('sThumbLY', C.c_short),
+        ('sThumbRX', C.c_short),
+        ('sThumbRY', C.c_short),
+    ]
+
+
+class _XInputStateExStruct(C.Structure):
+    _fields_ = [
+        ('dwPacketNumber', C.c_uint32),
+        ('Gamepad', _XInputGamepadStruct),
+        ('_reserved', C.c_uint32),
+    ]
+
+
+_XINPUT_MASK_TO_SLOT: tuple[tuple[int, int], ...] = (
+    (0x1000, 0),   # A
+    (0x2000, 1),   # B
+    (0x4000, 2),   # X
+    (0x8000, 3),   # Y
+    (0x0020, 4),   # Back / View
+    (0x0400, 5),   # Guide / Xbox
+    (0x0010, 6),   # Start / Menu
+    (0x0040, 7),   # L3
+    (0x0080, 8),   # R3
+    (0x0100, 9),   # LB
+    (0x0200, 10),  # RB
+    (0x0001, 11),  # D-Pad Up
+    (0x0002, 12),  # D-Pad Down
+    (0x0004, 13),  # D-Pad Left
+    (0x0008, 14),  # D-Pad Right
+)
+
+_XINPUT_GET_STATE_FN = None
+_XINPUT_INIT_DONE = False
+
+
+def _get_xinput_state_fn():
+    """Return ordinal 100 (`XInputGetStateEx`) or `XInputGetState` from system XInput DLL on Windows."""
+    global _XINPUT_GET_STATE_FN, _XINPUT_INIT_DONE
+    if _XINPUT_INIT_DONE:
+        return _XINPUT_GET_STATE_FN
+    _XINPUT_INIT_DONE = True
+    if sys.platform != 'win32':
+        return None
+    for dll_name in ('xinput1_4.dll', 'xinput1_3.dll', 'xinput9_1_0.dll'):
+        try:
+            dll = C.WinDLL(dll_name)
+        except OSError:
+            continue
+        fn = None
+        if dll_name in ('xinput1_4.dll', 'xinput1_3.dll'):
+            try:
+                fn = dll[100]  # XInputGetStateEx (includes Guide button 0x0400)
+            except Exception:
+                fn = None
+        if fn is None:
+            fn = getattr(dll, 'XInputGetState', None)
+        if fn is not None:
+            fn.argtypes = [C.c_uint32, C.POINTER(_XInputStateExStruct)]
+            fn.restype = C.c_uint32
+            _XINPUT_GET_STATE_FN = fn
+            return fn
+    return None
+
+
+def _norm_xinput_thumb(raw: int, invert: bool = False) -> float:
+    ival = int(raw)
+    scaled = (ival / 32768.0) if ival < 0 else (ival / 32767.0)
+    if invert:
+        scaled = -scaled
+    return max(-1.0, min(1.0, scaled))
+
+
 
 def input_backend_for_guid(guid):
     """SDL records the backend and XInput subtype in the final GUID bytes."""
@@ -85,6 +165,10 @@ class Device:
         self.instance_id = None
         self.available = []
         self.metadata = {}
+        self._matched_xinput_slot = None
+        self._uipi_cache_until = 0.0
+        self._uipi_cached_blocked = False
+        self._self_elevated = None
         self._touch_contacts = {}
         self._touch_contact_serial = 0
         self.set_response_curves({})
@@ -199,7 +283,7 @@ class Device:
             pass
         self.lib.SDL_PumpEvents()
         from .device_quirks import detect_input_protocol, identify_controller_hardware, is_generic_controller_name
-        from .virtual_xinput import _VIRTUAL_HID_INSTANCES
+        from .virtual_xinput import _VIRTUAL_HID_INSTANCES, is_vigembus_virtual_hid_path
         rows=[]
         for i in range(self.lib.SDL_NumJoysticks()):
             instance=self.lib.SDL_JoystickGetDeviceInstanceID(i)
@@ -214,6 +298,8 @@ class Device:
             path_api=getattr(self.lib, 'SDL_JoystickPathForIndex', None)
             path=path_api(i) if path_api else None
             path_str=path.decode('utf-8', 'replace') if path else ''
+            if is_vigembus_virtual_hid_path(path_str, vendor=vendor, product=product, name=joy_name):
+                continue
             if path_str and _VIRTUAL_HID_INSTANCES:
                 norm_path = path_str.upper().replace('#', '\\').removeprefix('\\\\?\\').split('\\{', 1)[0]
                 if norm_path in _VIRTUAL_HID_INSTANCES:
@@ -508,6 +594,8 @@ class Device:
                                 pressed_buttons.append(i)
             except Exception:
                 pass
+        sdl_axes = [self.lib.SDL_GameControllerGetAxis(h, i) / 32768 for i in range(6)]
+        pressed_buttons, sdl_axes = self._apply_windows_xinput_uipi_fallback(pressed_buttons, sdl_axes)
         gc_name = (self.lib.SDL_GameControllerName(h) or b'Controller').decode('utf-8', 'replace')
         display_name = self.metadata.get('name') or gc_name
         vendor_val = self.metadata.get('vendor') or self.lib.SDL_GameControllerGetVendor(h)
@@ -518,13 +606,170 @@ class Device:
             pressed_buttons = [19 if b == 16 else (16 if b == 19 else b) for b in pressed_buttons]
         return {**self.metadata,'name': display_name,
                 'buttons': pressed_buttons,
-                'axes': [self.lib.SDL_GameControllerGetAxis(h, i) / 32768 for i in range(6)],
+                'axes': sdl_axes,
                 'power': self.lib.SDL_JoystickCurrentPowerLevel(self.lib.SDL_GameControllerGetJoystick(h)),
                 'vendor': vendor_val, 'product': product_val,
                 'led': bool(self.lib.SDL_GameControllerHasLED(h)), 'rumble': bool(self.lib.SDL_GameControllerHasRumble(h)),
                 'touch': fingers, 'touch_fingers': touch_fingers, 'touch_read_error': touch_error,
                 'touch_valid': not touch_error,
                 'gyro': gyro_data}
+
+    def _is_xinput_capable_controller(self) -> bool:
+        meta = self.metadata or {}
+        if meta.get('family') == 'xbox':
+            return True
+        if meta.get('input_backend') == 'xinput' or meta.get('input_protocol') == 'xinput':
+            return True
+        dev_path = str(meta.get('device_path') or '').lower()
+        if '&ig_' in dev_path:
+            return True
+        name = str(meta.get('name') or '').lower()
+        if ('xinput' in name or 'xbox' in name) and str(meta.get('profile_key') or '').endswith('7200'):
+            return True
+        return False
+
+    def _is_uipi_blocking_rawinput(self) -> bool:
+        """Return True when this non-elevated Windows process loses background WM_INPUT to an elevated foreground app."""
+        if sys.platform != 'win32':
+            return False
+        now = time.monotonic()
+        if now < getattr(self, '_uipi_cache_until', 0.0):
+            return bool(getattr(self, '_uipi_cached_blocked', False))
+        self._uipi_cache_until = now + 0.2
+        try:
+            from .application_profiles import is_process_elevated
+            if getattr(self, '_self_elevated', None) is None:
+                self._self_elevated = bool(is_process_elevated(None))
+            if self._self_elevated:
+                self._uipi_cached_blocked = False
+                return False
+            from ctypes import wintypes as _W
+            user32 = getattr(self, '_uipi_user32', None)
+            if user32 is None:
+                user32 = C.WinDLL('user32', use_last_error=True)
+                user32.GetForegroundWindow.argtypes = []
+                user32.GetForegroundWindow.restype = _W.HWND
+                user32.GetWindowThreadProcessId.argtypes = [_W.HWND, C.POINTER(_W.DWORD)]
+                user32.GetWindowThreadProcessId.restype = _W.DWORD
+                self._uipi_user32 = user32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                self._uipi_cached_blocked = False
+                return False
+            fg_pid = _W.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, C.byref(fg_pid))
+            pid_val = int(fg_pid.value)
+            if pid_val <= 0 or pid_val == os.getpid():
+                self._uipi_cached_blocked = False
+                return False
+            if is_process_elevated(pid_val):
+                self._uipi_cached_blocked = True
+                return True
+            # Anti-cheat protected games (ACE / EAC / BattlEye) run elevated and strip
+            # PROCESS_QUERY_LIMITED_INFORMATION handles from medium-integrity processes.
+            kernel32 = getattr(self, '_uipi_kernel32', None)
+            if kernel32 is None:
+                kernel32 = C.WinDLL('kernel32', use_last_error=True)
+                kernel32.OpenProcess.argtypes = [_W.DWORD, _W.BOOL, _W.DWORD]
+                kernel32.OpenProcess.restype = _W.HANDLE
+                kernel32.CloseHandle.argtypes = [_W.HANDLE]
+                kernel32.CloseHandle.restype = _W.BOOL
+                self._uipi_kernel32 = kernel32
+            hproc = kernel32.OpenProcess(0x1000, False, pid_val)
+            if not hproc:
+                if C.get_last_error() == 5:  # ERROR_ACCESS_DENIED
+                    self._uipi_cached_blocked = True
+                    return True
+            else:
+                kernel32.CloseHandle(hproc)
+        except Exception:
+            pass
+        self._uipi_cached_blocked = False
+        return False
+
+    def _read_xinput_kernel_fallback(self, sdl_buttons=(), xinput_fn=None, virtual_slots=None):
+        """Read physical XInput controller state directly via kernel XUSB IOCTL (immune to Windows UIPI WM_INPUT block)."""
+        fn = xinput_fn if xinput_fn is not None else _get_xinput_state_fn()
+        if fn is None:
+            return None
+        if virtual_slots is None:
+            from .virtual_xinput import active_virtual_xinput_slots
+            virtual_slots = active_virtual_xinput_slots()
+        else:
+            virtual_slots = set(virtual_slots)
+
+        candidates = []
+        state = _XInputStateExStruct()
+        for slot in range(4):
+            if slot in virtual_slots:
+                continue
+            C.memset(C.byref(state), 0, C.sizeof(state))
+            rc = fn(slot, C.byref(state))
+            if rc != 0:
+                continue
+            gp = state.Gamepad
+            btns = [canon for mask, canon in _XINPUT_MASK_TO_SLOT if (gp.wButtons & mask)]
+            axes = [
+                _norm_xinput_thumb(gp.sThumbLX, invert=False),
+                _norm_xinput_thumb(gp.sThumbLY, invert=True),
+                _norm_xinput_thumb(gp.sThumbRX, invert=False),
+                _norm_xinput_thumb(gp.sThumbRY, invert=True),
+                max(0.0, min(1.0, gp.bLeftTrigger / 255.0)),
+                max(0.0, min(1.0, gp.bRightTrigger / 255.0)),
+            ]
+            candidates.append((slot, btns, axes))
+
+        if not candidates:
+            return None
+
+        sdl_face_set = {b for b in (sdl_buttons or ()) if 0 <= int(b) <= 14}
+        if sdl_face_set:
+            for slot, btns, axes in candidates:
+                if set(btns) == sdl_face_set:
+                    self._matched_xinput_slot = slot
+                    return btns, axes
+
+        matched = getattr(self, '_matched_xinput_slot', None)
+        if matched is not None:
+            for slot, btns, axes in candidates:
+                if slot == matched:
+                    return btns, axes
+
+        if len(candidates) == 1:
+            self._matched_xinput_slot = candidates[0][0]
+            return candidates[0][1], candidates[0][2]
+
+        # Multiple physical XInput controllers connected and not yet disambiguated:
+        # prefer one currently showing active input, else the first slot.
+        for slot, btns, axes in candidates:
+            if btns or any(abs(a) > 0.25 for a in axes):
+                return btns, axes
+        return candidates[0][1], candidates[0][2]
+
+    def _apply_windows_xinput_uipi_fallback(self, pressed_buttons, sdl_axes):
+        if sys.platform != 'win32' or not isinstance(getattr(self, 'lib', None), C.CDLL):
+            return pressed_buttons, sdl_axes
+        if not self._is_xinput_capable_controller():
+            return pressed_buttons, sdl_axes
+        uipi_blocked = self._is_uipi_blocking_rawinput()
+        if not uipi_blocked and pressed_buttons:
+            # While SDL RAWINPUT is working normally, allow slot disambiguation if >1 physical pad exists.
+            if getattr(self, '_matched_xinput_slot', None) is None:
+                self._read_xinput_kernel_fallback(sdl_buttons=pressed_buttons)
+            return pressed_buttons, sdl_axes
+        fallback = self._read_xinput_kernel_fallback(sdl_buttons=pressed_buttons)
+        if fallback is None:
+            return pressed_buttons, sdl_axes
+        x_buttons, x_axes = fallback
+        if uipi_blocked:
+            extra_buttons = [b for b in pressed_buttons if int(b) >= 15]
+            return sorted(set(x_buttons) | set(extra_buttons)), x_axes
+        # Even if foreground elevation wasn't detected (e.g. transient HWND=0), rescue input if SDL is silent while XInput is active.
+        sdl_silent = (not pressed_buttons) and all(abs(a) < 0.08 for a in sdl_axes[:6])
+        xinput_active = bool(x_buttons) or any(abs(a) > 0.20 for a in x_axes[:4]) or any(a > 0.12 for a in x_axes[4:6])
+        if sdl_silent and xinput_active:
+            return list(x_buttons), x_axes
+        return pressed_buttons, sdl_axes
 
     def _new_touch_contact(self, slot):
         self._touch_contact_serial = getattr(self, '_touch_contact_serial', 0) + 1
@@ -691,6 +936,7 @@ class Device:
         if isolation is not None:
             isolation.forget_closed_handle()
         self.instance_id=None;self.metadata={};self.is_raw_joystick=False
+        self._matched_xinput_slot = None
         self._touch_contacts = {}
         self.set_response_curves({})
 
