@@ -97,7 +97,7 @@ def find_steam_whitelist_conflicts(whitelist: List[str]) -> List[str]:
     conflicts: List[str] = []
     steam_basenames = {'steam.exe', 'steamwebhelper.exe', 'gameoverlayui.exe'}
     for item in whitelist or ():
-        base = os.path.basename(str(item).replace('/', '\\')).lower()
+        base = str(item).replace('\\', '/').rsplit('/', 1)[-1].lower()
         if base in steam_basenames:
             conflicts.append(item)
     return conflicts
@@ -210,8 +210,8 @@ def download_and_launch_driver_installer(
             except OSError:
                 pass
 
-    launch_fn = opener or os.startfile
-    if downloaded and dest_path.is_file():
+    launch_fn = opener or getattr(os, 'startfile', None)
+    if downloaded and dest_path.is_file() and launch_fn is not None:
         try:
             launch_fn(str(dest_path))
             label = 'ViGEmBus 虚拟手柄驱动' if kind == 'vigembus' else 'HidHide 原始输入屏蔽驱动'

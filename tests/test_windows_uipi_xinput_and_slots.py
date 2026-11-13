@@ -244,7 +244,7 @@ def test_end_to_end_ab_swap_under_uipi_elevated_game_block(tmp_path):
             vpad.reset()
 
     dev = Device.__new__(Device)
-    dev.lib = C.CDLL('kernel32') if sys.platform == 'win32' else SimpleNamespace()
+    dev.lib = C.CDLL('kernel32') if sys.platform == 'win32' else C.CDLL(None)
     dev.metadata = dict(xbox_state)
     dev._matched_xinput_slot = None
 
@@ -415,6 +415,7 @@ def test_hidhide_includes_usb_xnacomposite_and_excludes_usbccgp_and_vigembus(mon
 
     _VIGEM_HID_PATH_CACHE.clear()
     monkeypatch.setattr('gamepadstudio.hidhide.sys', SimpleNamespace(platform='win32'))
+    monkeypatch.setattr('gamepadstudio.virtual_xinput.sys', SimpleNamespace(platform='win32'))
     monkeypatch.setattr('gamepadstudio.hidhide.winreg', _FakeWinReg)
     monkeypatch.setattr('gamepadstudio.hidhide._get_present_hid_instance_ids', lambda: set())
     monkeypatch.setitem(sys.modules, 'winreg', _FakeWinReg)
